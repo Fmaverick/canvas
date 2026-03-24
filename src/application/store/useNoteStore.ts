@@ -13,12 +13,16 @@ interface NoteState {
   deleteNote: (id: string) => Promise<void>;
 }
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unknown error";
+}
+
 // In a real application, you might use a DI container here
 // For now, we instantiate the default Dexie repository.
 // You can easily change this to `new ApiNoteRepository()` in the future.
 const noteRepository: INoteRepository = new DexieNoteRepository();
 
-export const useNoteStore = create<NoteState>((set, get) => ({
+export const useNoteStore = create<NoteState>((set) => ({
   notes: [],
   isLoading: false,
   error: null,
@@ -28,8 +32,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     try {
       const notes = await noteRepository.getAll();
       set({ notes, isLoading: false });
-    } catch (err: any) {
-      set({ error: err.message, isLoading: false });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error), isLoading: false });
     }
   },
 
@@ -38,8 +42,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     try {
       const newNote = await noteRepository.create(note);
       set((state) => ({ notes: [...state.notes, newNote], isLoading: false }));
-    } catch (err: any) {
-      set({ error: err.message, isLoading: false });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error), isLoading: false });
     }
   },
 
@@ -51,8 +55,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         notes: state.notes.map((n) => (n.id === id ? updatedNote : n)),
         isLoading: false,
       }));
-    } catch (err: any) {
-      set({ error: err.message, isLoading: false });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error), isLoading: false });
     }
   },
 
@@ -64,8 +68,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         notes: state.notes.filter((n) => n.id !== id),
         isLoading: false,
       }));
-    } catch (err: any) {
-      set({ error: err.message, isLoading: false });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error), isLoading: false });
     }
   },
 }));
