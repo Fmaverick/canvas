@@ -1,5 +1,129 @@
-<!-- BEGIN:nextjs-agent-rules -->
-# This is NOT the Next.js you know
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- END:nextjs-agent-rules -->
+# 开发阅读指引
+
+## 目标
+
+在对当前项目进行分析、设计、编码或重构之前，必须先阅读 `docs` 目录中的核心文档，并以这些文档作为实现依据。
+
+## 阅读原则
+
+- 先读文档，再动代码
+- 文档优先级高于当前初始化代码
+- 当前项目允许破坏性改造，不需要兼容旧的本地存储实现
+- 若文档之间有冲突，以更具体、更贴近开发落地的文档为准
+- 若文档仍有空白，应在不违背现有文档的前提下做最合理推断
+
+## 必读顺序
+
+### 第一层：产品与范围
+
+先阅读：
+
+1. `docs/ai-content-platform-prd.md`
+
+目的：
+
+- 理解产品目标
+- 理解团队空间、个人账号、Admin 后台
+- 理解产品库、模特库、画布、任务中心
+- 理解文本、图片、视频、音频节点
+- 理解并发控制、适配器、异步任务轮询
+
+### 第二层：开发主设计
+
+然后阅读：
+
+1. `docs/technical-architecture.md`
+2. `docs/backend-module-design.md`
+3. `docs/canvas-node-spec.md`
+
+目的：
+
+- 理解整体技术架构
+- 理解后端模块职责边界
+- 理解画布节点协议、复制规则、模板规则
+- 理解 AI 网关、队列、轮询、限流的设计方式
+
+### 第三层：落地约束
+
+然后阅读：
+
+1. `docs/database-design.md`
+2. `docs/api-design.md`
+3. `docs/environment-config.md`
+4. `docs/development-plan.md`
+
+目的：
+
+- 理解数据库表结构与关系
+- 理解 API 契约
+- 理解环境变量和运行配置
+- 理解推荐开发顺序
+
+## 关键实现约束
+
+- 数据库 ORM 不使用 Prisma
+- 推荐使用 Drizzle ORM + drizzle-kit
+- 正式业务数据不再以 Dexie 作为主存储
+- Dexie 最多只作为临时缓存、草稿缓存，或者后续被移除
+- 所有业务数据默认绑定 `workspace_id`
+- Admin 密码来自环境变量，不入库
+- LLM 统一使用 OpenAI
+- OpenAI 全局并发上限为 50
+- 图片、视频、音频模型必须通过统一适配器层接入
+- 视频任务与异步音频任务需要统一任务系统和轮询机制
+
+## 画布相关强约束
+
+- 画布支持文本、图片、视频、音频节点
+- 节点状态与任务状态分离
+- 节点允许复制
+- 节点复制默认只复制节点本体，不自动复制边
+- 节点支持模板化
+- 节点模板支持个人模板、空间模板、系统模板
+- 节点之间禁止形成环
+- 节点运行依赖 `docs/canvas-node-spec.md` 的协议定义
+
+## 开发时的决策优先级
+
+遇到设计选择时，按以下顺序决策：
+
+1. `docs/canvas-node-spec.md`
+2. `docs/database-design.md`
+3. `docs/api-design.md`
+4. `docs/backend-module-design.md`
+5. `docs/technical-architecture.md`
+6. `docs/ai-content-platform-prd.md`
+
+说明：
+
+- 节点结构问题优先看节点协议
+- 存储问题优先看数据库设计
+- 接口问题优先看 API 文档
+- 模块职责问题优先看后端模块设计
+
+## 开始编码前的最小检查
+
+在开始任何中大型改动前，至少确认以下内容：
+
+- 当前要改的模块在 `docs` 中是否已有定义
+- 使用的数据结构是否和 `database-design.md` 一致
+- 使用的接口是否和 `api-design.md` 一致
+- 节点相关逻辑是否和 `canvas-node-spec.md` 一致
+- 是否误用了 Prisma
+- 是否误把 Dexie 当成主业务数据库
+
+## 如果需要扩展文档
+
+当实现过程中发现文档缺口时，应优先补文档，再推进实现，尤其是以下情况：
+
+- 新增节点类型
+- 修改节点协议
+- 修改数据库实体
+- 修改 API 契约
+- 修改任务状态机
+- 修改并发或轮询策略
+
+## 一句话工作方式
+
+先按 `docs` 统一理解系统，再按文档约束实现，不要从当前初始化代码反推系统设计。
