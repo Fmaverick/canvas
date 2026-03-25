@@ -49,7 +49,7 @@ export function TextNodePanel({
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{selectedNode.title}</p>
-            <p className="text-xs text-muted-foreground">这里是给 AI 的输入区，生成结果会填进文本节点内容。</p>
+            <p className="text-xs text-muted-foreground">这里是给 AI 的输入区，上游文本连线会自动拼进当前节点 prompt。</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button size="sm" type="button" variant="outline" onClick={onOpenExpandedEditor}>
@@ -151,7 +151,7 @@ export function ImageNodePanel({
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{selectedNode.title}</p>
-              <p className="text-xs text-muted-foreground">这里是给 AI 的输入区，可直接出图，也可结合参考图重绘。</p>
+              <p className="text-xs text-muted-foreground">上游文本连线会进入 prompt，上游图片连线会自动作为参考图。</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <Button
@@ -329,10 +329,10 @@ export function VideoNodePanel({
               <p className="truncate text-sm font-medium">{selectedNode.title}</p>
               <p className="text-xs text-muted-foreground">
                 {isFirstLastVideoMode
-                  ? "当前为首尾帧模式，仅展示首帧与末帧输入。"
+                  ? "当前为首尾帧模式；上游文本会进入 prompt，上游图片会补充为参考图。"
                   : isMultiShotVideoMode
-                    ? "当前为多镜头模式，仅展示镜头脚本输入。"
-                    : "当前为参考生成模式，仅展示参考图输入。"}
+                    ? "当前为多镜头模式；上游文本会进入 prompt，上游图片会补充为参考图。"
+                    : "当前为参考生成模式；上游文本会进入 prompt，上游图片会补充为参考图。"}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">

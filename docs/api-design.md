@@ -113,69 +113,83 @@
 
 - `DELETE /api/workspaces/:workspaceId/members/:memberId`
 
-## 6. 产品库接口
+## 6. 主体库 / 场景库接口
 
-### 6.1 获取产品列表
+### 6.1 获取资源列表
 
-- `GET /api/products`
+- `GET /api/library-items`
 
 查询参数：
 
+- `kind` = `subject` / `scene`
 - `keyword`
 - `tag`
 - `page`
 - `page_size`
 
-### 6.2 获取产品详情
+### 6.2 获取资源详情
 
-- `GET /api/products/:id`
+- `GET /api/library-items/:id`
 
-### 6.3 创建产品
+### 6.3 创建资源
 
-- `POST /api/products`
+- `POST /api/library-items`
 
 请求体示例：
 
 ```json
 {
-  "name": "夏季连衣裙",
-  "sku": "SKU-001",
-  "description": "轻薄面料，适合夏季拍摄",
-  "category": "服饰",
-  "tags": ["夏季", "女装"],
-  "brand_tone": "轻盈自然"
+  "kind": "subject",
+  "entity_type": "product",
+  "name": "夏季连衣裙主体",
+  "description": "轻薄面料，适合棚拍和电商主图",
+  "prompt_hints": "soft daylight, premium fabric, clean composition",
+  "tags": ["夏季", "女装", "电商"]
 }
 ```
 
-### 6.4 更新产品
+### 6.4 更新资源
 
-- `PATCH /api/products/:id`
+- `PATCH /api/library-items/:id`
 
-### 6.5 删除产品
+### 6.5 删除资源
 
-- `DELETE /api/products/:id`
+- `DELETE /api/library-items/:id`
 
-## 7. 模特库接口
+## 7. 指令库接口
 
-### 7.1 获取模特列表
+### 7.1 获取指令列表
 
-- `GET /api/model-profiles`
+- `GET /api/instruction-presets`
 
-### 7.2 获取模特详情
+### 7.2 获取指令详情
 
-- `GET /api/model-profiles/:id`
+- `GET /api/instruction-presets/:id`
 
-### 7.3 创建模特
+### 7.3 创建指令
 
-- `POST /api/model-profiles`
+- `POST /api/instruction-presets`
 
-### 7.4 更新模特
+请求体示例：
 
-- `PATCH /api/model-profiles/:id`
+```json
+{
+  "scope": "workspace",
+  "name": "商品棚拍主视觉",
+  "description": "适合商品文生图与图生图的主视觉 Prompt",
+  "prompt_template": "premium product photography, studio lighting, clean background",
+  "negative_prompt": "blurry, deformed, extra fingers",
+  "tags": ["文生图", "棚拍", "商业摄影"]
+}
+```
 
-### 7.5 删除模特
+### 7.4 更新指令
 
-- `DELETE /api/model-profiles/:id`
+- `PATCH /api/instruction-presets/:id`
+
+### 7.5 删除指令
+
+- `DELETE /api/instruction-presets/:id`
 
 ## 8. 画布接口
 
@@ -225,8 +239,9 @@
     "voice_style": "female_warm"
   },
   "resource_refs": {
-    "product_ids": ["prod_1"],
-    "model_profile_ids": []
+    "subject_ids": ["subject_1"],
+    "scene_ids": ["scene_1"],
+    "instruction_preset_ids": ["instruction_1"]
   },
   "position_x": 320,
   "position_y": 180
@@ -319,8 +334,9 @@
     "voice_style": "female_warm"
   },
   "resource_refs": {
-    "product_ids": [],
-    "model_profile_ids": [],
+    "subject_ids": [],
+    "scene_ids": [],
+    "instruction_preset_ids": [],
     "asset_ids": []
   },
   "tags": ["口播", "商品"]

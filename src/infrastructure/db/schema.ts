@@ -127,6 +127,58 @@ export const modelProfiles = pgTable(
   (table) => [index("model_profiles_workspace_status_idx").on(table.workspaceId, table.status)],
 );
 
+export const libraryItems = pgTable(
+  "library_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    kind: varchar("kind", { length: 20 }).notNull(),
+    entityType: varchar("entity_type", { length: 30 }),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    coverAssetId: uuid("cover_asset_id"),
+    promptHints: text("prompt_hints"),
+    profileMeta: jsonb("profile_meta").$type<Record<string, unknown>>().notNull().default({}),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => users.id),
+    ...timestamps,
+  },
+  (table) => [
+    index("library_items_workspace_kind_status_idx").on(table.workspaceId, table.kind, table.status),
+    index("library_items_workspace_name_idx").on(table.workspaceId, table.name),
+  ],
+);
+
+export const instructionPresets = pgTable(
+  "instruction_presets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => users.id),
+    scope: varchar("scope", { length: 20 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    promptTemplate: text("prompt_template").notNull(),
+    negativePrompt: text("negative_prompt"),
+    variableSchema: jsonb("variable_schema").$type<Record<string, unknown>>().notNull().default({}),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    isPublic: boolean("is_public").notNull().default(false),
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    ...timestamps,
+  },
+  (table) => [
+    index("instruction_presets_created_scope_idx").on(table.createdBy, table.scope),
+    index("instruction_presets_workspace_scope_status_idx").on(table.workspaceId, table.scope, table.status),
+  ],
+);
+
 export const assets = pgTable(
   "assets",
   {
@@ -192,7 +244,7 @@ export const canvasNodes = pgTable(
     modelKey: varchar("model_key", { length: 100 }),
     settingsJson: jsonb("settings_json").$type<Record<string, unknown>>().notNull().default({}),
     resourceRefs: jsonb("resource_refs")
-      .$type<{ productIds?: string[]; modelProfileIds?: string[]; assetIds?: string[] }>()
+      .$type<{ subjectIds?: string[]; sceneIds?: string[]; instructionPresetIds?: string[]; assetIds?: string[] }>()
       .notNull()
       .default({}),
     outputSnapshot: jsonb("output_snapshot").$type<Record<string, unknown> | null>().default(null),
@@ -249,7 +301,7 @@ export const nodeTemplates = pgTable(
     modelKey: varchar("model_key", { length: 100 }),
     settingsJson: jsonb("settings_json").$type<Record<string, unknown>>().notNull().default({}),
     resourceRefs: jsonb("resource_refs")
-      .$type<{ productIds?: string[]; modelProfileIds?: string[]; assetIds?: string[] }>()
+      .$type<{ subjectIds?: string[]; sceneIds?: string[]; instructionPresetIds?: string[]; assetIds?: string[] }>()
       .notNull()
       .default({}),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
@@ -360,6 +412,8 @@ export const schema = {
   userSessions,
   products,
   modelProfiles,
+  libraryItems,
+  instructionPresets,
   assets,
   canvases,
   canvasNodes,

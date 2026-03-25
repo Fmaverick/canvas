@@ -87,6 +87,18 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
 }
 
+function resolveUpstreamSemantic(sourceType: string, targetType: string) {
+  if (sourceType === "text" && (targetType === "text" || targetType === "image" || targetType === "video")) {
+    return "prompt" as const;
+  }
+
+  if (sourceType === "image" && (targetType === "image" || targetType === "video")) {
+    return "reference_image" as const;
+  }
+
+  return null;
+}
+
 function extractImageSourceFromString(value: string) {
   const markdownMatch = value.match(/!\[[^\]]*]\(([^)]+)\)/);
 
@@ -281,12 +293,18 @@ function buildExecutionPayload(
       imageUrl: extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null),
     }))
     .filter((item) => item.content || item.outputSnapshot || item.imageUrl);
+  const promptUpstreamOutputs = upstreamOutputs.filter(
+    (output) => resolveUpstreamSemantic(output.type, node.type) === "prompt",
+  );
+  const referenceImageUpstreamOutputs = upstreamOutputs.filter(
+    (output) => resolveUpstreamSemantic(output.type, node.type) === "reference_image",
+  );
 
   const promptSegments = [node.promptInput?.trim() ?? ""];
 
   if (input.useUpstreamOutputs) {
     promptSegments.push(
-      ...upstreamOutputs
+      ...promptUpstreamOutputs
         .map((output) => output.content)
         .filter((content): content is string => Boolean(content)),
     );
@@ -323,7 +341,7 @@ function buildExecutionPayload(
     .map((asset) => asset.fileUrl);
   const referenceImages = uniqueStrings([
     ...(node.type === "video" ? [...explicitReferenceImages, ...unassignedReferenceImages] : referenceAssets.map((asset) => asset.fileUrl)),
-    ...upstreamOutputs
+    ...referenceImageUpstreamOutputs
       .map((output) => output.imageUrl)
       .filter((imageUrl): imageUrl is string => Boolean(imageUrl)),
     ...(((mergedSettings.referenceImages as unknown[]) ?? []).filter(

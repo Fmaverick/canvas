@@ -127,35 +127,35 @@
 - `changeMemberRole`
 - `assertWorkspacePermission`
 
-### 5.3 Product Module
+### 5.3 Library Item Module
 
 职责：
 
-- 产品 CRUD
-- 产品标签和搜索
-- 产品与素材关联
+- 主体库与场景库 CRUD
+- 标签、类型与关键词搜索
+- 资源与素材关联
 
 核心接口：
 
-- `createProduct`
-- `updateProduct`
-- `deleteProduct`
-- `listProducts`
+- `createLibraryItem`
+- `updateLibraryItem`
+- `deleteLibraryItem`
+- `listLibraryItems`
 
-### 5.4 Model Profile Module
+### 5.4 Instruction Preset Module
 
 职责：
 
-- 模特 CRUD
-- 模特标签和属性筛选
-- 模特与素材关联
+- 指令库 CRUD
+- personal / workspace 作用域隔离
+- 预制 Prompt 与 negative prompt 管理
 
 核心接口：
 
-- `createModelProfile`
-- `updateModelProfile`
-- `deleteModelProfile`
-- `listModelProfiles`
+- `createInstructionPreset`
+- `updateInstructionPreset`
+- `deleteInstructionPreset`
+- `listInstructionPresets`
 
 ### 5.5 Asset Module
 
@@ -393,7 +393,7 @@ Interface
 
 - Canvas Module 依赖 Workspace Module 做权限校验
 - Node Template Module 依赖 Workspace Module、Canvas Module
-- Node Runtime Module 依赖 Canvas Module、Product Module、Model Profile Module、Node Template Module
+- Node Runtime Module 依赖 Canvas Module、Library Item Module、Instruction Preset Module、Node Template Module
 - Task Module 依赖 AI Gateway Module、Queue Module、Result Module
 - Media Polling Module 依赖 Task Module、AI Gateway Module、Result Module
 - Admin Module 依赖 Task Module、Adapter Registry Module、Runtime Limit Module
@@ -587,8 +587,8 @@ interface TaskRepository {
 
 1. Auth Module
 2. Workspace Module
-3. Product Module
-4. Model Profile Module
+3. Library Item Module
+4. Instruction Preset Module
 5. Canvas Module
 6. Node Template Module
 7. Node Runtime Module

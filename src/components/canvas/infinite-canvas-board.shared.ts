@@ -1,6 +1,7 @@
 import { AudioLines, ImageIcon, Type, Video } from "lucide-react";
 
 export type CanvasNodeType = "text" | "image" | "video" | "audio";
+export type CanvasConnectionSemantic = "prompt" | "reference_image";
 
 export type CanvasNodeReferenceAsset = {
   id: string;
@@ -9,6 +10,33 @@ export type CanvasNodeReferenceAsset = {
   mimeType: string;
   width: number | null;
   height: number | null;
+};
+
+export type CanvasNodeResourceRefs = {
+  subjectIds: string[];
+  sceneIds: string[];
+  instructionPresetIds: string[];
+  assetIds: string[];
+};
+
+export type LibraryItemOption = {
+  id: string;
+  kind: string;
+  entityType: string | null;
+  name: string;
+  description: string | null;
+  promptHints: string | null;
+  tags: string[];
+};
+
+export type InstructionPresetOption = {
+  id: string;
+  scope: string;
+  name: string;
+  description: string | null;
+  promptTemplate: string;
+  negativePrompt: string | null;
+  tags: string[];
 };
 
 export type CanvasNode = {
@@ -22,11 +50,7 @@ export type CanvasNode = {
   positionY: string;
   outputSnapshot: Record<string, unknown> | null;
   settingsJson: Record<string, unknown> | null;
-  resourceRefs: {
-    productIds?: string[];
-    modelProfileIds?: string[];
-    assetIds?: string[];
-  } | null;
+  resourceRefs: CanvasNodeResourceRefs | null;
   referenceAssets?: CanvasNodeReferenceAsset[];
 };
 
@@ -62,6 +86,9 @@ export type InfiniteCanvasBoardProps = {
   edges: CanvasEdge[];
   tasks: CanvasTask[];
   canvasId: string;
+  subjects: LibraryItemOption[];
+  scenes: LibraryItemOption[];
+  instructionPresets: InstructionPresetOption[];
 };
 
 export type VideoGenerationMode = "reference" | "first_last" | "multi_shot";
@@ -170,6 +197,52 @@ export function normalizeStringList(value: unknown) {
         .map((item) => item.trim()),
     ),
   );
+}
+
+export function normalizeResourceRefs(value: Partial<CanvasNodeResourceRefs> | null | undefined): CanvasNodeResourceRefs {
+  return {
+    subjectIds: normalizeStringList(value?.subjectIds),
+    sceneIds: normalizeStringList(value?.sceneIds),
+    instructionPresetIds: normalizeStringList(value?.instructionPresetIds),
+    assetIds: normalizeStringList(value?.assetIds),
+  };
+}
+
+export function getCanvasConnectionSemantic(
+  sourceType: string,
+  targetType: string,
+): CanvasConnectionSemantic | null {
+  if (sourceType === "text" && (targetType === "text" || targetType === "image" || targetType === "video")) {
+    return "prompt";
+  }
+
+  if (sourceType === "image" && (targetType === "image" || targetType === "video")) {
+    return "reference_image";
+  }
+
+  return null;
+}
+
+export function getCanvasConnectionLabel(sourceType: string, targetType: string) {
+  const semantic = getCanvasConnectionSemantic(sourceType, targetType);
+
+  if (semantic === "prompt") {
+    return "Prompt";
+  }
+
+  if (semantic === "reference_image") {
+    return "参考图";
+  }
+
+  return "连线";
+}
+
+export function canCanvasNodeStartConnection(nodeType: string) {
+  return nodeType === "text" || nodeType === "image";
+}
+
+export function canCanvasNodeReceiveConnection(nodeType: string) {
+  return nodeType === "text" || nodeType === "image" || nodeType === "video";
 }
 
 export function clampNumber(value: number, min: number, max: number) {

@@ -75,6 +75,33 @@ export async function createCanvasNode(
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
 
+export async function createCanvasEdge(
+  context: CanvasBoardApiContext,
+  payload: Record<string, unknown>,
+  fallbackMessage = "创建连线失败。",
+) {
+  const response = await fetch(`/api/canvases/${context.canvasId}/edges`, {
+    method: "POST",
+    headers: getWorkspaceHeaders(context.workspaceId),
+    body: JSON.stringify(payload),
+  });
+
+  return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
+}
+
+export async function deleteCanvasEdge(
+  context: CanvasBoardApiContext,
+  edgeId: string,
+  fallbackMessage = "删除连线失败。",
+) {
+  const response = await fetch(`/api/canvases/${context.canvasId}/edges/${edgeId}`, {
+    method: "DELETE",
+    headers: getWorkspaceHeaders(context.workspaceId, false),
+  });
+
+  await parseApiEnvelope(response, fallbackMessage);
+}
+
 export async function runCanvasNode(
   context: CanvasBoardApiContext,
   nodeId: string,

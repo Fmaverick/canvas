@@ -3,7 +3,8 @@ import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
 import { listCanvases } from "@/application/services/canvas-service";
-import { listProducts } from "@/application/services/product-service";
+import { listInstructionPresets } from "@/application/services/instruction-preset-service";
+import { listLibraryItems } from "@/application/services/library-item-service";
 import { listTasks } from "@/application/services/task-service";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -94,10 +95,12 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
     currentUserResult.workspaces.find((workspace) => workspace.type === "personal") ??
     currentUserResult.workspaces[0];
 
-  const [tasks, canvases, products] = await Promise.all([
+  const [tasks, canvases, subjects, scenes, instructionPresets] = await Promise.all([
     listTasks({ workspaceId: activeWorkspace.id, limit: 8 }),
     listCanvases({ workspaceId: activeWorkspace.id }),
-    listProducts({ workspaceId: activeWorkspace.id }),
+    listLibraryItems({ workspaceId: activeWorkspace.id, kind: "subject" }),
+    listLibraryItems({ workspaceId: activeWorkspace.id, kind: "scene" }),
+    listInstructionPresets({ workspaceId: activeWorkspace.id, userId: currentUserResult.user.id }),
   ]);
 
   const runningTaskCount = tasks.filter((task) => task.status === "processing" || task.status === "queued").length;
@@ -124,6 +127,9 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             <div className="flex flex-wrap gap-3">
               <Link className={workspaceLinkClass(true)} href={`/canvases?workspaceId=${activeWorkspace.id}`}>
                 创建 / 查看画布
+              </Link>
+              <Link className={workspaceLinkClass(true)} href={`/libraries?workspaceId=${activeWorkspace.id}`}>
+                进入资源库
               </Link>
               <Link className={workspaceLinkClass(true)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
                 进入任务中心
@@ -217,20 +223,24 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             <Card>
               <CardHeader>
                 <CardTitle>空间概览</CardTitle>
-                <CardDescription>先用轻量工作台承接现有后端能力，再进入任务和画布页面。</CardDescription>
+                <CardDescription>主体、场景、指令开始作为统一资源层承接画布生成上下文。</CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4 md:grid-cols-3">
+              <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-2xl border bg-muted/20 p-4">
-                  <p className="text-sm text-muted-foreground">Products</p>
-                  <p className="mt-2 text-2xl font-semibold">{products.length}</p>
+                  <p className="text-sm text-muted-foreground">Subjects</p>
+                  <p className="mt-2 text-2xl font-semibold">{subjects.length}</p>
+                </div>
+                <div className="rounded-2xl border bg-muted/20 p-4">
+                  <p className="text-sm text-muted-foreground">Scenes</p>
+                  <p className="mt-2 text-2xl font-semibold">{scenes.length}</p>
+                </div>
+                <div className="rounded-2xl border bg-muted/20 p-4">
+                  <p className="text-sm text-muted-foreground">Instructions</p>
+                  <p className="mt-2 text-2xl font-semibold">{instructionPresets.length}</p>
                 </div>
                 <div className="rounded-2xl border bg-muted/20 p-4">
                   <p className="text-sm text-muted-foreground">Canvases</p>
                   <p className="mt-2 text-2xl font-semibold">{canvases.length}</p>
-                </div>
-                <div className="rounded-2xl border bg-muted/20 p-4">
-                  <p className="text-sm text-muted-foreground">Tasks</p>
-                  <p className="mt-2 text-2xl font-semibold">{tasks.length}</p>
                 </div>
               </CardContent>
             </Card>
@@ -243,6 +253,9 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
               <CardContent className="flex flex-wrap gap-3">
                 <Link className={workspaceLinkClass(true)} href={`/canvases?workspaceId=${activeWorkspace.id}`}>
                   新建画布
+                </Link>
+                <Link className={workspaceLinkClass(false)} href={`/libraries?workspaceId=${activeWorkspace.id}`}>
+                  管理资源库
                 </Link>
                 <Link className={workspaceLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
                   查看任务

@@ -124,16 +124,18 @@ interface NodeOriginPayload {
 
 ```ts
 interface NodeReferencePayload {
-  productIds: string[];
-  modelProfileIds: string[];
+  subjectIds: string[];
+  sceneIds: string[];
+  instructionPresetIds: string[];
   assetIds: string[];
 }
 ```
 
 说明：
 
-- `productIds`：引用产品库对象
-- `modelProfileIds`：引用模特库对象
+- `subjectIds`：引用主体库对象，统一承载产品主体、人物主体、IP 主体等
+- `sceneIds`：引用场景库对象
+- `instructionPresetIds`：引用指令库中的预制 Prompt
 - `assetIds`：引用额外媒体资源
 
 ## 9. 运行配置结构
@@ -381,8 +383,9 @@ interface NodeTemplate {
 
 - 当前节点输入
 - 上游节点输出
-- 产品引用
-- 模特引用
+- 主体引用
+- 场景引用
+- 指令库引用
 - 资源引用
 - 系统模板
 
@@ -393,8 +396,9 @@ interface NodeTemplate {
 1. 当前节点手动输入
 2. 当前节点 params 中的显式设置
 3. 上游节点输出
-4. 产品和模特上下文
-5. 系统模板默认值
+4. 主体与场景上下文
+5. 指令库预制 Prompt
+6. 系统模板默认值
 
 ### 13.3 各节点合并行为
 

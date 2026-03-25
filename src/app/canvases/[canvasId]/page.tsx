@@ -3,8 +3,11 @@ import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
 import { getCanvasDetail } from "@/application/services/canvas-service";
+import { listInstructionPresets } from "@/application/services/instruction-preset-service";
+import { listLibraryItems } from "@/application/services/library-item-service";
 import { listTasks } from "@/application/services/task-service";
 import { InfiniteCanvasBoard } from "@/components/canvas/infinite-canvas-board";
+import { normalizeResourceRefs } from "@/components/canvas/infinite-canvas-board.shared";
 import { Badge } from "@/components/ui/badge";
 
 type CanvasDetailPageProps = {
@@ -122,13 +125,22 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
   const { workspaceId, canvas } = resolvedCanvasWorkspace;
   const activeWorkspace =
     currentUserResult.workspaces.find((workspace) => workspace.id === workspaceId) ?? currentUserResult.workspaces[0];
-  const tasks = await listTasks({
-    workspaceId,
-    canvasId,
-    limit: 50,
-  });
+  const [tasks, subjects, scenes, instructionPresets] = await Promise.all([
+    listTasks({
+      workspaceId,
+      canvasId,
+      limit: 50,
+    }),
+    listLibraryItems({ workspaceId, kind: "subject" }),
+    listLibraryItems({ workspaceId, kind: "scene" }),
+    listInstructionPresets({ workspaceId, userId: currentUserResult.user.id }),
+  ]);
   const canEdit = activeWorkspace.role === "owner" || activeWorkspace.role === "admin" || activeWorkspace.role === "editor";
   const canGenerate = canEdit;
+  const normalizedNodes = canvas.nodes.map((node) => ({
+    ...node,
+    resourceRefs: normalizeResourceRefs(node.resourceRefs),
+  }));
 
   return (
     <main className="min-h-screen bg-muted/30 text-foreground">
@@ -137,7 +149,10 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
         canGenerate={canGenerate}
         canvasId={canvas.id}
         edges={canvas.edges}
-        nodes={canvas.nodes}
+        instructionPresets={instructionPresets}
+        nodes={normalizedNodes}
+        scenes={scenes}
+        subjects={subjects}
         tasks={tasks}
         workspaceId={workspaceId}
       />

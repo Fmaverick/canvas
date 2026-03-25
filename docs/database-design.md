@@ -21,8 +21,8 @@
 - users
 - workspaces
 - workspace_members
-- products
-- model_profiles
+- library_items
+- instruction_presets
 - assets
 - canvases
 - canvas_nodes
@@ -92,20 +92,22 @@
 
 - unique(workspace_id, user_id)
 
-### 4.4 products
+### 4.4 library_items
+
+统一承载主体库与场景库。产品主体、人物主体、IP 主体等都归入 `subject`，棚拍环境、室内空间、户外场景等归入 `scene`。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid | 主键 |
 | workspace_id | uuid | 空间 ID |
-| name | varchar(255) | 产品名称 |
-| sku | varchar(100) nullable | SKU |
+| kind | varchar(20) | subject / scene |
+| entity_type | varchar(30) nullable | product / person / object / studio / outdoor 等细分类型 |
+| name | varchar(255) | 资源名称 |
 | description | text nullable | 描述 |
-| category | varchar(100) nullable | 类目 |
+| cover_asset_id | uuid nullable | 封面素材 |
+| prompt_hints | text nullable | 常用提示词锚点 |
+| profile_meta | jsonb | 差异化结构信息 |
 | tags | jsonb | 标签集合 |
-| style_meta | jsonb | 风格配置 |
-| brand_tone | text nullable | 品牌语气 |
-| channel_meta | jsonb | 渠道配置 |
 | status | varchar(20) | active / archived |
 | created_by | uuid | 创建人 |
 | created_at | timestamptz | 创建时间 |
@@ -113,43 +115,46 @@
 
 索引建议：
 
-- index(workspace_id, status)
+- index(workspace_id, kind, status)
 - index(workspace_id, name)
 - gin(tags)
 
-### 4.5 model_profiles
+### 4.5 instruction_presets
 
-该表实际承载“模特库”数据。
+用于承载可复用的预制 Prompt，供文生图、图生图和节点模板引用。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid | 主键 |
-| workspace_id | uuid | 空间 ID |
-| name | varchar(100) | 模特名称 |
-| gender | varchar(20) nullable | 性别 |
-| age_range | varchar(50) nullable | 年龄段 |
-| tags | jsonb | 风格标签 |
-| appearance_meta | jsonb | 外观信息 |
-| notes | text nullable | 备注 |
-| status | varchar(20) | active / archived |
+| workspace_id | uuid nullable | workspace 级指令所属空间，personal 指令可为空 |
 | created_by | uuid | 创建人 |
+| scope | varchar(20) | personal / workspace / system |
+| name | varchar(255) | 指令名称 |
+| description | text nullable | 指令说明 |
+| prompt_template | text | 主 Prompt 模板 |
+| negative_prompt | text nullable | 负向 Prompt |
+| variable_schema | jsonb | 变量占位描述 |
+| tags | jsonb | 标签集合 |
+| is_public | boolean | 是否向空间公开 |
+| status | varchar(20) | active / archived |
 | created_at | timestamptz | 创建时间 |
 | updated_at | timestamptz | 更新时间 |
 
 索引建议：
 
-- index(workspace_id, status)
+- index(created_by, scope)
+- index(workspace_id, scope, status)
 - gin(tags)
 
 ### 4.6 assets
 
-统一存储产品图、模特图、参考图、视频、音频等媒体资产。
+统一存储主体图、场景图、参考图、视频、音频等媒体资产。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid | 主键 |
 | workspace_id | uuid | 空间 ID |
-| owner_type | varchar(50) | product / model_profile / canvas_node / task_result |
+| owner_type | varchar(50) | library_item / instruction_preset / canvas_node / task_result |
 | owner_id | uuid | 所属业务对象 |
 | asset_type | varchar(20) | image / video / audio / document |
 | file_name | varchar(255) | 文件名 |
@@ -203,7 +208,7 @@
 | prompt_input | text nullable | 主输入内容 |
 | model_key | varchar(100) nullable | 模型标识 |
 | settings_json | jsonb | 节点参数 |
-| resource_refs | jsonb | 产品/模特/素材引用 |
+| resource_refs | jsonb | 主体/场景/指令/素材引用 |
 | output_snapshot | jsonb nullable | 最近一次输出快照 |
 | status | varchar(20) | idle / queued / processing / succeeded / failed |
 | position_x | numeric(10,2) | 画布横坐标 |
@@ -368,8 +373,8 @@
 
 - users 1:N workspaces
 - workspaces 1:N workspace_members
-- workspaces 1:N products
-- workspaces 1:N model_profiles
+- workspaces 1:N library_items
+- workspaces 1:N instruction_presets
 - workspaces 1:N canvases
 - canvases 1:N canvas_nodes
 - canvases 1:N canvas_edges
@@ -403,8 +408,8 @@
 1. users
 2. workspaces
 3. workspace_members
-4. products
-5. model_profiles
+4. library_items
+5. instruction_presets
 6. assets
 7. canvases
 8. canvas_nodes

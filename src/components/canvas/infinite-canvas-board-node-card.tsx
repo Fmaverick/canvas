@@ -9,6 +9,8 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 import {
+  canCanvasNodeReceiveConnection,
+  canCanvasNodeStartConnection,
   DEFAULT_VIDEO_NODE_SETTINGS,
   TEXT_NODE_SIZE,
   VIDEO_NODE_HEIGHT,
@@ -43,6 +45,10 @@ type InfiniteCanvasBoardNodeCardProps = {
   isSavingTextNodeTitle: boolean;
   playingVideoNodeId: string | null;
   isCoolingDown: boolean;
+  pendingConnectionSourceId: string | null;
+  pendingConnectionLabel: string | null;
+  canAcceptPendingConnection: boolean;
+  isPendingConnectionTarget: boolean;
   onRegisterVideoElement: (nodeId: string, element: HTMLVideoElement | null) => void;
   onSelectNode: (nodeId: string) => void;
   onOpenTextEditor: () => void;
@@ -56,6 +62,8 @@ type InfiniteCanvasBoardNodeCardProps = {
   onStartVideoPreview: (nodeId: string) => void;
   onStopVideoPreview: (nodeId: string) => void;
   onClearPlayingVideoNode: (nodeId: string) => void;
+  onStartConnection: (nodeId: string) => void;
+  onCompleteConnection: (nodeId: string) => void;
 };
 
 type NodeFloatingTitleBarProps = {
@@ -143,6 +151,39 @@ function NodeFloatingTitleBar({
   );
 }
 
+type ConnectionHandleProps = {
+  direction: "incoming" | "outgoing";
+  isActive: boolean;
+  isAvailable: boolean;
+  label: string;
+  onClick: () => void;
+};
+
+function ConnectionHandle({ direction, isActive, isAvailable, label, onClick }: ConnectionHandleProps) {
+  const isIncoming = direction === "incoming";
+
+  return (
+    <button
+      aria-label={label}
+      className={cn(
+        "absolute top-1/2 z-30 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border bg-background/96 text-[10px] font-semibold text-muted-foreground shadow-sm transition",
+        isIncoming ? "-left-4" : "-right-4",
+        isAvailable ? "hover:border-primary/50 hover:text-primary" : "cursor-not-allowed opacity-45",
+        isActive ? "border-primary bg-primary text-primary-foreground opacity-100" : undefined,
+      )}
+      disabled={!isAvailable}
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {isIncoming ? "入" : "出"}
+    </button>
+  );
+}
+
 export function InfiniteCanvasBoardNodeCard({
   canvasId,
   workspaceId,
@@ -161,6 +202,10 @@ export function InfiniteCanvasBoardNodeCard({
   isSavingTextNodeTitle,
   playingVideoNodeId,
   isCoolingDown,
+  pendingConnectionSourceId,
+  pendingConnectionLabel,
+  canAcceptPendingConnection,
+  isPendingConnectionTarget,
   onRegisterVideoElement,
   onSelectNode,
   onOpenTextEditor,
@@ -174,11 +219,15 @@ export function InfiniteCanvasBoardNodeCard({
   onStartVideoPreview,
   onStopVideoPreview,
   onClearPlayingVideoNode,
+  onStartConnection,
+  onCompleteConnection,
 }: InfiniteCanvasBoardNodeCardProps) {
   const optionTint = quickCreateOptions.find((option) => option.value === node.type)?.tint ?? "from-slate-100 to-slate-50";
   const isTextNode = node.type === "text";
   const isImageNode = node.type === "image";
   const isVideoNode = node.type === "video";
+  const canStartConnection = canEdit && canCanvasNodeStartConnection(node.type);
+  const canReceiveConnection = canEdit && canCanvasNodeReceiveConnection(node.type);
   const imagePreview = isImageNode ? getImageNodePreview(node.outputSnapshot, node.referenceAssets) : null;
   const videoSettings = isVideoNode ? normalizeVideoNodeSettings(node.settingsJson) : DEFAULT_VIDEO_NODE_SETTINGS;
   const videoOutputSource = isVideoNode ? getVideoNodeOutputSource(node.outputSnapshot) : null;
@@ -193,6 +242,8 @@ export function InfiniteCanvasBoardNodeCard({
     isTextNode &&
     (latestTask?.status === "queued" || latestTask?.status === "processing" || isCoolingDown);
   const isEditingTitle = editingTextNodeTitleId === node.id;
+  const isPendingSource = pendingConnectionSourceId === node.id;
+  const isConnectionMode = Boolean(pendingConnectionSourceId);
 
   return (
     <div
@@ -201,7 +252,11 @@ export function InfiniteCanvasBoardNodeCard({
         "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
         isTextNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
         effectiveSelectedNodeId === node.id ? "ring-2 ring-primary/50" : undefined,
+        isPendingSource ? "ring-2 ring-primary/60" : undefined,
+        isPendingConnectionTarget ? "ring-2 ring-emerald-500/60 shadow-[0_0_0_10px_rgba(16,185,129,0.08)]" : undefined,
+        isConnectionMode && !isPendingSource && !isPendingConnectionTarget ? "opacity-70" : undefined,
         canEdit ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
+        isConnectionMode ? "cursor-pointer" : undefined,
       )}
       role="button"
       style={{
@@ -220,8 +275,59 @@ export function InfiniteCanvasBoardNodeCard({
           onOpenTextEditor();
         }
       }}
-      onPointerDown={(event) => onStartDrag(node.id, event.clientX, event.clientY)}
+      onClick={() => {
+        onSelectNode(node.id);
+
+        if (canAcceptPendingConnection) {
+          onCompleteConnection(node.id);
+        }
+      }}
+      onPointerDown={(event) => {
+        if (isConnectionMode) {
+          event.stopPropagation();
+
+          return;
+        }
+
+        onStartDrag(node.id, event.clientX, event.clientY);
+      }}
     >
+      {canReceiveConnection ? (
+        <ConnectionHandle
+          direction="incoming"
+          isActive={canAcceptPendingConnection}
+          isAvailable={Boolean(pendingConnectionSourceId && canAcceptPendingConnection)}
+          label={
+            pendingConnectionSourceId
+              ? canAcceptPendingConnection
+                ? `${node.title}接收${pendingConnectionLabel ?? "连线"}`
+                : `${node.title}当前不支持该连线`
+              : `请先选择一个上游节点`
+          }
+          onClick={() => {
+            if (pendingConnectionSourceId) {
+              onCompleteConnection(node.id);
+            }
+          }}
+        />
+      ) : null}
+
+      {canStartConnection ? (
+        <ConnectionHandle
+          direction="outgoing"
+          isActive={isPendingSource}
+          isAvailable
+          label={isPendingSource ? `取消从${node.title}发出的连线` : `从${node.title}发起连线`}
+          onClick={() => onStartConnection(node.id)}
+        />
+      ) : null}
+
+      {isPendingConnectionTarget ? (
+        <div className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full bg-emerald-500 px-2.5 py-1 text-[11px] font-medium text-white shadow-sm">
+          点击连接{pendingConnectionLabel ? ` · ${pendingConnectionLabel}` : ""}
+        </div>
+      ) : null}
+
       {isTextNode ? (
         <>
           <NodeFloatingTitleBar

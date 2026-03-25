@@ -5,7 +5,14 @@ import { Clapperboard, Plus, ScanSearch, Sparkles } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-import { quickCreateOptions, type CanvasNodeType } from "@/components/canvas/infinite-canvas-board.shared";
+import {
+  quickCreateOptions,
+  type CanvasNodeType,
+  type InstructionPresetOption,
+  type LibraryItemOption,
+} from "@/components/canvas/infinite-canvas-board.shared";
+
+type ResourceNodeType = "text" | "image" | "video";
 
 type InfiniteCanvasBoardCreatePanelProps = {
   canEdit: boolean;
@@ -17,12 +24,76 @@ type InfiniteCanvasBoardCreatePanelProps = {
   taskCount: number;
   zoomLabel: string;
   hasSelectedNode: boolean;
+  subjects: LibraryItemOption[];
+  scenes: LibraryItemOption[];
+  instructionPresets: InstructionPresetOption[];
   onToggleCreateOpen: () => void;
   onCloseCreateOpen: () => void;
   onSelectQuickType: (type: CanvasNodeType) => void;
+  onCreateSubjectNode: (subject: LibraryItemOption, nodeType: ResourceNodeType) => void;
+  onCreateSceneNode: (scene: LibraryItemOption, nodeType: ResourceNodeType) => void;
+  onCreateInstructionNode: (instructionPreset: InstructionPresetOption, nodeType: ResourceNodeType) => void;
   onZoomOut: () => void;
   onZoomIn: () => void;
 };
+
+type ResourceCreateSectionProps<TResource> = {
+  title: string;
+  description: string;
+  items: TResource[];
+  emptyMessage: string;
+  getKey: (item: TResource) => string;
+  getTitle: (item: TResource) => string;
+  getSubtitle: (item: TResource) => string;
+  onCreate: (item: TResource, nodeType: ResourceNodeType) => void;
+};
+
+function ResourceCreateSection<TResource>({
+  title,
+  description,
+  items,
+  emptyMessage,
+  getKey,
+  getTitle,
+  getSubtitle,
+  onCreate,
+}: ResourceCreateSectionProps<TResource>) {
+  return (
+    <div className="space-y-2 rounded-2xl border bg-muted/20 p-3">
+      <div>
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+
+      {items.length ? (
+        <div className="grid gap-2">
+          {items.map((item) => (
+            <div key={getKey(item)} className="rounded-xl border bg-background p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">{getTitle(item)}</p>
+                <p className="line-clamp-2 text-xs text-muted-foreground">{getSubtitle(item)}</p>
+              </div>
+              <div className="mt-3 flex gap-2">
+                {(["text", "image", "video"] as const).map((nodeType) => (
+                  <button
+                    key={nodeType}
+                    className="rounded-lg border px-2.5 py-1.5 text-xs font-medium text-foreground transition hover:bg-muted"
+                    type="button"
+                    onClick={() => onCreate(item, nodeType)}
+                  >
+                    {nodeType === "text" ? "文本节点" : nodeType === "image" ? "图片节点" : "视频节点"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">{emptyMessage}</div>
+      )}
+    </div>
+  );
+}
 
 export function InfiniteCanvasBoardCreatePanel({
   canEdit,
@@ -34,9 +105,15 @@ export function InfiniteCanvasBoardCreatePanel({
   taskCount,
   zoomLabel,
   hasSelectedNode,
+  subjects,
+  scenes,
+  instructionPresets,
   onToggleCreateOpen,
   onCloseCreateOpen,
   onSelectQuickType,
+  onCreateSubjectNode,
+  onCreateSceneNode,
+  onCreateInstructionNode,
   onZoomOut,
   onZoomIn,
 }: InfiniteCanvasBoardCreatePanelProps) {
@@ -85,11 +162,11 @@ export function InfiniteCanvasBoardCreatePanel({
       </div>
 
       {canEdit && isCreateOpen ? (
-        <div className="absolute left-20 top-24 z-20 w-[320px] rounded-[24px] border bg-background p-4 shadow-xl">
+        <div className="absolute left-20 top-24 z-20 w-[360px] rounded-[24px] border bg-background p-4 shadow-xl">
           <div className="mb-4 flex items-center justify-between">
             <div>
               <p className="text-sm font-medium">添加节点</p>
-              <p className="text-xs text-muted-foreground">不要求用户先填坐标，直接拖进画布即可落点创建。</p>
+              <p className="text-xs text-muted-foreground">基础节点可拖入创建，资源也可以直接变成文本、图片、视频节点进入画布。</p>
             </div>
             <button
               className="rounded-full border px-2 py-1 text-xs text-muted-foreground transition hover:bg-muted"
@@ -100,37 +177,80 @@ export function InfiniteCanvasBoardCreatePanel({
             </button>
           </div>
 
-          <div className="space-y-2">
-            {quickCreateOptions.map((option) => {
-              const Icon = option.icon;
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+            <div className="space-y-2">
+              {quickCreateOptions.map((option) => {
+                const Icon = option.icon;
 
-              return (
-                <button
-                  key={option.value}
-                  className={cn(
-                    "flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition",
-                    quickType === option.value
-                      ? "border-primary/30 bg-primary/5 text-foreground"
-                      : "bg-background text-foreground hover:bg-muted",
-                  )}
-                  draggable
-                  type="button"
-                  onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-canvas-node-type", option.value);
-                    event.dataTransfer.effectAllowed = "copy";
-                  }}
-                  onClick={() => onSelectQuickType(option.value)}
-                >
-                  <div className={cn("rounded-xl bg-gradient-to-br p-2 text-foreground", option.lightTint)}>
-                    <Icon className="size-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">{option.label}</p>
-                    <p className="text-xs text-muted-foreground">{option.description}</p>
-                  </div>
-                </button>
-              );
-            })}
+                return (
+                  <button
+                    key={option.value}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition",
+                      quickType === option.value
+                        ? "border-primary/30 bg-primary/5 text-foreground"
+                        : "bg-background text-foreground hover:bg-muted",
+                    )}
+                    draggable
+                    type="button"
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData("application/x-canvas-node-type", option.value);
+                      event.dataTransfer.effectAllowed = "copy";
+                    }}
+                    onClick={() => onSelectQuickType(option.value)}
+                  >
+                    <div className={cn("rounded-xl bg-gradient-to-br p-2 text-foreground", option.lightTint)}>
+                      <Icon className="size-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">{option.label}</p>
+                      <p className="text-xs text-muted-foreground">{option.description}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <ResourceCreateSection
+              description="产品主体、人物主体、IP 主体都可以直接变成画布节点。"
+              emptyMessage="当前 workspace 还没有主体资源。"
+              getKey={(item) => item.id}
+              getSubtitle={(item) =>
+                [item.entityType, item.description, item.promptHints, item.tags.slice(0, 2).join(" · ")]
+                  .filter(Boolean)
+                  .join(" · ")
+              }
+              getTitle={(item) => item.name}
+              items={subjects}
+              title="主体入画布"
+              onCreate={onCreateSubjectNode}
+            />
+
+            <ResourceCreateSection
+              description="把棚景、环境和布光信息直接变成场景节点。"
+              emptyMessage="当前 workspace 还没有场景资源。"
+              getKey={(item) => item.id}
+              getSubtitle={(item) =>
+                [item.entityType, item.description, item.promptHints, item.tags.slice(0, 2).join(" · ")]
+                  .filter(Boolean)
+                  .join(" · ")
+              }
+              getTitle={(item) => item.name}
+              items={scenes}
+              title="场景入画布"
+              onCreate={onCreateSceneNode}
+            />
+
+            <ResourceCreateSection
+              description="把预制 Prompt 直接作为节点起点放到画布里。"
+              emptyMessage="当前 workspace 还没有指令资源。"
+              getKey={(item) => item.id}
+              getSubtitle={(item) => [item.scope, item.description, item.tags.slice(0, 2).join(" · ")].filter(Boolean).join(" · ")}
+              getTitle={(item) => item.name}
+              items={instructionPresets}
+              title="指令入画布"
+              onCreate={onCreateInstructionNode}
+            />
           </div>
         </div>
       ) : null}

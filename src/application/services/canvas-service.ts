@@ -22,8 +22,9 @@ export const createCanvasInputSchema = z.object({
 });
 
 const resourceRefsSchema = z.object({
-  productIds: z.array(z.uuid()).default([]),
-  modelProfileIds: z.array(z.uuid()).default([]),
+  subjectIds: z.array(z.uuid()).default([]),
+  sceneIds: z.array(z.uuid()).default([]),
+  instructionPresetIds: z.array(z.uuid()).default([]),
   assetIds: z.array(z.uuid()).default([]),
 });
 
@@ -37,8 +38,9 @@ export const createNodeInputSchema = z.object({
   modelKey: z.string().trim().optional(),
   settingsJson: z.record(z.string(), z.unknown()).default({}),
   resourceRefs: resourceRefsSchema.default({
-    productIds: [],
-    modelProfileIds: [],
+    subjectIds: [],
+    sceneIds: [],
+    instructionPresetIds: [],
     assetIds: [],
   }),
   positionX: z.coerce.number().default(0),

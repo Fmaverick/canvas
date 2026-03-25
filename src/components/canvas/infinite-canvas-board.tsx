@@ -9,8 +9,10 @@ import { InfiniteCanvasBoardCreatePanel } from "@/components/canvas/infinite-can
 import { InfiniteCanvasBoardNodeCard } from "@/components/canvas/infinite-canvas-board-node-card";
 import {
   completeUpload,
+  createCanvasEdge,
   createCanvasNode,
   createUploadPresign,
+  deleteCanvasEdge,
   deleteCanvasNode,
   patchCanvasNode,
   runCanvasNode,
@@ -22,6 +24,8 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   TEXT_GENERATE_COOLDOWN_MS,
+  getCanvasConnectionLabel,
+  getCanvasConnectionSemantic,
   getImageNodeOutputSource,
   getManagedVideoAssetIds,
   getPersistedVideoNodeSettings,
@@ -31,13 +35,17 @@ import {
   inferImageExtension,
   inferVideoExtension,
   isFormFieldTarget,
+  normalizeResourceRefs,
   normalizeVideoNodeSettings,
   quickCreateOptions,
   triggerDownload,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
+  type CanvasNodeResourceRefs,
   type CanvasNodeType,
+  type InstructionPresetOption,
   type InfiniteCanvasBoardProps,
+  type LibraryItemOption,
 } from "@/components/canvas/infinite-canvas-board.shared";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +57,9 @@ export function InfiniteCanvasBoard({
   edges,
   tasks,
   canvasId,
+  subjects,
+  scenes,
+  instructionPresets,
 }: InfiniteCanvasBoardProps) {
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -72,6 +83,7 @@ export function InfiniteCanvasBoard({
   const [draftImagePrompt, setDraftImagePrompt] = useState("");
   const [draftVideoPrompt, setDraftVideoPrompt] = useState("");
   const [draftVideoSettings, setDraftVideoSettings] = useState(DEFAULT_VIDEO_NODE_SETTINGS);
+  const [draftResourceRefs, setDraftResourceRefs] = useState<CanvasNodeResourceRefs>(() => normalizeResourceRefs(nodes[0]?.resourceRefs));
   const [expandedTextContent, setExpandedTextContent] = useState("");
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [isSavingImagePrompt, setIsSavingImagePrompt] = useState(false);
@@ -92,8 +104,12 @@ export function InfiniteCanvasBoard({
   const [isCanvasDragOver, setIsCanvasDragOver] = useState(false);
   const [deletingNodeId, setDeletingNodeId] = useState<string | null>(null);
   const [playingVideoNodeId, setPlayingVideoNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [pendingConnectionSourceId, setPendingConnectionSourceId] = useState<string | null>(null);
+  const [pendingConnectionPointer, setPendingConnectionPointer] = useState<{ x: number; y: number } | null>(null);
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   const latestTaskByNode = useMemo(() => {
     const taskMap = new Map<string, (typeof tasks)[number]>();
@@ -126,6 +142,7 @@ export function InfiniteCanvasBoard({
       ]),
     );
   }, [nodePositions, nodes]);
+  const pendingConnectionSourceNode = pendingConnectionSourceId ? nodeById.get(pendingConnectionSourceId) ?? null : null;
 
   const effectiveSelectedNodeId = nodes.some((node) => node.id === selectedNodeId) ? selectedNodeId : (nodes[0]?.id ?? null);
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
@@ -171,11 +188,22 @@ export function InfiniteCanvasBoard({
   }, [nodes]);
 
   useEffect(() => {
+    if (!selectedEdgeId) {
+      return;
+    }
+
+    if (!edges.some((edge) => edge.id === selectedEdgeId)) {
+      setSelectedEdgeId(null);
+    }
+  }, [edges, selectedEdgeId]);
+
+  useEffect(() => {
     if (selectedNode?.type === "text") {
       setDraftPrompt(selectedNode.promptInput ?? "");
       setDraftImagePrompt("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent(getTextNodeContent(selectedNode.outputSnapshot));
 
       return;
@@ -186,6 +214,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt(selectedNode.promptInput ?? "");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent("");
       setIsExpandedEditorOpen(false);
 
@@ -197,6 +226,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt("");
       setDraftVideoPrompt(selectedNode.promptInput ?? "");
       setDraftVideoSettings(normalizeVideoNodeSettings(selectedNode.settingsJson));
+      setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent("");
       setIsExpandedEditorOpen(false);
 
@@ -207,6 +237,7 @@ export function InfiniteCanvasBoard({
     setDraftImagePrompt("");
     setDraftVideoPrompt("");
     setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+    setDraftResourceRefs(normalizeResourceRefs(selectedNode?.resourceRefs));
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
   }, [selectedNode]);
@@ -292,6 +323,19 @@ export function InfiniteCanvasBoard({
     [camera.x, camera.y, viewportSize.height, viewportSize.width, zoom],
   );
 
+  const getLocalScreenPoint = useCallback((clientX: number, clientY: number) => {
+    if (!containerRef.current) {
+      return null;
+    }
+
+    const containerRect = containerRef.current.getBoundingClientRect();
+
+    return {
+      x: clientX - containerRect.left,
+      y: clientY - containerRect.top,
+    };
+  }, []);
+
   const updateZoom = useCallback(
     (nextZoom: number, clientX?: number, clientY?: number) => {
       const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, nextZoom));
@@ -362,6 +406,11 @@ export function InfiniteCanvasBoard({
     [apiContext],
   );
 
+  const clearPendingConnection = useCallback(() => {
+    setPendingConnectionSourceId(null);
+    setPendingConnectionPointer(null);
+  }, []);
+
   const handleDeleteNode = useCallback(
     async (nodeId: string) => {
       const deletingNode = nodes.find((node) => node.id === nodeId);
@@ -416,8 +465,96 @@ export function InfiniteCanvasBoard({
     [apiContext, editingTextNodeTitleId, effectiveSelectedNodeId, nodes, router],
   );
 
+  const handleStartConnection = useCallback(
+    (nodeId: string) => {
+      if (!canEdit) {
+        return;
+      }
+
+      if (pendingConnectionSourceId === nodeId) {
+        clearPendingConnection();
+
+        return;
+      }
+
+      const nodePosition = nodePositionMap.get(nodeId);
+
+      if (!nodePosition) {
+        return;
+      }
+
+      setSelectedNodeId(nodeId);
+      setPendingConnectionSourceId(nodeId);
+      setPendingConnectionPointer(getScreenPoint(nodePosition.x, nodePosition.y));
+    },
+    [canEdit, clearPendingConnection, getScreenPoint, nodePositionMap, pendingConnectionSourceId],
+  );
+
+  const handleCompleteConnection = useCallback(
+    async (targetNodeId: string) => {
+      if (!pendingConnectionSourceId || pendingConnectionSourceId === targetNodeId) {
+        clearPendingConnection();
+
+        return;
+      }
+
+      const sourceNode = nodeById.get(pendingConnectionSourceId);
+      const targetNode = nodeById.get(targetNodeId);
+
+      if (!sourceNode || !targetNode) {
+        clearPendingConnection();
+
+        return;
+      }
+
+      const semantic = getCanvasConnectionSemantic(sourceNode.type, targetNode.type);
+
+      if (!semantic) {
+        toast.error("当前仅支持 文本→文本/图片/视频，图片→图片/视频。");
+        clearPendingConnection();
+
+        return;
+      }
+
+      try {
+        await createCanvasEdge(
+          apiContext,
+          {
+            sourceNodeId: sourceNode.id,
+            targetNodeId: targetNode.id,
+            mergeMode: "merge_all",
+            priority: edges.filter((edge) => edge.targetNodeId === targetNodeId).length,
+          },
+          "创建连线失败。",
+        );
+
+        toast.success(`${sourceNode.title} 已连接到 ${targetNode.title}，会自动作为${getCanvasConnectionLabel(sourceNode.type, targetNode.type)}。`);
+        clearPendingConnection();
+        router.refresh();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "创建连线失败。");
+        clearPendingConnection();
+      }
+    },
+    [apiContext, clearPendingConnection, edges, nodeById, pendingConnectionSourceId, router],
+  );
+
+  const handleDeleteEdge = useCallback(
+    async (edgeId: string) => {
+      try {
+        await deleteCanvasEdge(apiContext, edgeId, "删除连线失败。");
+        setSelectedEdgeId((current) => (current === edgeId ? null : current));
+        toast.success("连线已删除。");
+        router.refresh();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "删除连线失败。");
+      }
+    },
+    [apiContext, router],
+  );
+
   useEffect(() => {
-    if (!canEdit || !selectedNode) {
+    if (!canEdit) {
       return;
     }
 
@@ -426,7 +563,25 @@ export function InfiniteCanvasBoard({
         return;
       }
 
+      if (event.key === "Escape" && pendingConnectionSourceId) {
+        event.preventDefault();
+        clearPendingConnection();
+
+        return;
+      }
+
       if (event.key !== "Delete" && event.key !== "Backspace") {
+        return;
+      }
+
+      if (selectedEdgeId) {
+        event.preventDefault();
+        void handleDeleteEdge(selectedEdgeId);
+
+        return;
+      }
+
+      if (!selectedNode) {
         return;
       }
 
@@ -437,14 +592,23 @@ export function InfiniteCanvasBoard({
     window.addEventListener("keydown", handleKeyDown);
 
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canEdit, handleDeleteNode, selectedNode]);
+  }, [canEdit, clearPendingConnection, handleDeleteEdge, handleDeleteNode, pendingConnectionSourceId, selectedEdgeId, selectedNode]);
+
+  function getNextCreatePosition() {
+    const stackOffset = nodes.length % 5;
+
+    return {
+      x: camera.x + stackOffset * 36,
+      y: camera.y + stackOffset * 28,
+    };
+  }
 
   async function createNodeAtPosition(type: CanvasNodeType, x: number, y: number) {
     try {
       const option = quickCreateOptions.find((item) => item.value === type);
       const nextNodeIndex = (nodeCountByType[type] ?? 0) + 1;
 
-      await createCanvasNode(
+      const createdNode = await createCanvasNode(
         apiContext,
         {
           type,
@@ -457,11 +621,73 @@ export function InfiniteCanvasBoard({
       );
 
       toast.success("节点已拖入画布。");
+      if (typeof createdNode.id === "string") {
+        setSelectedNodeId(createdNode.id);
+      }
       setQuickType(type);
       setIsCreateOpen(false);
       router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "拖入创建节点失败。");
+    }
+  }
+
+  function buildPromptFromLibraryItem(item: LibraryItemOption) {
+    return [item.name, item.description, item.promptHints, item.tags.length ? `标签：${item.tags.join("、")}` : null]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n");
+  }
+
+  function buildPromptFromInstructionPreset(item: InstructionPresetOption) {
+    return [item.promptTemplate, item.negativePrompt ? `Negative Prompt: ${item.negativePrompt}` : null]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n\n");
+  }
+
+  async function createNodeFromResource(
+    source: LibraryItemOption | InstructionPresetOption,
+    resourceType: "subject" | "scene" | "instruction",
+    nodeType: Exclude<CanvasNodeType, "audio">,
+  ) {
+    if (!canEdit) {
+      return;
+    }
+
+    const nextPosition = getNextCreatePosition();
+    const option = quickCreateOptions.find((item) => item.value === nodeType);
+    const promptInput =
+      resourceType === "instruction"
+        ? buildPromptFromInstructionPreset(source as InstructionPresetOption)
+        : buildPromptFromLibraryItem(source as LibraryItemOption);
+    const resourceRefs: CanvasNodeResourceRefs = {
+      subjectIds: resourceType === "subject" ? [source.id] : [],
+      sceneIds: resourceType === "scene" ? [source.id] : [],
+      instructionPresetIds: resourceType === "instruction" ? [source.id] : [],
+      assetIds: [],
+    };
+
+    try {
+      const createdNode = await createCanvasNode(
+        apiContext,
+        {
+          type: nodeType,
+          title: `${source.name} · ${option?.label ?? nodeType}`,
+          promptInput,
+          resourceRefs,
+          positionX: Math.round(nextPosition.x),
+          positionY: Math.round(nextPosition.y),
+        },
+        "资源节点创建失败。",
+      );
+
+      toast.success("资源已作为节点加入画布。");
+      if (typeof createdNode.id === "string") {
+        setSelectedNodeId(createdNode.id);
+      }
+      setIsCreateOpen(false);
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "资源节点创建失败。");
     }
   }
 
@@ -545,17 +771,25 @@ export function InfiniteCanvasBoard({
     setIsUploadingReferenceImages(true);
 
     try {
-      const { nextAssetIds } = await uploadImagesToNode(selectedNode, imageFiles);
+      const { nextAssetIds } = await uploadImagesToNode(
+        {
+          ...selectedNode,
+          resourceRefs: draftResourceRefs,
+        },
+        imageFiles,
+      );
+      const nextResourceRefs = {
+        ...draftResourceRefs,
+        assetIds: nextAssetIds,
+      };
+
+      setDraftResourceRefs(nextResourceRefs);
 
       await patchCanvasNode(
         apiContext,
         selectedNode.id,
         {
-          resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
-            assetIds: nextAssetIds,
-          },
+          resourceRefs: nextResourceRefs,
         },
         "节点引用图片保存失败。",
       );
@@ -581,15 +815,17 @@ export function InfiniteCanvasBoard({
     setIsUploadingReferenceImages(true);
 
     try {
+      const nextResourceRefs = {
+        ...draftResourceRefs,
+        assetIds: draftResourceRefs.assetIds.filter((id) => id !== assetId),
+      };
+
+      setDraftResourceRefs(nextResourceRefs);
       await patchCanvasNode(
         apiContext,
         selectedNode.id,
         {
-          resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
-            assetIds: (selectedNode.resourceRefs?.assetIds ?? []).filter((id) => id !== assetId),
-          },
+          resourceRefs: nextResourceRefs,
         },
         "移除参考图失败。",
       );
@@ -641,16 +877,18 @@ export function InfiniteCanvasBoard({
 
       const persistedSettings = getPersistedVideoNodeSettings(nextSettings);
       const managedAssetIds = getManagedVideoAssetIds(nextSettings);
+      const nextResourceRefs = {
+        ...draftResourceRefs,
+        assetIds: managedAssetIds,
+      };
+
+      setDraftResourceRefs(nextResourceRefs);
 
       await patchCanvasNode(
         apiContext,
         selectedNode.id,
         {
-          resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
-            assetIds: managedAssetIds,
-          },
+          resourceRefs: nextResourceRefs,
           settingsJson: {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
@@ -712,16 +950,18 @@ export function InfiniteCanvasBoard({
       };
       const persistedSettings = getPersistedVideoNodeSettings(nextSettings);
       const usedAssetIds = getManagedVideoAssetIds(nextSettings);
+      const nextResourceRefs = {
+        ...draftResourceRefs,
+        assetIds: usedAssetIds,
+      };
+
+      setDraftResourceRefs(nextResourceRefs);
 
       await patchCanvasNode(
         apiContext,
         selectedNode.id,
         {
-          resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
-            assetIds: usedAssetIds,
-          },
+          resourceRefs: nextResourceRefs,
           settingsJson: {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
@@ -863,8 +1103,9 @@ export function InfiniteCanvasBoard({
         {
           promptInput: draftVideoPrompt,
           resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
+            subjectIds: draftResourceRefs.subjectIds,
+            sceneIds: draftResourceRefs.sceneIds,
+            instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
           },
           settingsJson: {
@@ -913,8 +1154,9 @@ export function InfiniteCanvasBoard({
         {
           promptInput: draftVideoPrompt,
           resourceRefs: {
-            productIds: selectedNode.resourceRefs?.productIds ?? [],
-            modelProfileIds: selectedNode.resourceRefs?.modelProfileIds ?? [],
+            subjectIds: draftResourceRefs.subjectIds,
+            sceneIds: draftResourceRefs.sceneIds,
+            instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
           },
           settingsJson: {
@@ -1132,21 +1374,33 @@ export function InfiniteCanvasBoard({
   }
 
   return (
-    <div className="relative h-screen overflow-hidden bg-background text-foreground">
+    <div className="relative h-screen overflow-hidden overscroll-none bg-background text-foreground">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.06),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(14,165,233,0.08),transparent_22%)]" />
 
       <InfiniteCanvasBoardCreatePanel
         canEdit={canEdit}
         edgeCount={edges.length}
         hasSelectedNode={Boolean(selectedNode)}
+        instructionPresets={instructionPresets}
         isCreateOpen={isCreateOpen}
         nodeCount={nodes.length}
         onCloseCreateOpen={() => setIsCreateOpen(false)}
+        onCreateInstructionNode={(instructionPreset, nodeType) => {
+          void createNodeFromResource(instructionPreset, "instruction", nodeType);
+        }}
+        onCreateSceneNode={(scene, nodeType) => {
+          void createNodeFromResource(scene, "scene", nodeType);
+        }}
+        onCreateSubjectNode={(subject, nodeType) => {
+          void createNodeFromResource(subject, "subject", nodeType);
+        }}
         onSelectQuickType={setQuickType}
         onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
         onZoomIn={() => updateZoom(zoom + 0.1)}
         onZoomOut={() => updateZoom(zoom - 0.1)}
         quickType={quickType}
+        scenes={scenes}
+        subjects={subjects}
         taskCount={tasks.length}
         workspaceId={workspaceId}
         zoomLabel={`${Math.round(zoom * 100)}%`}
@@ -1154,7 +1408,7 @@ export function InfiniteCanvasBoard({
 
       <div
         ref={containerRef}
-        className={cn("relative h-full overflow-hidden", isPanning ? "cursor-grabbing" : "cursor-grab")}
+        className={cn("relative h-full overflow-hidden overscroll-none", isPanning ? "cursor-grabbing" : "cursor-grab")}
         onDragLeave={() => setIsCanvasDragOver(false)}
         onDragOver={(event) => {
           if (!canEdit) {
@@ -1188,16 +1442,40 @@ export function InfiniteCanvasBoard({
 
           void createNodeAtPosition(draggedType, point.x, point.y);
         }}
+        onPointerMove={(event) => {
+          if (!pendingConnectionSourceId) {
+            return;
+          }
+
+          const pointer = getLocalScreenPoint(event.clientX, event.clientY);
+
+          if (!pointer) {
+            return;
+          }
+
+          setPendingConnectionPointer(pointer);
+        }}
         onPointerDown={(event) => {
           if (event.target !== event.currentTarget) {
             return;
           }
 
+          setSelectedNodeId(null);
+          setSelectedEdgeId(null);
+          setIsExpandedEditorOpen(false);
+          setEditingTextNodeTitleId(null);
+          setEditingTextNodeTitle("");
+
+          if (pendingConnectionSourceId) {
+            clearPendingConnection();
+          }
+
           startCanvasPan(event.clientX, event.clientY);
         }}
         onWheel={(event) => {
+          event.preventDefault();
+
           if (event.ctrlKey || event.metaKey) {
-            event.preventDefault();
             updateZoom(zoom - event.deltaY * 0.0015, event.clientX, event.clientY);
 
             return;
@@ -1230,7 +1508,7 @@ export function InfiniteCanvasBoard({
             />
           </div>
 
-          <svg className="pointer-events-none absolute inset-0 h-full w-full">
+          <svg className="absolute inset-0 h-full w-full">
             <defs>
               <linearGradient id="edgeGradient" x1="0%" x2="100%" y1="0%" y2="100%">
                 <stop offset="0%" stopColor="rgba(59,130,246,0.42)" />
@@ -1240,34 +1518,101 @@ export function InfiniteCanvasBoard({
             {edges.map((edge) => {
               const sourcePoint = nodePositionMap.get(edge.sourceNodeId);
               const targetPoint = nodePositionMap.get(edge.targetNodeId);
+              const sourceNode = nodeById.get(edge.sourceNodeId);
+              const targetNode = nodeById.get(edge.targetNodeId);
 
-              if (!sourcePoint || !targetPoint) {
+              if (!sourcePoint || !targetPoint || !sourceNode || !targetNode) {
                 return null;
               }
 
               const sourceScreen = getScreenPoint(sourcePoint.x, sourcePoint.y);
               const targetScreen = getScreenPoint(targetPoint.x, targetPoint.y);
+              const midX = (sourceScreen.x + targetScreen.x) / 2;
+              const midY = (sourceScreen.y + targetScreen.y) / 2 - 10;
+              const edgeLabel = getCanvasConnectionLabel(sourceNode.type, targetNode.type);
+              const isSelectedEdge = selectedEdgeId === edge.id;
+              const edgeLabelWidth = edgeLabel.length * 12 + (isSelectedEdge ? 56 : 24);
+              const edgePath = `M ${sourceScreen.x} ${sourceScreen.y} C ${sourceScreen.x + 120 * zoom} ${sourceScreen.y}, ${targetScreen.x - 120 * zoom} ${targetScreen.y}, ${targetScreen.x} ${targetScreen.y}`;
 
               return (
                 <g key={edge.id}>
                   <path
-                    d={`M ${sourceScreen.x} ${sourceScreen.y} C ${sourceScreen.x + 120 * zoom} ${sourceScreen.y}, ${targetScreen.x - 120 * zoom} ${targetScreen.y}, ${targetScreen.x} ${targetScreen.y}`}
+                    d={edgePath}
                     fill="transparent"
-                    stroke="url(#edgeGradient)"
-                    strokeWidth="2.5"
+                    stroke={isSelectedEdge ? "rgba(37,99,235,0.92)" : "url(#edgeGradient)"}
+                    strokeWidth={isSelectedEdge ? "4" : "2.5"}
                   />
-                  <text
-                    fill="rgba(100,116,139,0.82)"
-                    fontSize="11"
-                    textAnchor="middle"
-                    x={(sourceScreen.x + targetScreen.x) / 2}
-                    y={(sourceScreen.y + targetScreen.y) / 2 - 10}
+                  <path
+                    d={edgePath}
+                    fill="transparent"
+                    stroke="transparent"
+                    strokeWidth="20"
+                    onClick={() => {
+                      setSelectedNodeId(null);
+                      setSelectedEdgeId(edge.id);
+                    }}
+                  />
+                  <g
+                    className={cn(canEdit ? "cursor-pointer" : undefined)}
+                    onClick={() => {
+                      setSelectedNodeId(null);
+                      setSelectedEdgeId(edge.id);
+                    }}
                   >
-                    {edge.mergeMode}
-                  </text>
+                    <rect
+                      fill={isSelectedEdge ? "rgba(239,246,255,0.98)" : "rgba(248,250,252,0.95)"}
+                      height="22"
+                      rx="11"
+                      width={edgeLabelWidth}
+                      x={midX - edgeLabelWidth / 2}
+                      y={midY - 15}
+                    />
+                    <text fill="rgba(71,85,105,0.9)" fontSize="11" textAnchor="middle" x={midX} y={midY}>
+                      {edgeLabel}
+                    </text>
+                    {isSelectedEdge ? (
+                      <g
+                        className={cn(canEdit ? "cursor-pointer" : undefined)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+
+                          if (!canEdit) {
+                            return;
+                          }
+
+                          void handleDeleteEdge(edge.id);
+                        }}
+                      >
+                        <circle cx={midX + edgeLabelWidth / 2 - 16} cy={midY - 3} fill="rgba(37,99,235,0.12)" r="9" />
+                        <text fill="rgba(37,99,235,0.96)" fontSize="13" fontWeight="700" textAnchor="middle" x={midX + edgeLabelWidth / 2 - 16} y={midY + 1}>
+                          ×
+                        </text>
+                      </g>
+                    ) : null}
+                  </g>
                 </g>
               );
             })}
+            {pendingConnectionSourceNode && pendingConnectionPointer ? (() => {
+              const sourcePoint = nodePositionMap.get(pendingConnectionSourceNode.id);
+
+              if (!sourcePoint) {
+                return null;
+              }
+
+              const sourceScreen = getScreenPoint(sourcePoint.x, sourcePoint.y);
+              const previewPath = `M ${sourceScreen.x} ${sourceScreen.y} C ${sourceScreen.x + 120 * zoom} ${sourceScreen.y}, ${pendingConnectionPointer.x - 120 * zoom} ${pendingConnectionPointer.y}, ${pendingConnectionPointer.x} ${pendingConnectionPointer.y}`;
+
+              return (
+                <path
+                  d={previewPath}
+                  fill="transparent"
+                  stroke="rgba(59,130,246,0.7)"
+                  strokeDasharray="8 8"
+                  strokeWidth="2.5"
+                />
+              );
+            })() : null}
           </svg>
 
           {nodes.length === 0 ? (
@@ -1286,9 +1631,34 @@ export function InfiniteCanvasBoard({
             </div>
           ) : null}
 
+          {pendingConnectionSourceNode ? (
+            <div className="pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
+              <div className="rounded-full border border-primary/20 bg-background/96 px-4 py-2 text-xs text-foreground shadow-sm">
+                从 {pendingConnectionSourceNode.title} 发起连线：兼容节点会高亮，点击目标节点即可完成连接，按 Esc 取消
+              </div>
+            </div>
+          ) : null}
+
+          {selectedEdgeId ? (
+            <div className="pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
+              <div className="rounded-full border border-sky-200 bg-background/96 px-4 py-2 text-xs text-foreground shadow-sm">
+                已选中连线，可按 Delete / Backspace 删除，或点击标签右侧 × 删除
+              </div>
+            </div>
+          ) : null}
+
           {nodes.map((node) => {
             const latestTask = latestTaskByNode.get(node.id) ?? null;
             const position = nodePositionMap.get(node.id);
+            const pendingConnectionLabel =
+              pendingConnectionSourceNode && pendingConnectionSourceNode.id !== node.id
+                ? getCanvasConnectionLabel(pendingConnectionSourceNode.type, node.type)
+                : null;
+            const canAcceptPendingConnection = Boolean(
+              pendingConnectionSourceNode &&
+                pendingConnectionSourceNode.id !== node.id &&
+                getCanvasConnectionSemantic(pendingConnectionSourceNode.type, node.type),
+            );
 
             if (!position) {
               return null;
@@ -1319,6 +1689,8 @@ export function InfiniteCanvasBoard({
                 isSavingTextNodeTitle={isSavingTextNodeTitle}
                 latestTask={latestTask}
                 node={node}
+                canAcceptPendingConnection={canAcceptPendingConnection}
+                isPendingConnectionTarget={canAcceptPendingConnection}
                 onCancelEditingTitle={() => {
                   setEditingTextNodeTitleId(null);
                   setEditingTextNodeTitle("");
@@ -1326,6 +1698,9 @@ export function InfiniteCanvasBoard({
                 onClearPlayingVideoNode={(nodeId) =>
                   setPlayingVideoNodeId((current) => (current === nodeId ? null : current))
                 }
+                onCompleteConnection={(nodeId) => {
+                  void handleCompleteConnection(nodeId);
+                }}
                 onDeleteNode={(nodeId) => {
                   void handleDeleteNode(nodeId);
                 }}
@@ -1342,12 +1717,15 @@ export function InfiniteCanvasBoard({
                   setEditingTextNodeTitleId(nodeId);
                   setEditingTextNodeTitle(title);
                 }}
+                onStartConnection={handleStartConnection}
                 onStartVideoPreview={(nodeId) => {
                   void startVideoNodePreview(nodeId);
                 }}
                 onStopVideoPreview={stopVideoNodePreview}
                 onSyncImagePreviewSize={syncImagePreviewSize}
                 onTitleChange={setEditingTextNodeTitle}
+                pendingConnectionLabel={pendingConnectionLabel}
+                pendingConnectionSourceId={pendingConnectionSourceId}
                 playingVideoNodeId={playingVideoNodeId}
                 savingNodeId={savingNodeId}
                 screenPoint={screenPoint}

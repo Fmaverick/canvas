@@ -3,7 +3,8 @@ import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
 import { listCanvases } from "@/application/services/canvas-service";
-import { listProducts } from "@/application/services/product-service";
+import { listInstructionPresets } from "@/application/services/instruction-preset-service";
+import { listLibraryItems } from "@/application/services/library-item-service";
 import { listTasks } from "@/application/services/task-service";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -48,10 +49,10 @@ const coreModules: CoreModule[] = [
     highlights: ["注册后自动创建个人空间", "团队成员角色分级已生效", "业务接口开始按角色做权限控制"],
   },
   {
-    name: "Product / Model Profile",
+    name: "Subject / Scene / Instruction",
     stage: "core",
-    description: "产品库已具备基础 CRUD，并已接到 workspace 与 session 权限体系。",
-    highlights: ["支持按 workspace 管理", "标签与分类可用", "viewer 只读、editor 可编辑"],
+    description: "主体库、场景库与指令库开始收敛为统一资源层，承接文生图与图生图的上下文输入。",
+    highlights: ["主体与场景复用同一底层结构", "指令库支持预制 prompt 沉淀", "viewer 只读、editor 可编辑"],
   },
   {
     name: "Canvas / Node Runtime",
@@ -109,7 +110,7 @@ const milestones: Milestone[] = [
     phase: "Phase 1",
     title: "服务端主骨架",
     status: "ready",
-    items: ["接通 Drizzle schema 与核心业务表", "补齐 Auth / Workspace / Product / Canvas / Task API"],
+    items: ["接通 Drizzle schema 与核心业务表", "补齐 Auth / Workspace / Library / Canvas / Task API"],
   },
   {
     phase: "Phase 2",
@@ -221,10 +222,12 @@ export default async function Home() {
     const activeWorkspace =
       currentUserResult.workspaces.find((workspace) => workspace.type === "personal") ??
       currentUserResult.workspaces[0];
-    const [tasks, canvases, products] = await Promise.all([
+    const [tasks, canvases, subjects, scenes, instructionPresets] = await Promise.all([
       listTasks({ workspaceId: activeWorkspace.id, limit: 6 }),
       listCanvases({ workspaceId: activeWorkspace.id }),
-      listProducts({ workspaceId: activeWorkspace.id }),
+      listLibraryItems({ workspaceId: activeWorkspace.id, kind: "subject" }),
+      listLibraryItems({ workspaceId: activeWorkspace.id, kind: "scene" }),
+      listInstructionPresets({ workspaceId: activeWorkspace.id, userId: currentUserResult.user.id }),
     ]);
     const runningTaskCount = tasks.filter((task) => task.status === "processing" || task.status === "queued").length;
     const failedTaskCount = tasks.filter((task) => task.status === "failed").length;
@@ -249,6 +252,9 @@ export default async function Home() {
               <div className="flex flex-wrap gap-3">
                 <Link className={workspaceLinkClass(true)} href={`/dashboard?workspaceId=${activeWorkspace.id}`}>
                   进入工作台
+                </Link>
+                <Link className={workspaceLinkClass(false)} href={`/libraries?workspaceId=${activeWorkspace.id}`}>
+                  进入资源库
                 </Link>
                 <Link className={workspaceLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
                   查看任务中心
@@ -330,20 +336,24 @@ export default async function Home() {
               <Card>
                 <CardHeader>
                   <CardTitle>业务概览</CardTitle>
-                  <CardDescription>首页直接展示当前 workspace 的核心资源体量。</CardDescription>
+                <CardDescription>首页直接展示当前 workspace 的主体、场景与指令资源体量。</CardDescription>
                 </CardHeader>
-                <CardContent className="grid gap-4 md:grid-cols-3">
+              <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-2xl border bg-muted/20 p-4">
-                    <p className="text-sm text-muted-foreground">Products</p>
-                    <p className="mt-2 text-2xl font-semibold">{products.length}</p>
+                  <p className="text-sm text-muted-foreground">Subjects</p>
+                  <p className="mt-2 text-2xl font-semibold">{subjects.length}</p>
                   </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
-                    <p className="text-sm text-muted-foreground">Canvases</p>
-                    <p className="mt-2 text-2xl font-semibold">{canvases.length}</p>
+                  <p className="text-sm text-muted-foreground">Scenes</p>
+                  <p className="mt-2 text-2xl font-semibold">{scenes.length}</p>
                   </div>
                   <div className="rounded-2xl border bg-muted/20 p-4">
-                    <p className="text-sm text-muted-foreground">Tasks</p>
-                    <p className="mt-2 text-2xl font-semibold">{tasks.length}</p>
+                  <p className="text-sm text-muted-foreground">Instructions</p>
+                  <p className="mt-2 text-2xl font-semibold">{instructionPresets.length}</p>
+                </div>
+                <div className="rounded-2xl border bg-muted/20 p-4">
+                  <p className="text-sm text-muted-foreground">Canvases</p>
+                  <p className="mt-2 text-2xl font-semibold">{canvases.length}</p>
                   </div>
                 </CardContent>
               </Card>
