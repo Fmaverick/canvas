@@ -655,10 +655,21 @@ export function InfiniteCanvasBoard({
 
     const nextPosition = getNextCreatePosition();
     const option = quickCreateOptions.find((item) => item.value === nodeType);
+    const instructionContent =
+      resourceType === "instruction" ? buildPromptFromInstructionPreset(source as InstructionPresetOption) : null;
     const promptInput =
       resourceType === "instruction"
-        ? buildPromptFromInstructionPreset(source as InstructionPresetOption)
+        ? nodeType === "text"
+          ? ""
+          : instructionContent ?? ""
         : buildPromptFromLibraryItem(source as LibraryItemOption);
+    const outputSnapshot =
+      resourceType === "instruction" && nodeType === "text"
+        ? {
+            type: "text",
+            content: instructionContent ?? "",
+          }
+        : undefined;
     const resourceRefs: CanvasNodeResourceRefs = {
       subjectIds: resourceType === "subject" ? [source.id] : [],
       sceneIds: resourceType === "scene" ? [source.id] : [],
@@ -673,6 +684,7 @@ export function InfiniteCanvasBoard({
           type: nodeType,
           title: `${source.name} · ${option?.label ?? nodeType}`,
           promptInput,
+          outputSnapshot,
           resourceRefs,
           positionX: Math.round(nextPosition.x),
           positionY: Math.round(nextPosition.y),

@@ -35,6 +35,7 @@ export const createNodeInputSchema = z.object({
   type: z.enum(["text", "image", "video", "audio"]),
   title: z.string().min(1, "Node title is required."),
   promptInput: z.string().trim().optional(),
+  outputSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),
   modelKey: z.string().trim().optional(),
   settingsJson: z.record(z.string(), z.unknown()).default({}),
   resourceRefs: resourceRefsSchema.default({
@@ -306,6 +307,7 @@ export async function createNode(input: z.infer<typeof createNodeInputSchema>) {
       title: parsed.title,
       createdBy: parsed.createdBy,
       promptInput: parsed.promptInput,
+      outputSnapshot: parsed.outputSnapshot,
       modelKey: parsed.modelKey,
       settingsJson: parsed.settingsJson,
       resourceRefs: parsed.resourceRefs,
