@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
+import { listAssetsByOwner } from "@/application/services/asset-service";
 import { getCanvasDetail } from "@/application/services/canvas-service";
 import { listInstructionPresets } from "@/application/services/instruction-preset-service";
 import { listLibraryItems } from "@/application/services/library-item-service";
@@ -49,6 +50,42 @@ async function resolveCanvasWorkspace(
   }
 
   return null;
+}
+
+async function enrichLibraryItemsWithAssets<
+  TItem extends {
+    id: string;
+    coverAssetId: string | null;
+    coverAssetUrl: string | null;
+  },
+>(workspaceId: string, items: TItem[]) {
+  const itemAssets = await Promise.all(
+    items.map(async (item) => {
+      const assets = await listAssetsByOwner({
+        workspaceId,
+        ownerType: "library_item",
+        ownerId: item.id,
+      });
+      const imageAssets = assets
+        .filter((asset) => asset.assetType === "image")
+        .map((asset) => ({
+          id: asset.id,
+          fileName: asset.fileName,
+          fileUrl: asset.fileUrl,
+          mimeType: asset.mimeType,
+          width: asset.width,
+          height: asset.height,
+        }));
+
+      return {
+        ...item,
+        coverAssetUrl: item.coverAssetUrl ?? imageAssets.find((asset) => asset.id === item.coverAssetId)?.fileUrl ?? imageAssets[0]?.fileUrl ?? null,
+        assets: imageAssets,
+      };
+    }),
+  );
+
+  return itemAssets;
 }
 
 export default async function CanvasDetailPage({ params, searchParams }: CanvasDetailPageProps) {
@@ -135,6 +172,10 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
     listLibraryItems({ workspaceId, kind: "scene" }),
     listInstructionPresets({ workspaceId, userId: currentUserResult.user.id }),
   ]);
+  const [enrichedSubjects, enrichedScenes] = await Promise.all([
+    enrichLibraryItemsWithAssets(workspaceId, subjects),
+    enrichLibraryItemsWithAssets(workspaceId, scenes),
+  ]);
   const canEdit = activeWorkspace.role === "owner" || activeWorkspace.role === "admin" || activeWorkspace.role === "editor";
   const canGenerate = canEdit;
   const normalizedNodes = canvas.nodes.map((node) => ({
@@ -151,8 +192,8 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
         edges={canvas.edges}
         instructionPresets={instructionPresets}
         nodes={normalizedNodes}
-        scenes={scenes}
-        subjects={subjects}
+        scenes={enrichedScenes}
+        subjects={enrichedSubjects}
         tasks={tasks}
         workspaceId={workspaceId}
       />

@@ -648,6 +648,7 @@ export function InfiniteCanvasBoard({
     source: LibraryItemOption | InstructionPresetOption,
     resourceType: "subject" | "scene" | "instruction",
     nodeType: Exclude<CanvasNodeType, "audio">,
+    selectedAssetId?: string | null,
   ) {
     if (!canEdit) {
       return;
@@ -670,11 +671,20 @@ export function InfiniteCanvasBoard({
             content: instructionContent ?? "",
           }
         : undefined;
+    const selectedLibraryItemAssetIds =
+      resourceType === "instruction"
+        ? []
+        : Array.from(
+            new Set([
+              ...(((selectedAssetId ? [selectedAssetId] : []) as string[])),
+              ...(((source as LibraryItemOption).assets ?? []).map((asset) => asset.id)),
+            ]),
+          );
     const resourceRefs: CanvasNodeResourceRefs = {
       subjectIds: resourceType === "subject" ? [source.id] : [],
       sceneIds: resourceType === "scene" ? [source.id] : [],
       instructionPresetIds: resourceType === "instruction" ? [source.id] : [],
-      assetIds: [],
+      assetIds: selectedLibraryItemAssetIds,
     };
 
     try {
@@ -1399,11 +1409,11 @@ export function InfiniteCanvasBoard({
         onCreateInstructionNode={(instructionPreset) => {
           void createNodeFromResource(instructionPreset, "instruction", "text");
         }}
-        onCreateSceneNode={(scene) => {
-          void createNodeFromResource(scene, "scene", "image");
+        onCreateSceneNode={(scene, selectedAssetId) => {
+          void createNodeFromResource(scene, "scene", "image", selectedAssetId);
         }}
-        onCreateSubjectNode={(subject) => {
-          void createNodeFromResource(subject, "subject", "image");
+        onCreateSubjectNode={(subject, selectedAssetId) => {
+          void createNodeFromResource(subject, "subject", "image", selectedAssetId);
         }}
         onSelectQuickType={setQuickType}
         onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}

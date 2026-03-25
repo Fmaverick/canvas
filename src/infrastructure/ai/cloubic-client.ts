@@ -63,16 +63,136 @@ function toString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function extractImageSource(value: string) {
-  const markdownMatch = value.match(/!\[[^\]]*]\(([^)]+)\)/);
+function normalizePotentialImageSource(value: string) {
+  const trimmed = value.trim().replace(/^['"`]+|['"`]+$/g, "");
 
-  if (markdownMatch?.[1]) {
-    return markdownMatch[1];
+  if (trimmed.startsWith("data:image/")) {
+    return trimmed.replace(/\s+/g, "");
   }
 
-  const directMatch = value.match(/(data:image\/[^\s)]+|https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|webp|gif|bmp|svg)(?:\?[^\s)]*)?)/i);
+  return trimmed;
+}
 
-  return directMatch?.[1];
+function extractImageSourceFromString(value: string): string | undefined {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const directDataUriMatch = trimmed.match(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+/);
+
+  if (directDataUriMatch?.[0]) {
+    return normalizePotentialImageSource(directDataUriMatch[0]);
+  }
+
+  const markdownMatches = [...trimmed.matchAll(/!?\[[^\]]*]\(([\s\S]*?)\)/g)];
+
+  for (const match of markdownMatches) {
+    const candidate = normalizePotentialImageSource(match[1] ?? "");
+
+    if (candidate.startsWith("data:image/") || /^https?:\/\//i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  const jsonUrlMatch = trimmed.match(/"(?:imageUrl|image_url|url|src|dataUri|data_uri)"\s*:\s*"([^"]+)"/i);
+
+  if (jsonUrlMatch?.[1]) {
+    return normalizePotentialImageSource(jsonUrlMatch[1]);
+  }
+
+  const genericUrlMatch = trimmed.match(/https?:\/\/[^\s)"']+/i);
+
+  if (genericUrlMatch?.[0]) {
+    return normalizePotentialImageSource(genericUrlMatch[0]);
+  }
+
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      return extractImageSourceFromUnknown(JSON.parse(trimmed));
+    } catch {
+      return undefined;
+    }
+  }
+
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || trimmed.includes('\\"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+
+      return typeof parsed === "string" ? extractImageSourceFromString(parsed) : extractImageSourceFromUnknown(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function extractImageSourceFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return extractImageSourceFromString(value);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const source = extractImageSourceFromUnknown(item);
+
+      if (source) {
+        return source;
+      }
+    }
+
+    return undefined;
+  }
+
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const preferredCandidates = [
+    record.imageUrl,
+    record.image_url,
+    record.url,
+    record.src,
+    record.dataUri,
+    record.data_uri,
+    record.content,
+    record.text,
+    record.markdown,
+    record.b64_json,
+    record.image,
+    record.imageUrlList,
+  ];
+
+  for (const candidate of preferredCandidates) {
+    const source = extractImageSourceFromUnknown(candidate);
+
+    if (source) {
+      return source;
+    }
+  }
+
+  for (const candidate of Object.values(record)) {
+    const source = extractImageSourceFromUnknown(candidate);
+
+    if (source) {
+      return source;
+    }
+  }
+
+  return undefined;
+}
+
+function extractImageSource(value: string, rawResponse?: unknown) {
+  const directSource = extractImageSourceFromString(value);
+
+  if (directSource) {
+    return directSource;
+  }
+
+  return extractImageSourceFromUnknown(rawResponse);
 }
 
 function buildMockTextResponse(input: GenerateTextInput): GenerateTextOutput {
@@ -308,7 +428,7 @@ export async function generateImageWithCloubic(input: GenerateImageInput): Promi
   }
 
   const markdown = content.trim();
-  const imageSource = extractImageSource(markdown);
+  const imageSource = extractImageSource(markdown, rawResponse);
   const dataUri = imageSource?.startsWith("data:image/") ? imageSource : undefined;
   const imageUrl = imageSource?.startsWith("http") ? imageSource : undefined;
 

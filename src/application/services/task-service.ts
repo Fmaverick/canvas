@@ -379,7 +379,49 @@ async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNode
     .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
 }
 
-function buildExecutionPayload(
+async function getNodeReferenceAssetMap(
+  workspaceId: string,
+  nodes: Array<{
+    id: string;
+    resourceRefs: unknown;
+  }>,
+) {
+  const nodeAssetIds = nodes.map((node) => ({
+    nodeId: node.id,
+    assetIds: uniqueStrings(
+      (((node.resourceRefs as { assetIds?: string[] } | null)?.assetIds ?? []).filter(
+        (assetId): assetId is string => typeof assetId === "string",
+      )),
+    ),
+  }));
+  const allAssetIds = uniqueStrings(nodeAssetIds.flatMap((item) => item.assetIds));
+
+  if (allAssetIds.length === 0) {
+    return new Map<string, Array<{ id: string; fileUrl: string; fileName: string; mimeType: string; width: number | null; height: number | null }>>();
+  }
+
+  const imageAssets = await db
+    .select({
+      id: assets.id,
+      fileUrl: assets.fileUrl,
+      fileName: assets.fileName,
+      mimeType: assets.mimeType,
+      width: assets.width,
+      height: assets.height,
+    })
+    .from(assets)
+    .where(and(eq(assets.workspaceId, workspaceId), eq(assets.assetType, "image"), inArray(assets.id, allAssetIds)));
+  const assetMap = new Map(imageAssets.map((asset) => [asset.id, asset]));
+
+  return new Map(
+    nodeAssetIds.map(({ nodeId, assetIds }) => [
+      nodeId,
+      assetIds.map((assetId) => assetMap.get(assetId)).filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
+    ]),
+  );
+}
+
+async function buildExecutionPayload(
   node: Awaited<ReturnType<typeof assertNodeForRun>>,
   upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodes>>,
   referenceAssets: Awaited<ReturnType<typeof getNodeReferenceAssets>>,
@@ -391,16 +433,22 @@ function buildExecutionPayload(
     }
   }
 
+  const upstreamReferenceAssetMap = await getNodeReferenceAssetMap(input.workspaceId, upstreamNodes);
   const upstreamOutputs = upstreamNodes
-    .map((upstreamNode) => ({
-      nodeId: upstreamNode.id,
-      type: upstreamNode.type,
-      title: upstreamNode.title,
-      content: normalizeOutputContent(upstreamNode.outputSnapshot as Record<string, unknown> | null),
-      outputSnapshot: upstreamNode.outputSnapshot,
-      status: upstreamNode.status,
-      imageUrl: extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null),
-    }))
+    .map((upstreamNode) => {
+      const fallbackReferenceImageUrl = upstreamReferenceAssetMap.get(upstreamNode.id)?.[0]?.fileUrl;
+
+      return {
+        nodeId: upstreamNode.id,
+        type: upstreamNode.type,
+        title: upstreamNode.title,
+        content: normalizeOutputContent(upstreamNode.outputSnapshot as Record<string, unknown> | null),
+        outputSnapshot: upstreamNode.outputSnapshot,
+        status: upstreamNode.status,
+        imageUrl:
+          extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null) ?? fallbackReferenceImageUrl,
+      };
+    })
     .filter((item) => item.content || item.outputSnapshot || item.imageUrl);
   const promptUpstreamOutputs = upstreamOutputs.filter(
     (output) => resolveUpstreamSemantic(output.type, node.type) === "prompt",
@@ -651,21 +699,89 @@ async function executeTask(taskId: string) {
     }
 
     if (task.taskType === "image") {
+      console.info("[canvas-image] request prepared", {
+        workspaceId: task.workspaceId,
+        canvasId: task.canvasId,
+        taskId: task.id,
+        nodeId: node.id,
+        nodeTitle: node.title,
+        model: task.model === "unassigned" ? null : task.model,
+        promptPreview: prompt.slice(0, 800),
+        promptLength: prompt.length,
+        referenceImageCount: referenceImages.length,
+        referenceImagesPreview: referenceImages.slice(0, 3),
+      });
+
       const output = await generateImageWithCloubic({
         prompt,
         model: task.model === "unassigned" ? undefined : task.model,
         settings,
         referenceImages,
       });
+      const imageSourceType = output.dataUri ? "data_uri" : output.imageUrl ? "remote_url" : "markdown_only";
+
+      console.info("[canvas-image] provider output ready", {
+        workspaceId: task.workspaceId,
+        canvasId: task.canvasId,
+        taskId: task.id,
+        nodeId: node.id,
+        nodeTitle: node.title,
+        provider: output.provider,
+        model: output.model,
+        sourceType: imageSourceType,
+        hasDataUri: Boolean(output.dataUri),
+        hasImageUrl: Boolean(output.imageUrl),
+        contentPreview: output.markdown.slice(0, 400),
+      });
+
+      const generatedAsset = await createGeneratedAsset({
+        workspaceId: task.workspaceId,
+        ownerType: "canvas_node",
+        ownerId: node.id,
+        fileName: `${node.title || "image-node"}-${Date.now()}`,
+        sourceUrl: output.imageUrl,
+        dataUri: output.dataUri,
+        meta: {
+          provider: output.provider,
+          model: output.model,
+          taskId: task.id,
+          canvasId: task.canvasId,
+          nodeId: node.id,
+          referenceImages,
+        },
+      });
+
+      console.info("[canvas-image] asset stored", {
+        workspaceId: task.workspaceId,
+        canvasId: task.canvasId,
+        taskId: task.id,
+        nodeId: node.id,
+        assetId: generatedAsset.id,
+        storageKey: generatedAsset.storageKey,
+        fileUrl: generatedAsset.fileUrl,
+        mimeType: generatedAsset.mimeType,
+      });
+
       const finishedAt = new Date();
       const outputSnapshot = {
         taskId: task.id,
         outputType: "image",
-        content: output.imageUrl ?? output.dataUri ?? output.markdown,
+        content: generatedAsset.fileUrl,
+        assets: [
+          {
+            assetId: generatedAsset.id,
+            assetType: "image",
+            url: generatedAsset.fileUrl,
+            mimeType: generatedAsset.mimeType ?? undefined,
+          },
+        ],
         structuredData: {
           markdown: output.markdown,
           dataUri: output.dataUri,
-          imageUrl: output.imageUrl,
+          imageUrl: generatedAsset.fileUrl,
+          sourceImageUrl: output.imageUrl,
+          assetId: generatedAsset.id,
+          storageKey: generatedAsset.storageKey,
           referenceImages,
         },
         generatedAt: finishedAt.toISOString(),
@@ -677,12 +793,16 @@ async function executeTask(taskId: string) {
           workspaceId: task.workspaceId,
           resultType: "image",
           contentText: output.markdown,
+          assetId: generatedAsset.id,
           meta: {
             provider: output.provider,
             model: output.model,
             usage: output.usage,
             dataUri: output.dataUri,
-            imageUrl: output.imageUrl,
+            imageUrl: generatedAsset.fileUrl,
+            sourceImageUrl: output.imageUrl,
+            assetId: generatedAsset.id,
+            storageKey: generatedAsset.storageKey,
             referenceImages,
           },
         });
@@ -696,7 +816,10 @@ async function executeTask(taskId: string) {
             responsePayload: {
               content: output.markdown,
               dataUri: output.dataUri,
-              imageUrl: output.imageUrl,
+              imageUrl: generatedAsset.fileUrl,
+              sourceImageUrl: output.imageUrl,
+              assetId: generatedAsset.id,
+              storageKey: generatedAsset.storageKey,
               referenceImages,
               usage: output.usage,
               rawResponse: output.rawResponse,
@@ -722,11 +845,43 @@ async function executeTask(taskId: string) {
     }
 
     if (task.taskType === "video") {
+      const normalizedSettings = settings as Record<string, unknown>;
+
+      console.info("[canvas-video] request prepared", {
+        workspaceId: task.workspaceId,
+        canvasId: task.canvasId,
+        taskId: task.id,
+        nodeId: node.id,
+        nodeTitle: node.title,
+        model: task.model === "unassigned" ? null : task.model,
+        promptPreview: prompt.slice(0, 800),
+        promptLength: prompt.length,
+        generationMode: normalizedSettings.generationMode ?? "reference",
+        firstFrameImageUrl:
+          typeof normalizedSettings.firstFrameImageUrl === "string" ? normalizedSettings.firstFrameImageUrl : null,
+        lastFrameImageUrl:
+          typeof normalizedSettings.lastFrameImageUrl === "string" ? normalizedSettings.lastFrameImageUrl : null,
+        referenceImageCount: referenceImages.length,
+        referenceImagesPreview: referenceImages.slice(0, 5),
+      });
+
       const output = await generateVideoWithCloubic({
         prompt,
         model: task.model === "unassigned" ? undefined : task.model,
         settings,
       });
+
+      console.info("[canvas-video] provider task accepted", {
+        workspaceId: task.workspaceId,
+        canvasId: task.canvasId,
+        taskId: task.id,
+        nodeId: node.id,
+        provider: output.provider,
+        model: output.model,
+        providerTaskId: output.providerTaskId,
+        status: output.status,
+      });
+
       const updatedAt = new Date();
 
       await db.transaction(async (tx) => {
@@ -765,6 +920,16 @@ async function executeTask(taskId: string) {
     const message = error instanceof Error ? error.message : "Unknown task execution error.";
     const code = error instanceof ApiError ? error.code : "TASK_EXECUTION_FAILED";
 
+    console.error("[task-execution] failed", {
+      workspaceId: task.workspaceId,
+      canvasId: task.canvasId,
+      taskId: task.id,
+      nodeId: node.id,
+      taskType: task.taskType,
+      code,
+      message,
+    });
+
     await persistTaskFailure(task.id, node.id, code, message);
   }
 }
@@ -795,7 +960,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
   const upstreamNodeIds = await resolveSelectedUpstreamNodeIds(parsed, incomingEdges);
   const upstreamNodes = await getUpstreamNodes(parsed.workspaceId, parsed.canvasId, upstreamNodeIds);
   const referenceAssets = await getNodeReferenceAssets(node);
-  const requestPayload = buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
+  const requestPayload = await buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
 
   const createdTask = await db.transaction(async (tx) => {
     const [task] = await tx

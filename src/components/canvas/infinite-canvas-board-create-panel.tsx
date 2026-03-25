@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import {
   Boxes,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 
 import {
+  type CanvasNodeReferenceAsset,
   quickCreateOptions,
   type CanvasNodeType,
   type InstructionPresetOption,
@@ -41,8 +43,8 @@ type InfiniteCanvasBoardCreatePanelProps = {
   instructionPresets: InstructionPresetOption[];
   onToggleCreateOpen: () => void;
   onSelectQuickType: (type: CanvasNodeType) => void;
-  onCreateSubjectNode: (subject: LibraryItemOption) => void;
-  onCreateSceneNode: (scene: LibraryItemOption) => void;
+  onCreateSubjectNode: (subject: LibraryItemOption, selectedAssetId: string | null) => void;
+  onCreateSceneNode: (scene: LibraryItemOption, selectedAssetId: string | null) => void;
   onCreateInstructionNode: (instructionPreset: InstructionPresetOption) => void;
   onZoomOut: () => void;
   onZoomIn: () => void;
@@ -99,6 +101,10 @@ type ResourcePickerDialogProps<TResource> = {
   getKey: (item: TResource) => string;
   getTitle: (item: TResource) => string;
   getSubtitle: (item: TResource) => string;
+  selectedAssetId?: string | null;
+  onSelectAsset?: (assetId: string) => void;
+  getAssets?: (item: TResource) => CanvasNodeReferenceAsset[];
+  getCoverAssetId?: (item: TResource) => string | null | undefined;
 };
 
 function ResourcePickerDialog<TResource>({
@@ -117,7 +123,14 @@ function ResourcePickerDialog<TResource>({
   getKey,
   getTitle,
   getSubtitle,
+  selectedAssetId,
+  onSelectAsset,
+  getAssets,
+  getCoverAssetId,
 }: ResourcePickerDialogProps<TResource>) {
+  const selectedItem = selectedId ? items.find((item) => getKey(item) === selectedId) ?? null : null;
+  const selectedAssets = selectedItem && getAssets ? getAssets(selectedItem) : [];
+
   return (
     <Dialog
       open={open}
@@ -193,6 +206,58 @@ function ResourcePickerDialog<TResource>({
           ) : (
             <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">{emptyMessage}</div>
           )}
+
+          {selectedItem && getAssets && onSelectAsset ? (
+            <div className="rounded-2xl border bg-muted/15 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">默认使用图片</p>
+                  <p className="text-xs text-muted-foreground">
+                    {selectedAssets.length > 0
+                      ? "首张会直接作为节点预览，其他图片会一并作为参考图带入节点。"
+                      : "当前资源还没有图片，加入画布后只会带入文字信息。"}
+                  </p>
+                </div>
+                {selectedAssets.length > 0 ? (
+                  <span className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground">
+                    共 {selectedAssets.length} 张
+                  </span>
+                ) : null}
+              </div>
+
+              {selectedAssets.length > 0 ? (
+                <div className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-4">
+                  {selectedAssets.map((asset) => {
+                    const isAssetSelected = selectedAssetId === asset.id;
+                    const isCoverAsset = getCoverAssetId?.(selectedItem) === asset.id;
+
+                    return (
+                      <button
+                        key={asset.id}
+                        className={cn(
+                          "overflow-hidden rounded-2xl border bg-background text-left transition",
+                          isAssetSelected ? "border-primary ring-2 ring-primary/20" : "hover:border-primary/30",
+                        )}
+                        type="button"
+                        onClick={() => onSelectAsset(asset.id)}
+                      >
+                        <div className="relative aspect-square w-full bg-muted/30">
+                          <Image alt={asset.fileName} className="object-cover" fill sizes="160px" src={asset.fileUrl} />
+                        </div>
+                        <div className="space-y-1 p-2">
+                          <p className="truncate text-[11px] font-medium text-foreground">{asset.fileName}</p>
+                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                            {isCoverAsset ? <span className="rounded-full border px-1.5 py-0.5">封面</span> : null}
+                            <span className="rounded-full border px-1.5 py-0.5">{isAssetSelected ? "当前预览" : "可选"}</span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-5 py-4">
@@ -251,22 +316,34 @@ export function InfiniteCanvasBoardCreatePanel({
 }: InfiniteCanvasBoardCreatePanelProps) {
   const [activeResourceModal, setActiveResourceModal] = useState<ResourceModalKind | null>(null);
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
+  const [selectedResourceAssetId, setSelectedResourceAssetId] = useState<string | null>(null);
+
+  function resolveDefaultAssetId(item: LibraryItemOption | undefined) {
+    if (!item) {
+      return null;
+    }
+
+    return item.coverAssetId ?? item.assets?.[0]?.id ?? null;
+  }
 
   function openResourceModal(kind: ResourceModalKind) {
-    const firstResourceId =
+    const firstResource =
       kind === "subject"
-        ? subjects[0]?.id ?? null
+        ? subjects[0]
         : kind === "scene"
-          ? scenes[0]?.id ?? null
-          : instructionPresets[0]?.id ?? null;
+          ? scenes[0]
+          : instructionPresets[0];
+    const firstResourceId = firstResource?.id ?? null;
 
     setActiveResourceModal(kind);
     setSelectedResourceId(firstResourceId);
+    setSelectedResourceAssetId(kind === "instruction" ? null : resolveDefaultAssetId(firstResource as LibraryItemOption | undefined));
   }
 
   function closeResourceModal() {
     setActiveResourceModal(null);
     setSelectedResourceId(null);
+    setSelectedResourceAssetId(null);
   }
 
   function confirmResourceSelection() {
@@ -278,7 +355,7 @@ export function InfiniteCanvasBoardCreatePanel({
       const selectedSubject = subjects.find((item) => item.id === selectedResourceId);
 
       if (selectedSubject) {
-        onCreateSubjectNode(selectedSubject);
+        onCreateSubjectNode(selectedSubject, selectedResourceAssetId);
         closeResourceModal();
       }
 
@@ -289,7 +366,7 @@ export function InfiniteCanvasBoardCreatePanel({
       const selectedScene = scenes.find((item) => item.id === selectedResourceId);
 
       if (selectedScene) {
-        onCreateSceneNode(selectedScene);
+        onCreateSceneNode(selectedScene, selectedResourceAssetId);
         closeResourceModal();
       }
 
@@ -428,7 +505,16 @@ export function InfiniteCanvasBoardCreatePanel({
         title="选择主体资源"
         onClose={closeResourceModal}
         onConfirm={confirmResourceSelection}
-        onSelect={setSelectedResourceId}
+        onSelect={(resourceId) => {
+          const selectedSubject = subjects.find((item) => item.id === resourceId);
+
+          setSelectedResourceId(resourceId);
+          setSelectedResourceAssetId(resolveDefaultAssetId(selectedSubject));
+        }}
+        selectedAssetId={selectedResourceAssetId}
+        onSelectAsset={setSelectedResourceAssetId}
+        getAssets={(item) => item.assets ?? []}
+        getCoverAssetId={(item) => item.coverAssetId}
       />
 
       <ResourcePickerDialog
@@ -446,7 +532,16 @@ export function InfiniteCanvasBoardCreatePanel({
         title="选择场景资源"
         onClose={closeResourceModal}
         onConfirm={confirmResourceSelection}
-        onSelect={setSelectedResourceId}
+        onSelect={(resourceId) => {
+          const selectedScene = scenes.find((item) => item.id === resourceId);
+
+          setSelectedResourceId(resourceId);
+          setSelectedResourceAssetId(resolveDefaultAssetId(selectedScene));
+        }}
+        selectedAssetId={selectedResourceAssetId}
+        onSelectAsset={setSelectedResourceAssetId}
+        getAssets={(item) => item.assets ?? []}
+        getCoverAssetId={(item) => item.coverAssetId}
       />
 
       <ResourcePickerDialog

@@ -25,8 +25,11 @@ export type LibraryItemOption = {
   entityType: string | null;
   name: string;
   description: string | null;
+  coverAssetId?: string | null;
+  coverAssetUrl?: string | null;
   promptHints: string | null;
   tags: string[];
+  assets?: CanvasNodeReferenceAsset[];
 };
 
 export type InstructionPresetOption = {
