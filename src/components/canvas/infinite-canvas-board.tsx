@@ -1384,15 +1384,14 @@ export function InfiniteCanvasBoard({
         instructionPresets={instructionPresets}
         isCreateOpen={isCreateOpen}
         nodeCount={nodes.length}
-        onCloseCreateOpen={() => setIsCreateOpen(false)}
-        onCreateInstructionNode={(instructionPreset, nodeType) => {
-          void createNodeFromResource(instructionPreset, "instruction", nodeType);
+        onCreateInstructionNode={(instructionPreset) => {
+          void createNodeFromResource(instructionPreset, "instruction", "text");
         }}
-        onCreateSceneNode={(scene, nodeType) => {
-          void createNodeFromResource(scene, "scene", nodeType);
+        onCreateSceneNode={(scene) => {
+          void createNodeFromResource(scene, "scene", "image");
         }}
-        onCreateSubjectNode={(subject, nodeType) => {
-          void createNodeFromResource(subject, "subject", nodeType);
+        onCreateSubjectNode={(subject) => {
+          void createNodeFromResource(subject, "subject", "image");
         }}
         onSelectQuickType={setQuickType}
         onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
