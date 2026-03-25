@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, lte } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
-import { canvasEdges, canvasNodes, canvases, generationTasks, taskResults } from "@/infrastructure/db/schema";
+import { assets, canvasEdges, canvasNodes, canvases, generationTasks, taskResults } from "@/infrastructure/db/schema";
 import {
   generateImageWithCloubic,
   generateTextWithCloubic,
@@ -81,6 +81,54 @@ function normalizeOutputContent(outputSnapshot: Record<string, unknown> | null) 
   }
 
   return null;
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function extractImageSourceFromString(value: string) {
+  const markdownMatch = value.match(/!\[[^\]]*]\(([^)]+)\)/);
+
+  if (markdownMatch?.[1]) {
+    return markdownMatch[1];
+  }
+
+  const directMatch = value.match(/(data:image\/[^\s)]+|https?:\/\/[^\s)]+\.(?:png|jpg|jpeg|webp|gif|bmp|svg)(?:\?[^\s)]*)?)/i);
+
+  return directMatch?.[1];
+}
+
+function extractImageSourceFromSnapshot(outputSnapshot: Record<string, unknown> | null) {
+  if (!outputSnapshot) {
+    return undefined;
+  }
+
+  const structuredData =
+    outputSnapshot.structuredData && typeof outputSnapshot.structuredData === "object"
+      ? (outputSnapshot.structuredData as Record<string, unknown>)
+      : null;
+
+  const candidateValues = [
+    structuredData?.imageUrl,
+    structuredData?.dataUri,
+    structuredData?.url,
+    outputSnapshot.content,
+  ];
+
+  for (const candidate of candidateValues) {
+    if (typeof candidate !== "string" || candidate.trim().length === 0) {
+      continue;
+    }
+
+    const source = extractImageSourceFromString(candidate.trim());
+
+    if (source) {
+      return source;
+    }
+  }
+
+  return undefined;
 }
 
 async function assertNodeForRun(workspaceId: string, canvasId: string, nodeId: string) {
@@ -176,9 +224,44 @@ async function getUpstreamNodes(workspaceId: string, canvasId: string, upstreamN
     .filter((node): node is NonNullable<typeof node> => Boolean(node));
 }
 
+async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNodeForRun>>) {
+  const assetIds = uniqueStrings(
+    ((node.resourceRefs as { assetIds?: string[] } | null)?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string"),
+  );
+
+  if (assetIds.length === 0) {
+    return [];
+  }
+
+  const imageAssets = await db
+    .select({
+      id: assets.id,
+      fileUrl: assets.fileUrl,
+      fileName: assets.fileName,
+      mimeType: assets.mimeType,
+      width: assets.width,
+      height: assets.height,
+    })
+    .from(assets)
+    .where(
+      and(
+        eq(assets.workspaceId, node.workspaceId),
+        eq(assets.assetType, "image"),
+        inArray(assets.id, assetIds),
+      ),
+    );
+
+  const assetMap = new Map(imageAssets.map((asset) => [asset.id, asset]));
+
+  return assetIds
+    .map((assetId) => assetMap.get(assetId))
+    .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
+}
+
 function buildExecutionPayload(
   node: Awaited<ReturnType<typeof assertNodeForRun>>,
   upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodes>>,
+  referenceAssets: Awaited<ReturnType<typeof getNodeReferenceAssets>>,
   input: z.infer<typeof runNodeInputSchema>,
 ) {
   for (const upstreamNode of upstreamNodes) {
@@ -195,8 +278,9 @@ function buildExecutionPayload(
       content: normalizeOutputContent(upstreamNode.outputSnapshot as Record<string, unknown> | null),
       outputSnapshot: upstreamNode.outputSnapshot,
       status: upstreamNode.status,
+      imageUrl: extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null),
     }))
-    .filter((item) => item.content || item.outputSnapshot);
+    .filter((item) => item.content || item.outputSnapshot || item.imageUrl);
 
   const promptSegments = [node.promptInput?.trim() ?? ""];
 
@@ -208,6 +292,52 @@ function buildExecutionPayload(
     );
   }
 
+  const mergedSettings = {
+    ...(node.settingsJson as Record<string, unknown>),
+    ...input.overrideSettings,
+  };
+  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset.fileUrl]));
+  const firstFrameAssetId =
+    typeof mergedSettings.firstFrameAssetId === "string" && mergedSettings.firstFrameAssetId.trim().length > 0
+      ? mergedSettings.firstFrameAssetId
+      : undefined;
+  const lastFrameAssetId =
+    typeof mergedSettings.lastFrameAssetId === "string" && mergedSettings.lastFrameAssetId.trim().length > 0
+      ? mergedSettings.lastFrameAssetId
+      : undefined;
+  const explicitReferenceAssetIds = uniqueStrings(
+    ((mergedSettings.referenceAssetIds as unknown[]) ?? []).filter(
+      (assetId): assetId is string => typeof assetId === "string",
+    ),
+  );
+  const managedVideoAssetIds = uniqueStrings([
+    ...(firstFrameAssetId ? [firstFrameAssetId] : []),
+    ...(lastFrameAssetId ? [lastFrameAssetId] : []),
+    ...explicitReferenceAssetIds,
+  ]);
+  const explicitReferenceImages = explicitReferenceAssetIds
+    .map((assetId) => referenceAssetMap.get(assetId))
+    .filter((fileUrl): fileUrl is string => Boolean(fileUrl));
+  const unassignedReferenceImages = referenceAssets
+    .filter((asset) => !managedVideoAssetIds.includes(asset.id))
+    .map((asset) => asset.fileUrl);
+  const referenceImages = uniqueStrings([
+    ...(node.type === "video" ? [...explicitReferenceImages, ...unassignedReferenceImages] : referenceAssets.map((asset) => asset.fileUrl)),
+    ...upstreamOutputs
+      .map((output) => output.imageUrl)
+      .filter((imageUrl): imageUrl is string => Boolean(imageUrl)),
+    ...(((mergedSettings.referenceImages as unknown[]) ?? []).filter(
+      (imageUrl): imageUrl is string => typeof imageUrl === "string",
+    )),
+  ]);
+  const firstFrameImageUrl =
+    (firstFrameAssetId ? referenceAssetMap.get(firstFrameAssetId) : undefined) ??
+    (node.type === "video" ? referenceImages[0] : undefined);
+  const lastFrameImageUrl = lastFrameAssetId ? referenceAssetMap.get(lastFrameAssetId) : undefined;
+  const shotPrompts = uniqueStrings(
+    ((mergedSettings.shotPrompts as unknown[]) ?? []).filter((item): item is string => typeof item === "string"),
+  );
+
   return {
     workspaceId: input.workspaceId,
     canvasId: input.canvasId,
@@ -218,9 +348,19 @@ function buildExecutionPayload(
     model: node.modelKey ?? "unassigned",
     prompt: promptSegments.filter(Boolean).join("\n\n"),
     settings: {
-      ...(node.settingsJson as Record<string, unknown>),
-      ...input.overrideSettings,
+      ...mergedSettings,
+      referenceImages,
+      ...(node.type === "video"
+        ? {
+            firstFrameImageUrl,
+            lastFrameImageUrl,
+            imageUrl: firstFrameImageUrl,
+            shotPrompts,
+          }
+        : {}),
     },
+    referenceImages,
+    referenceAssets,
     upstreamNodeIds: upstreamNodes.map((upstreamNode) => upstreamNode.id),
     upstreamOutputs,
     useUpstreamOutputs: input.useUpstreamOutputs,
@@ -319,6 +459,9 @@ async function executeTask(taskId: string) {
         ? (requestPayload.settings as Record<string, unknown>)
         : {};
     const prompt = typeof requestPayload.prompt === "string" ? requestPayload.prompt : "";
+    const referenceImages = Array.isArray(requestPayload.referenceImages)
+      ? requestPayload.referenceImages.filter((imageUrl): imageUrl is string => typeof imageUrl === "string" && imageUrl.trim().length > 0)
+      : [];
 
     if (task.taskType === "text") {
       const output = await generateTextWithCloubic({
@@ -385,15 +528,18 @@ async function executeTask(taskId: string) {
         prompt,
         model: task.model === "unassigned" ? undefined : task.model,
         settings,
+        referenceImages,
       });
       const finishedAt = new Date();
       const outputSnapshot = {
         taskId: task.id,
         outputType: "image",
-        content: output.markdown,
+        content: output.imageUrl ?? output.dataUri ?? output.markdown,
         structuredData: {
           markdown: output.markdown,
           dataUri: output.dataUri,
+          imageUrl: output.imageUrl,
+          referenceImages,
         },
         generatedAt: finishedAt.toISOString(),
       };
@@ -409,6 +555,8 @@ async function executeTask(taskId: string) {
             model: output.model,
             usage: output.usage,
             dataUri: output.dataUri,
+            imageUrl: output.imageUrl,
+            referenceImages,
           },
         });
 
@@ -421,6 +569,8 @@ async function executeTask(taskId: string) {
             responsePayload: {
               content: output.markdown,
               dataUri: output.dataUri,
+              imageUrl: output.imageUrl,
+              referenceImages,
               usage: output.usage,
               rawResponse: output.rawResponse,
             },
@@ -517,7 +667,8 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
   const incomingEdges = await getIncomingEdges(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
   const upstreamNodeIds = await resolveSelectedUpstreamNodeIds(parsed, incomingEdges);
   const upstreamNodes = await getUpstreamNodes(parsed.workspaceId, parsed.canvasId, upstreamNodeIds);
-  const requestPayload = buildExecutionPayload(node, upstreamNodes, parsed);
+  const referenceAssets = await getNodeReferenceAssets(node);
+  const requestPayload = buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
 
   const createdTask = await db.transaction(async (tx) => {
     const [task] = await tx

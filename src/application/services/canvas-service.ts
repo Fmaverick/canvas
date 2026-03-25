@@ -1,8 +1,8 @@
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
-import { canvasEdges, canvasNodes, canvases } from "@/infrastructure/db/schema";
+import { assets, canvasEdges, canvasNodes, canvases } from "@/infrastructure/db/schema";
 import { ApiError } from "@/lib/api";
 
 export const listCanvasesInputSchema = z.object({
@@ -228,10 +228,44 @@ export async function getCanvasDetail(input: z.infer<typeof getCanvasDetailInput
       )
       .orderBy(desc(canvasEdges.createdAt)),
   ]);
+  const referencedAssetIds = Array.from(
+    new Set(
+      nodes.flatMap((node) => {
+        const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
+
+        return (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
+      }),
+    ),
+  );
+  const referenceAssets =
+    referencedAssetIds.length > 0
+      ? await db
+          .select({
+            id: assets.id,
+            fileName: assets.fileName,
+            fileUrl: assets.fileUrl,
+            mimeType: assets.mimeType,
+            width: assets.width,
+            height: assets.height,
+          })
+          .from(assets)
+          .where(and(eq(assets.workspaceId, parsed.workspaceId), inArray(assets.id, referencedAssetIds)))
+      : [];
+  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset]));
 
   return {
     ...canvas,
-    nodes,
+    nodes: nodes.map((node) => {
+      const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
+      const assetIds = (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
+
+      return {
+        ...node,
+        referenceAssets: assetIds
+          .map((assetId) => referenceAssetMap.get(assetId))
+          .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
+      };
+    }),
     edges,
   };
 }

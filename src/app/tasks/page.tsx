@@ -71,6 +71,20 @@ function formatDateTime(value: Date | null) {
   }).format(value);
 }
 
+function getNextPollDisplay(value: Date | null, taskStatus: string, taskType: string) {
+  if (!value) {
+    return "—";
+  }
+
+  const formatted = formatDateTime(value);
+
+  if (taskType === "video" && taskStatus === "processing" && value.getTime() <= Date.now()) {
+    return `已到期 · ${formatted}`;
+  }
+
+  return formatted;
+}
+
 function buildHref(workspaceId: string | undefined, status: string | undefined, taskType: string | undefined) {
   const params = new URLSearchParams();
 
@@ -281,7 +295,7 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
                         </div>
                         <div className="rounded-xl border bg-background px-3 py-2">
                           <p className="text-xs text-muted-foreground">下次轮询</p>
-                          <p className="font-medium">{formatDateTime(task.nextPollAt)}</p>
+                          <p className="font-medium">{getNextPollDisplay(task.nextPollAt, task.status, task.taskType)}</p>
                         </div>
                       </div>
 
