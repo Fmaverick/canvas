@@ -153,6 +153,26 @@ function buildMockVideoStatusResponse(providerTaskId: string): VideoStatusOutput
   };
 }
 
+function distributeShotDurations(totalDuration: number, shotCount: number) {
+  if (shotCount <= 0) {
+    return [];
+  }
+
+  const normalizedTotal = Math.max(shotCount, Math.round(totalDuration));
+  const baseDuration = Math.floor(normalizedTotal / shotCount);
+  let remaining = normalizedTotal % shotCount;
+
+  return Array.from({ length: shotCount }, () => {
+    const duration = baseDuration + (remaining > 0 ? 1 : 0);
+
+    if (remaining > 0) {
+      remaining -= 1;
+    }
+
+    return duration;
+  });
+}
+
 async function postChatCompletion(payload: Record<string, unknown>) {
   if (!env.cloubicApiKey) {
     throw new Error("Missing CLOUBIC_API_KEY or AI_API_KEY.");
@@ -319,10 +339,11 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
     toString(input.settings?.imageUrl) ??
     toString(input.settings?.image_url);
   const lastFrameImageUrl = toString(input.settings?.lastFrameImageUrl);
-  const resolution = toString(input.settings?.resolution);
+  const size = toString(input.settings?.size) ?? "9:16";
   const generationMode = toString(input.settings?.generationMode) ?? "reference";
   const motionStrength = toNumber(input.settings?.motionStrength);
   const withAudio = Boolean(input.settings?.withAudio);
+  const sound = withAudio ? "on" : "off";
   const referenceImages = Array.isArray(input.settings?.referenceImages)
     ? input.settings.referenceImages.filter(
         (imageUrl): imageUrl is string => typeof imageUrl === "string" && imageUrl.trim().length > 0,
@@ -353,35 +374,70 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
 
   const prompt = promptSegments.filter(Boolean).join("\n\n");
   const images = Array.from(new Set([imageUrl, ...referenceImages].filter((value): value is string => Boolean(value))));
+  const multiPromptDurations = distributeShotDurations(duration, shotPrompts.length);
+  const multiPrompt =
+    generationMode === "multi_shot"
+      ? shotPrompts.map((shotPrompt, index) => ({
+          index: index + 1,
+          prompt: shotPrompt,
+          duration: multiPromptDurations[index] ?? 1,
+        }))
+      : [];
+  const metadata: Record<string, unknown> = {
+    multi_shot: generationMode === "multi_shot",
+    sound,
+    generation_mode: generationMode,
+    ...(typeof motionStrength === "number" ? { motion_strength: motionStrength } : {}),
+  };
+
+  if (generationMode === "multi_shot") {
+    metadata.shot_type = "customize";
+    metadata.multi_prompt = multiPrompt;
+  }
+
+  if (generationMode === "first_last" && lastFrameImageUrl) {
+    metadata.last_frame_image_url = lastFrameImageUrl;
+  }
+
+  const requestBody: Record<string, unknown> = {
+    model: input.model ?? env.cloubicVideoModel,
+    duration,
+    size,
+    metadata,
+  };
+
+  if (generationMode === "multi_shot") {
+    if (prompt) {
+      requestBody.prompt = prompt;
+    }
+
+    if (imageUrl) {
+      requestBody.image = imageUrl;
+    }
+  } else if (generationMode === "first_last") {
+    if (prompt) {
+      requestBody.prompt = prompt;
+    }
+
+    if (imageUrl) {
+      requestBody.image = imageUrl;
+    }
+  } else {
+    if (prompt) {
+      requestBody.prompt = prompt;
+    }
+
+    if (images.length > 0) {
+      requestBody.images = images;
+    }
+  }
+
   const rawResponse = await requestCloubic("/video/generations", {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({
-      model: input.model ?? env.cloubicVideoModel,
-      prompt,
-      duration,
-      image_url: imageUrl,
-      images,
-      reference_images: referenceImages,
-      first_frame_image_url: imageUrl,
-      last_frame_image_url: lastFrameImageUrl,
-      with_audio: withAudio,
-      enable_audio: withAudio,
-      metadata: {
-        ...(images.length > 0 ? { images } : {}),
-        reference_images: referenceImages,
-        first_frame_image_url: imageUrl,
-        with_audio: withAudio,
-        enable_audio: withAudio,
-        generation_mode: generationMode,
-        resolution,
-        motion_strength: motionStrength,
-        shot_prompts: shotPrompts,
-        last_frame_image_url: lastFrameImageUrl,
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   const providerTaskId =

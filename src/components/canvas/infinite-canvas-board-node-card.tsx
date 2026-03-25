@@ -1,0 +1,475 @@
+"use client";
+
+import type { ReactNode } from "react";
+import { ImageIcon, Play, Square, Trash2, Video } from "lucide-react";
+
+import { CanvasTaskActions } from "@/components/canvas/canvas-task-actions";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+
+import {
+  DEFAULT_VIDEO_NODE_SETTINGS,
+  TEXT_NODE_SIZE,
+  VIDEO_NODE_HEIGHT,
+  VIDEO_NODE_WIDTH,
+  getImageNodePreview,
+  getImageNodeSize,
+  getReferenceAssetById,
+  getTextNodeContent,
+  getVideoNodeOutputSource,
+  normalizeVideoNodeSettings,
+  quickCreateOptions,
+  statusBadgeVariant,
+  type CanvasNode,
+  type CanvasTask,
+} from "@/components/canvas/infinite-canvas-board.shared";
+
+type InfiniteCanvasBoardNodeCardProps = {
+  canvasId: string;
+  workspaceId: string;
+  canEdit: boolean;
+  canGenerate: boolean;
+  node: CanvasNode;
+  latestTask?: CanvasTask | null;
+  effectiveSelectedNodeId: string | null;
+  screenPoint: { x: number; y: number };
+  zoom: number;
+  imagePreviewDimensions?: { width: number; height: number } | null;
+  savingNodeId: string | null;
+  deletingNodeId: string | null;
+  editingTextNodeTitleId: string | null;
+  editingTextNodeTitle: string;
+  isSavingTextNodeTitle: boolean;
+  playingVideoNodeId: string | null;
+  isCoolingDown: boolean;
+  onRegisterVideoElement: (nodeId: string, element: HTMLVideoElement | null) => void;
+  onSelectNode: (nodeId: string) => void;
+  onOpenTextEditor: () => void;
+  onStartDrag: (nodeId: string, clientX: number, clientY: number) => void;
+  onDeleteNode: (nodeId: string) => void;
+  onStartEditingTitle: (nodeId: string, title: string) => void;
+  onTitleChange: (value: string) => void;
+  onSaveTitle: (nodeId: string) => void;
+  onCancelEditingTitle: () => void;
+  onSyncImagePreviewSize: (nodeId: string, width: number, height: number) => void;
+  onStartVideoPreview: (nodeId: string) => void;
+  onStopVideoPreview: (nodeId: string) => void;
+  onClearPlayingVideoNode: (nodeId: string) => void;
+};
+
+type NodeFloatingTitleBarProps = {
+  canEdit: boolean;
+  node: CanvasNode;
+  deletingNodeId: string | null;
+  isEditingTitle: boolean;
+  editingTextNodeTitle: string;
+  isSavingTextNodeTitle: boolean;
+  extraStatus?: ReactNode;
+  onDeleteNode: (nodeId: string) => void;
+  onStartEditingTitle: (nodeId: string, title: string) => void;
+  onTitleChange: (value: string) => void;
+  onSaveTitle: (nodeId: string) => void;
+  onCancelEditingTitle: () => void;
+};
+
+function NodeFloatingTitleBar({
+  canEdit,
+  node,
+  deletingNodeId,
+  isEditingTitle,
+  editingTextNodeTitle,
+  isSavingTextNodeTitle,
+  extraStatus,
+  onDeleteNode,
+  onStartEditingTitle,
+  onTitleChange,
+  onSaveTitle,
+  onCancelEditingTitle,
+}: NodeFloatingTitleBarProps) {
+  return (
+    <div
+      className="absolute -top-10 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 text-foreground"
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        onStartEditingTitle(node.id, node.title);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="rounded-full bg-background px-3 py-1 text-sm font-medium shadow-sm">
+        {isEditingTitle ? (
+          <Input
+            autoFocus
+            className="h-7 min-w-40 border-0 bg-transparent px-0 text-center text-sm shadow-none focus-visible:ring-0"
+            value={editingTextNodeTitle}
+            onBlur={() => onSaveTitle(node.id)}
+            onChange={(event) => onTitleChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                onSaveTitle(node.id);
+              }
+
+              if (event.key === "Escape") {
+                onCancelEditingTitle();
+              }
+            }}
+          />
+        ) : (
+          <span>{node.title}</span>
+        )}
+      </div>
+      {canEdit ? (
+        <button
+          aria-label={`删除${node.title}`}
+          className="inline-flex size-8 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-destructive"
+          disabled={deletingNodeId === node.id}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDeleteNode(node.id);
+          }}
+        >
+          <Trash2 className="size-4" />
+        </button>
+      ) : null}
+      {extraStatus}
+      {isSavingTextNodeTitle && isEditingTitle ? (
+        <div className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground shadow-sm">
+          保存中
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function InfiniteCanvasBoardNodeCard({
+  canvasId,
+  workspaceId,
+  canEdit,
+  canGenerate,
+  node,
+  latestTask,
+  effectiveSelectedNodeId,
+  screenPoint,
+  zoom,
+  imagePreviewDimensions,
+  savingNodeId,
+  deletingNodeId,
+  editingTextNodeTitleId,
+  editingTextNodeTitle,
+  isSavingTextNodeTitle,
+  playingVideoNodeId,
+  isCoolingDown,
+  onRegisterVideoElement,
+  onSelectNode,
+  onOpenTextEditor,
+  onStartDrag,
+  onDeleteNode,
+  onStartEditingTitle,
+  onTitleChange,
+  onSaveTitle,
+  onCancelEditingTitle,
+  onSyncImagePreviewSize,
+  onStartVideoPreview,
+  onStopVideoPreview,
+  onClearPlayingVideoNode,
+}: InfiniteCanvasBoardNodeCardProps) {
+  const optionTint = quickCreateOptions.find((option) => option.value === node.type)?.tint ?? "from-slate-100 to-slate-50";
+  const isTextNode = node.type === "text";
+  const isImageNode = node.type === "image";
+  const isVideoNode = node.type === "video";
+  const imagePreview = isImageNode ? getImageNodePreview(node.outputSnapshot, node.referenceAssets) : null;
+  const videoSettings = isVideoNode ? normalizeVideoNodeSettings(node.settingsJson) : DEFAULT_VIDEO_NODE_SETTINGS;
+  const videoOutputSource = isVideoNode ? getVideoNodeOutputSource(node.outputSnapshot) : null;
+  const videoFirstFrameAsset = isVideoNode ? getReferenceAssetById(node.referenceAssets, videoSettings.firstFrameAssetId) : null;
+  const videoReferenceAsset = isVideoNode
+    ? getReferenceAssetById(node.referenceAssets, videoSettings.referenceAssetIds[0] ?? null)
+    : null;
+  const videoLastFrameAsset = isVideoNode ? getReferenceAssetById(node.referenceAssets, videoSettings.lastFrameAssetId) : null;
+  const videoPreviewAsset = videoFirstFrameAsset ?? videoReferenceAsset ?? videoLastFrameAsset;
+  const imageNodeSize = getImageNodeSize(imagePreviewDimensions);
+  const isTextNodeGenerating =
+    isTextNode &&
+    (latestTask?.status === "queued" || latestTask?.status === "processing" || isCoolingDown);
+  const isEditingTitle = editingTextNodeTitleId === node.id;
+
+  return (
+    <div
+      aria-label={node.title}
+      className={cn(
+        "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
+        isTextNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
+        effectiveSelectedNodeId === node.id ? "ring-2 ring-primary/50" : undefined,
+        canEdit ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
+      )}
+      role="button"
+      style={{
+        left: `${screenPoint.x}px`,
+        top: `${screenPoint.y}px`,
+        width: `${isTextNode ? TEXT_NODE_SIZE : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : 248}px`,
+        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : 132}px`,
+        transform: `translate(-50%, -50%) scale(${zoom})`,
+        transformOrigin: "center center",
+      }}
+      tabIndex={0}
+      onDoubleClick={() => {
+        onSelectNode(node.id);
+
+        if (isTextNode) {
+          onOpenTextEditor();
+        }
+      }}
+      onPointerDown={(event) => onStartDrag(node.id, event.clientX, event.clientY)}
+    >
+      {isTextNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            extraStatus={
+              isTextNodeGenerating ? (
+                <div className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm">
+                  生成中
+                </div>
+              ) : null
+            }
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+            <div className="absolute inset-0 bg-white/62" />
+            <div className="relative flex h-full flex-col p-5">
+              <p className="line-clamp-6 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+                {getTextNodeContent(node.outputSnapshot) || "双击后直接写内容"}
+              </p>
+              <div className="mt-auto pt-4 text-xs text-muted-foreground">双击节点可放大编辑正文</div>
+            </div>
+          </div>
+        </>
+      ) : isImageNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            extraStatus={
+              latestTask?.status === "queued" || latestTask?.status === "processing" ? (
+                <div className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm">
+                  生成中
+                </div>
+              ) : null
+            }
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+            <div className="absolute inset-0 bg-white/24" />
+            {imagePreview ? (
+              <div className="relative h-full w-full">
+                <img
+                  alt={node.title}
+                  className="h-full w-full object-cover"
+                  draggable={false}
+                  src={imagePreview}
+                  onLoad={(event) =>
+                    onSyncImagePreviewSize(node.id, event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)
+                  }
+                />
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.14),transparent_55%)]">
+                <div className="rounded-full bg-background/80 p-2 shadow-sm">
+                  <ImageIcon className="size-4 text-muted-foreground" />
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      ) : isVideoNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            extraStatus={
+              latestTask?.status === "queued" || latestTask?.status === "processing" ? (
+                <div className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm">
+                  生成中
+                </div>
+              ) : null
+            }
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+            <div className="absolute inset-0 bg-white/24" />
+            {videoOutputSource ? (
+              <div className="relative h-full w-full">
+                <video
+                  ref={(element) => {
+                    onRegisterVideoElement(node.id, element);
+                  }}
+                  className="h-full w-full object-cover"
+                  playsInline
+                  preload="metadata"
+                  src={videoOutputSource}
+                  onEnded={() => onClearPlayingVideoNode(node.id)}
+                  onPause={(event) => {
+                    if (event.currentTarget.ended) {
+                      return;
+                    }
+
+                    onClearPlayingVideoNode(node.id);
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-background/45 via-transparent to-transparent" />
+                {playingVideoNodeId === node.id ? (
+                  <button
+                    aria-label={`结束${node.title}播放`}
+                    className="absolute right-3 top-3 inline-flex size-9 items-center justify-center rounded-full bg-background/88 text-foreground shadow-sm transition hover:bg-background"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onStopVideoPreview(node.id);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <Square className="size-4 fill-current" />
+                  </button>
+                ) : (
+                  <button
+                    aria-label={`播放${node.title}`}
+                    className="absolute inset-0 flex items-center justify-center"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onStartVideoPreview(node.id);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <span className="inline-flex size-14 items-center justify-center rounded-full bg-background/90 text-foreground shadow-lg transition hover:scale-105">
+                      <Play className="ml-1 size-6 fill-current" />
+                    </span>
+                  </button>
+                )}
+              </div>
+            ) : videoPreviewAsset ? (
+              <div className="relative h-full w-full">
+                <img alt={node.title} className="h-full w-full object-cover" draggable={false} src={videoPreviewAsset.fileUrl} />
+                <div className="absolute inset-0 flex items-center justify-center bg-background/10">
+                  <span className="inline-flex size-14 items-center justify-center rounded-full bg-background/90 text-foreground shadow-lg">
+                    <Play className="ml-1 size-6" />
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(244,63,94,0.16),transparent_55%)]">
+                <div className="rounded-full bg-background/80 p-2 shadow-sm">
+                  <Video className="size-4 text-muted-foreground" />
+                </div>
+              </div>
+            )}
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-x-3 bottom-3 flex items-center justify-between gap-2 transition-opacity duration-200",
+                playingVideoNodeId === node.id ? "opacity-0" : "opacity-0 group-hover:opacity-100",
+              )}
+            >
+              <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-foreground shadow-sm">
+                {videoSettings.generationMode === "first_last"
+                  ? "首尾帧"
+                  : videoSettings.generationMode === "multi_shot"
+                    ? "多镜头"
+                    : "参考生成"}
+              </div>
+              <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {videoSettings.durationSec}s · {videoSettings.size}
+              </div>
+              <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {videoSettings.withAudio ? "带声音" : "静音视频"}
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+          <div className="absolute inset-0 bg-white/55" />
+          <div className="relative">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Badge variant="outline">{node.type}</Badge>
+              <Badge variant={statusBadgeVariant[node.status as keyof typeof statusBadgeVariant] ?? "outline"}>
+                {node.status}
+              </Badge>
+              {savingNodeId === node.id ? <Badge variant="ghost">saving</Badge> : null}
+            </div>
+            <div className="flex items-start justify-between gap-2">
+              <p className="font-medium text-foreground">{node.title}</p>
+              {canEdit ? (
+                <button
+                  aria-label={`删除${node.title}`}
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border bg-background/90 text-muted-foreground shadow-sm transition hover:text-destructive"
+                  disabled={deletingNodeId === node.id}
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDeleteNode(node.id);
+                  }}
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              ) : null}
+            </div>
+            <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
+              {node.promptInput?.trim() || "当前节点还没有 prompt。"}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {latestTask ? `task ${latestTask.status} · retry ${latestTask.retryCount}` : "尚未运行"}
+            </p>
+            {effectiveSelectedNodeId === node.id ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2" onPointerDown={(event) => event.stopPropagation()}>
+                {canGenerate ? (
+                  <CanvasTaskActions
+                    canvasId={canvasId}
+                    nodeId={node.id}
+                    taskId={latestTask?.id}
+                    taskStatus={latestTask?.status}
+                    taskType={node.type}
+                    workspaceId={workspaceId}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

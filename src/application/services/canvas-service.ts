@@ -135,6 +135,23 @@ async function assertEdgeExists(workspaceId: string, canvasId: string, edgeId: s
   return edge;
 }
 
+function normalizeVideoSettingsForClient(settingsJson: Record<string, unknown> | null | undefined) {
+  if (!settingsJson || typeof settingsJson !== "object") {
+    return {};
+  }
+
+  const currentSize = settingsJson.size;
+
+  if (currentSize === "9:16" || currentSize === "16:9" || currentSize === "1:1") {
+    return settingsJson;
+  }
+
+  return {
+    ...settingsJson,
+    size: "9:16",
+  };
+}
+
 function assertNoCycle(
   edges: Array<{ sourceNodeId: string; targetNodeId: string }>,
   sourceNodeId: string,
@@ -261,6 +278,10 @@ export async function getCanvasDetail(input: z.infer<typeof getCanvasDetailInput
 
       return {
         ...node,
+        settingsJson:
+          node.type === "video"
+            ? normalizeVideoSettingsForClient(node.settingsJson as Record<string, unknown> | null | undefined)
+            : node.settingsJson,
         referenceAssets: assetIds
           .map((assetId) => referenceAssetMap.get(assetId))
           .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
