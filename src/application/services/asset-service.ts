@@ -1,19 +1,44 @@
-import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+
+import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
 import { assets } from "@/infrastructure/db/schema";
 import {
+  createClient,
   createPresignedUploadUrl,
   createStorageKey,
+  deleteStoredObject,
   getStoredObjectMetadata,
+  getPublicUrlForStorageKey,
 } from "@/infrastructure/storage/s3";
 import { ApiError } from "@/lib/api";
+import { env } from "@/lib/env";
 
-const ownerTypeSchema = z.enum(["product", "model_profile", "canvas_node", "task_result"]);
+const ownerTypeSchema = z.enum([
+  "product",
+  "model_profile",
+  "library_item",
+  "instruction_preset",
+  "canvas_node",
+  "task_result",
+]);
 const assetTypeSchema = z.enum(["image", "video", "audio", "document"]);
 
 const uploadMetaSchema = z.record(z.string(), z.unknown()).default({});
+const assetOwnerInputSchema = z.object({
+  workspaceId: z.uuid(),
+  ownerType: ownerTypeSchema,
+  ownerId: z.uuid(),
+});
+const deleteAssetInputSchema = z.object({
+  workspaceId: z.uuid(),
+  assetId: z.uuid(),
+  ownerType: ownerTypeSchema.optional(),
+  ownerId: z.uuid().optional(),
+});
 
 export const createUploadTicketInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -35,6 +60,17 @@ export const completeUploadInputSchema = z.object({
   height: z.coerce.number().int().positive().optional(),
   durationMs: z.coerce.number().int().positive().optional(),
   checksum: z.string().trim().optional(),
+  meta: uploadMetaSchema,
+});
+
+export const createGeneratedAssetInputSchema = z.object({
+  workspaceId: z.uuid(),
+  ownerType: ownerTypeSchema,
+  ownerId: z.uuid(),
+  fileName: z.string().trim().min(1, "File name is required."),
+  sourceUrl: z.string().trim().optional(),
+  dataUri: z.string().trim().optional(),
+  mimeType: z.string().trim().optional(),
   meta: uploadMetaSchema,
 });
 
@@ -64,6 +100,26 @@ async function findAssetByStorageKey(workspaceId: string, storageKey: string) {
     .limit(1);
 
   return asset ?? null;
+}
+
+async function findAssetById(workspaceId: string, assetId: string) {
+  const [asset] = await db
+    .select()
+    .from(assets)
+    .where(and(eq(assets.workspaceId, workspaceId), eq(assets.id, assetId)))
+    .limit(1);
+
+  return asset ?? null;
+}
+
+export async function listAssetsByOwner(input: z.infer<typeof assetOwnerInputSchema>) {
+  const parsed = assetOwnerInputSchema.parse(input);
+
+  return db
+    .select()
+    .from(assets)
+    .where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.ownerType, parsed.ownerType), eq(assets.ownerId, parsed.ownerId)))
+    .orderBy(asc(assets.createdAt));
 }
 
 export async function createUploadTicket(input: z.infer<typeof createUploadTicketInputSchema>) {
@@ -131,4 +187,154 @@ export async function completeUpload(input: z.infer<typeof completeUploadInputSc
     .returning();
 
   return asset;
+}
+
+function parseDataUri(dataUri: string) {
+  const match = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+
+  if (!match) {
+    throw new ApiError(400, "INVALID_DATA_URI", "Unsupported generated image data URI.");
+  }
+
+  return {
+    mimeType: match[1],
+    buffer: Buffer.from(match[2], "base64"),
+  };
+}
+
+function inferExtensionFromMimeType(mimeType: string) {
+  const normalized = mimeType.trim().toLowerCase();
+
+  if (normalized === "image/png") {
+    return "png";
+  }
+
+  if (normalized === "image/webp") {
+    return "webp";
+  }
+
+  if (normalized === "image/gif") {
+    return "gif";
+  }
+
+  return "jpg";
+}
+
+async function uploadGeneratedAssetToStorage(params: {
+  workspaceId: string;
+  ownerType: z.infer<typeof ownerTypeSchema>;
+  ownerId: string;
+  fileName: string;
+  mimeType?: string;
+  sourceUrl?: string;
+  dataUri?: string;
+}) {
+  let fileBuffer: Buffer;
+  let mimeType = params.mimeType?.trim();
+
+  if (params.dataUri) {
+    const parsed = parseDataUri(params.dataUri);
+    fileBuffer = parsed.buffer;
+    mimeType = mimeType || parsed.mimeType;
+  } else if (params.sourceUrl) {
+    const response = await fetch(params.sourceUrl);
+
+    if (!response.ok) {
+      throw new ApiError(502, "GENERATED_IMAGE_FETCH_FAILED", "生成图片拉取失败。");
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    fileBuffer = Buffer.from(arrayBuffer);
+    mimeType = mimeType || response.headers.get("content-type") || "image/png";
+  } else {
+    throw new ApiError(400, "GENERATED_IMAGE_SOURCE_REQUIRED", "缺少生成图片来源。");
+  }
+
+  const resolvedMimeType = mimeType || "image/png";
+  const extension = inferExtensionFromMimeType(resolvedMimeType);
+  const storageKey = createStorageKey({
+    workspaceId: params.workspaceId,
+    ownerType: params.ownerType,
+    ownerId: params.ownerId,
+    fileName: `${params.fileName}.${extension}`,
+  });
+  const client = createClient();
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: env.storageBucket,
+      Key: storageKey,
+      Body: fileBuffer,
+      ContentType: resolvedMimeType,
+    }),
+  );
+
+  return {
+    storageKey,
+    fileUrl: getPublicUrlForStorageKey(storageKey),
+    fileSize: fileBuffer.byteLength,
+    mimeType: resolvedMimeType,
+  };
+}
+
+export async function createGeneratedAsset(input: z.infer<typeof createGeneratedAssetInputSchema>) {
+  const parsed = createGeneratedAssetInputSchema.parse(input);
+  const uploadResult = await uploadGeneratedAssetToStorage({
+    workspaceId: parsed.workspaceId,
+    ownerType: parsed.ownerType,
+    ownerId: parsed.ownerId,
+    fileName: parsed.fileName || `generated-${randomUUID()}`,
+    sourceUrl: parsed.sourceUrl,
+    dataUri: parsed.dataUri,
+    mimeType: parsed.mimeType,
+  });
+
+  const [asset] = await db
+    .insert(assets)
+    .values({
+      workspaceId: parsed.workspaceId,
+      ownerType: parsed.ownerType,
+      ownerId: parsed.ownerId,
+      assetType: "image",
+      fileName: parsed.fileName,
+      mimeType: uploadResult.mimeType,
+      storageKey: uploadResult.storageKey,
+      fileUrl: uploadResult.fileUrl,
+      fileSize: uploadResult.fileSize,
+      width: null,
+      height: null,
+      durationMs: null,
+      checksum: null,
+      meta: parsed.meta,
+    })
+    .returning();
+
+  return asset;
+}
+
+export async function deleteAsset(input: z.infer<typeof deleteAssetInputSchema>) {
+  const parsed = deleteAssetInputSchema.parse(input);
+  const existingAsset = await findAssetById(parsed.workspaceId, parsed.assetId);
+
+  if (!existingAsset) {
+    throw new ApiError(404, "ASSET_NOT_FOUND", "资源不存在。");
+  }
+
+  if (parsed.ownerType && existingAsset.ownerType !== parsed.ownerType) {
+    throw new ApiError(403, "ASSET_OWNER_MISMATCH", "资源归属不匹配。");
+  }
+
+  if (parsed.ownerId && existingAsset.ownerId !== parsed.ownerId) {
+    throw new ApiError(403, "ASSET_OWNER_MISMATCH", "资源归属不匹配。");
+  }
+
+  await db.delete(assets).where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.id, parsed.assetId)));
+
+  try {
+    await deleteStoredObject(existingAsset.storageKey);
+  } catch {
+    return existingAsset;
+  }
+
+  return existingAsset;
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { ApiError } from "@/lib/api";
@@ -42,7 +42,7 @@ function requireStorageConfig() {
   };
 }
 
-function createClient() {
+export function createClient() {
   const config = requireStorageConfig();
 
   return new S3Client({
@@ -87,6 +87,10 @@ function buildPublicUrl(storageKey: string) {
   }
 
   return `${endpointUrl.protocol}//${encodeURIComponent(config.bucket)}.${endpointUrl.host}${basePath}/${normalizedKey}`;
+}
+
+export function getPublicUrlForStorageKey(storageKey: string) {
+  return buildPublicUrl(storageKey);
 }
 
 export function createStorageKey(params: {
@@ -156,4 +160,16 @@ export async function getStoredObjectMetadata(storageKey: string) {
     eTag: result.ETag?.replaceAll('"', "") ?? null,
     lastModified: result.LastModified ?? null,
   };
+}
+
+export async function deleteStoredObject(storageKey: string) {
+  const config = requireStorageConfig();
+  const client = createClient();
+
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: config.bucket,
+      Key: storageKey,
+    }),
+  );
 }

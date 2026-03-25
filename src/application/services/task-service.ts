@@ -1,8 +1,9 @@
-import { and, asc, desc, eq, inArray, lte } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, or } from "drizzle-orm";
 import { z } from "zod";
 
+import { createGeneratedAsset, listAssetsByOwner } from "@/application/services/asset-service";
 import { db } from "@/infrastructure/db/client";
-import { assets, canvasEdges, canvasNodes, canvases, generationTasks, taskResults } from "@/infrastructure/db/schema";
+import { assets, canvasEdges, canvasNodes, canvases, generationTasks, instructionPresets, libraryItems, taskResults } from "@/infrastructure/db/schema";
 import {
   generateImageWithCloubic,
   generateTextWithCloubic,
@@ -53,6 +54,18 @@ export const listTasksInputSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).optional(),
 });
 
+export const runLibraryItemImageGenerationInputSchema = z.object({
+  workspaceId: z.uuid(),
+  actorUserId: z.uuid(),
+  itemId: z.uuid(),
+  itemKind: z.enum(["subject", "scene"]).optional(),
+  requestId: z.string().min(1, "request_id is required."),
+  mode: z.enum(["text_to_image", "image_to_image"]).default("text_to_image"),
+  instructionPresetId: z.uuid().optional(),
+  prompt: z.string().trim().optional(),
+  referenceAssetIds: z.array(z.uuid()).default([]),
+});
+
 function tryParseStructuredData(content: string) {
   try {
     const parsed = JSON.parse(content);
@@ -85,6 +98,30 @@ function normalizeOutputContent(outputSnapshot: Record<string, unknown> | null) 
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function buildLibraryItemGenerationPrompt(params: {
+  item: {
+    name: string;
+    description: string | null;
+    promptHints: string | null;
+  };
+  instructionPreset: {
+    promptTemplate: string;
+    negativePrompt: string | null;
+  } | null;
+  prompt: string | undefined;
+}) {
+  return [
+    params.instructionPreset?.promptTemplate ?? null,
+    params.item.name,
+    params.item.description,
+    params.item.promptHints,
+    params.prompt,
+    params.instructionPreset?.negativePrompt ? `Negative prompt: ${params.instructionPreset.negativePrompt}` : null,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n\n");
 }
 
 function resolveUpstreamSemantic(sourceType: string, targetType: string) {
@@ -161,6 +198,78 @@ async function assertNodeForRun(workspaceId: string, canvasId: string, nodeId: s
   }
 
   return node;
+}
+
+async function assertLibraryItemForGeneration(
+  workspaceId: string,
+  itemId: string,
+  expectedKind?: "subject" | "scene",
+) {
+  const [item] = await db
+    .select()
+    .from(libraryItems)
+    .where(
+      and(
+        eq(libraryItems.id, itemId),
+        eq(libraryItems.workspaceId, workspaceId),
+        expectedKind ? eq(libraryItems.kind, expectedKind) : undefined,
+      ),
+    )
+    .limit(1);
+
+  if (!item) {
+    throw new ApiError(404, "LIBRARY_ITEM_NOT_FOUND", expectedKind === "scene" ? "场景资源不存在。" : "主体资源不存在。");
+  }
+
+  return item;
+}
+
+async function resolveInstructionPresetForGeneration(workspaceId: string, actorUserId: string, presetId?: string) {
+  if (!presetId) {
+    return null;
+  }
+
+  const [preset] = await db
+    .select()
+    .from(instructionPresets)
+    .where(
+      and(
+        eq(instructionPresets.id, presetId),
+        eq(instructionPresets.status, "active"),
+        or(
+          and(eq(instructionPresets.scope, "workspace"), eq(instructionPresets.workspaceId, workspaceId)),
+          and(eq(instructionPresets.scope, "personal"), eq(instructionPresets.createdBy, actorUserId)),
+        ),
+      ),
+    )
+    .limit(1);
+
+  if (!preset) {
+    throw new ApiError(404, "INSTRUCTION_PRESET_NOT_FOUND", "指令不存在。");
+  }
+
+  return preset;
+}
+
+async function resolveLibraryReferenceAssets(params: {
+  workspaceId: string;
+  itemId: string;
+  referenceAssetIds: string[];
+}) {
+  const ownerAssets = await listAssetsByOwner({
+    workspaceId: params.workspaceId,
+    ownerType: "library_item",
+    ownerId: params.itemId,
+  });
+  const imageAssets = ownerAssets.filter((asset) => asset.assetType === "image");
+
+  if (params.referenceAssetIds.length === 0) {
+    return imageAssets;
+  }
+
+  const requestedSet = new Set(params.referenceAssetIds);
+
+  return imageAssets.filter((asset) => requestedSet.has(asset.id));
 }
 
 async function getIncomingEdges(workspaceId: string, canvasId: string, nodeId: string) {
@@ -738,6 +847,182 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
     status: latestTask.status,
     requestId: latestTask.requestId,
   };
+}
+
+export async function runLibraryItemImageGeneration(
+  input: z.infer<typeof runLibraryItemImageGenerationInputSchema>,
+) {
+  const parsed = runLibraryItemImageGenerationInputSchema.parse(input);
+  const existingTask = await db
+    .select()
+    .from(generationTasks)
+    .where(and(eq(generationTasks.workspaceId, parsed.workspaceId), eq(generationTasks.requestId, parsed.requestId)))
+    .limit(1);
+
+  if (existingTask.length > 0) {
+    const existingResults = await db
+      .select()
+      .from(taskResults)
+      .where(and(eq(taskResults.taskId, existingTask[0].id), eq(taskResults.workspaceId, parsed.workspaceId)))
+      .orderBy(desc(taskResults.createdAt));
+
+    return {
+      taskId: existingTask[0].id,
+      status: existingTask[0].status,
+      assetId: existingResults[0]?.assetId ?? null,
+    };
+  }
+
+  const item = await assertLibraryItemForGeneration(parsed.workspaceId, parsed.itemId, parsed.itemKind);
+  const instructionPreset = await resolveInstructionPresetForGeneration(
+    parsed.workspaceId,
+    parsed.actorUserId,
+    parsed.instructionPresetId,
+  );
+  const referenceAssets = await resolveLibraryReferenceAssets({
+    workspaceId: parsed.workspaceId,
+    itemId: parsed.itemId,
+    referenceAssetIds: parsed.referenceAssetIds,
+  });
+
+  if (parsed.mode === "image_to_image" && referenceAssets.length === 0) {
+    throw new ApiError(400, "REFERENCE_IMAGES_REQUIRED", "图生图至少需要一张参考图。");
+  }
+
+  const referenceImages = parsed.mode === "image_to_image" ? referenceAssets.map((asset) => asset.fileUrl) : [];
+  const prompt = buildLibraryItemGenerationPrompt({
+    item,
+    instructionPreset,
+    prompt: parsed.prompt,
+  });
+
+  if (!prompt.trim()) {
+    throw new ApiError(400, "PROMPT_REQUIRED", "请先填写提示词或选择预制指令。");
+  }
+
+  const queuedAt = new Date();
+  const requestPayload = {
+    ownerType: "library_item",
+    ownerId: item.id,
+    mode: parsed.mode,
+    instructionPresetId: instructionPreset?.id ?? null,
+    prompt,
+    referenceAssetIds: referenceAssets.map((asset) => asset.id),
+    referenceImages,
+  };
+
+  const [task] = await db
+    .insert(generationTasks)
+    .values({
+      workspaceId: parsed.workspaceId,
+      canvasId: null,
+      nodeId: null,
+      requestId: parsed.requestId,
+      taskType: "image",
+      provider: "internal",
+      model: env.cloubicImageModel,
+      status: "processing",
+      requestPayload,
+      retryCount: 0,
+      pollCount: 0,
+      startedAt: queuedAt,
+      updatedAt: queuedAt,
+    })
+    .returning();
+
+  try {
+    const output = await generateImageWithCloubic({
+      prompt,
+      model: env.cloubicImageModel,
+      settings: {
+        mode: parsed.mode,
+        instructionPresetId: instructionPreset?.id ?? null,
+      },
+      referenceImages,
+    });
+    const generatedAsset = await createGeneratedAsset({
+      workspaceId: parsed.workspaceId,
+      ownerType: "library_item",
+      ownerId: item.id,
+      fileName: `${item.name}-${Date.now()}`,
+      sourceUrl: output.imageUrl,
+      dataUri: output.dataUri,
+      meta: {
+        provider: output.provider,
+        model: output.model,
+        instructionPresetId: instructionPreset?.id ?? null,
+        generationMode: parsed.mode,
+      },
+    });
+    const finishedAt = new Date();
+
+    await db.transaction(async (tx) => {
+      await tx.insert(taskResults).values({
+        taskId: task.id,
+        workspaceId: parsed.workspaceId,
+        resultType: "image",
+        contentText: output.markdown,
+        assetId: generatedAsset.id,
+        meta: {
+          provider: output.provider,
+          model: output.model,
+          imageUrl: generatedAsset.fileUrl,
+          referenceImages,
+        },
+      });
+
+      await tx
+        .update(generationTasks)
+        .set({
+          status: "succeeded",
+          provider: output.provider,
+          model: output.model,
+          responsePayload: {
+            markdown: output.markdown,
+            imageUrl: generatedAsset.fileUrl,
+            sourceImageUrl: output.imageUrl,
+            referenceImages,
+            usage: output.usage,
+            rawResponse: output.rawResponse,
+          },
+          errorCode: null,
+          errorMessage: null,
+          finishedAt,
+          updatedAt: finishedAt,
+        })
+        .where(eq(generationTasks.id, task.id));
+
+      await tx
+        .update(libraryItems)
+        .set({
+          coverAssetId: generatedAsset.id,
+          updatedAt: finishedAt,
+        })
+        .where(eq(libraryItems.id, item.id));
+    });
+
+    return {
+      taskId: task.id,
+      status: "succeeded" as const,
+      assetId: generatedAsset.id,
+      asset: generatedAsset,
+    };
+  } catch (error) {
+    const finishedAt = new Date();
+
+    await db
+      .update(generationTasks)
+      .set({
+        status: "failed",
+        errorCode: error instanceof ApiError ? error.code : "IMAGE_GENERATION_FAILED",
+        errorMessage: error instanceof Error ? error.message : "图片生成失败。",
+        finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(eq(generationTasks.id, task.id));
+
+    throw error;
+  }
 }
 
 export async function getTask(input: z.infer<typeof getTaskInputSchema>) {
