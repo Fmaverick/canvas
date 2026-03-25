@@ -6,6 +6,7 @@ import { listCanvases } from "@/application/services/canvas-service";
 import { listInstructionPresets } from "@/application/services/instruction-preset-service";
 import { listLibraryItems } from "@/application/services/library-item-service";
 import { listTasks } from "@/application/services/task-service";
+import { CreateTeamWorkspacePanel } from "@/components/workspace/create-team-workspace-panel";
 import { Badge } from "@/components/ui/badge";
 
 type DashboardPageProps = {
@@ -138,6 +139,13 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const workspaceCount = currentUserResult.workspaces.length;
   const resourceCount = subjects.length + scenes.length + instructionPresets.length;
   const recentCanvases = canvases.slice(0, 5);
+  const isTeamWorkspace = activeWorkspace.type === "team";
+  const canManageMembers = activeWorkspace.role === "owner" || activeWorkspace.role === "admin";
+  const sharingDescription = isTeamWorkspace
+    ? canManageMembers
+      ? "从成员管理邀请账号后，对方切到这个 team workspace，就会看到同一套主体、场景和指令资源。"
+      : "当前资源库已经共享在 team workspace 内。你可以直接使用共享资源，但成员邀请需要 owner 或 admin 操作。"
+    : "当前是 personal workspace，资源默认只对你自己可见。若要共享资源库，需要先进入 team workspace。";
 
   const overviewStats = [
     { label: "当前空间", value: activeWorkspace.name, accent: "bg-[#f7f7f8]" },
@@ -190,6 +198,11 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                 <Link className={actionLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
                   任务中心
                 </Link>
+                {isTeamWorkspace ? (
+                  <Link className={actionLinkClass(false)} href={`/workspaces/${activeWorkspace.id}/members`}>
+                    成员与共享
+                  </Link>
+                ) : null}
                 <Link className={actionLinkClass(false)} href="/">
                   返回首页
                 </Link>
@@ -346,6 +359,10 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                     ))}
                   </div>
 
+                  <div className="mt-4">
+                    <CreateTeamWorkspacePanel compact />
+                  </div>
+
                   <div className="mt-4 rounded-[20px] bg-[#fcfcfd] p-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge variant="outline" className="border-black/8 bg-white text-foreground">
@@ -358,10 +375,14 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                     <p className="mt-3 text-sm text-muted-foreground">
                       {roleDescription[activeWorkspace.role as keyof typeof roleDescription]}
                     </p>
-                    {activeWorkspace.type === "team" ? (
+                    <div className="mt-4 rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                      <p className="text-sm font-medium text-foreground">共享资源库</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{sharingDescription}</p>
+                    </div>
+                    {isTeamWorkspace ? (
                       <div className="mt-4">
                         <Link className={actionLinkClass(false)} href={`/workspaces/${activeWorkspace.id}/members`}>
-                          成员管理
+                          {canManageMembers ? "去邀请成员" : "查看成员与权限"}
                         </Link>
                       </div>
                     ) : null}
@@ -412,6 +433,11 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                     <Link className={actionLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
                       查看任务
                     </Link>
+                    {isTeamWorkspace ? (
+                      <Link className={actionLinkClass(false)} href={`/workspaces/${activeWorkspace.id}/members`}>
+                        成员与共享
+                      </Link>
+                    ) : null}
                   </div>
                 </div>
               </div>

@@ -81,6 +81,7 @@ export default async function LibrariesPage({ searchParams }: LibrariesPageProps
       workspaceId={activeWorkspace.id}
       workspaceName={activeWorkspace.name}
       workspaceRole={activeWorkspace.role}
+      workspaceType={activeWorkspace.type}
     />
   );
 }

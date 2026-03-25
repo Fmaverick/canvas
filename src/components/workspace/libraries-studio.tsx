@@ -105,6 +105,7 @@ type InstructionDraft = {
 type LibrariesStudioProps = {
   workspaceId: string;
   workspaceName: string;
+  workspaceType: string;
   workspaceRole: WorkspaceRole;
   canEdit: boolean;
   subjects: LibraryItemRecord[];
@@ -341,6 +342,7 @@ async function parseJsonResponse<T>(response: Response) {
 export function LibrariesStudio({
   workspaceId,
   workspaceName,
+  workspaceType,
   workspaceRole,
   canEdit,
   subjects,
@@ -392,6 +394,14 @@ export function LibrariesStudio({
     scene: sceneItems.length,
     instruction: instructionItems.length,
   };
+  const isTeamWorkspace = workspaceType === "team";
+  const canManageMembers = workspaceRole === "owner" || workspaceRole === "admin";
+  const sharingTitle = isTeamWorkspace ? "共享资源库" : "个人资源库";
+  const sharingDescription = isTeamWorkspace
+    ? canManageMembers
+      ? "邀请成员加入当前 team workspace 后，对方切换到这个空间即可直接使用这里的主体、场景和指令库。"
+      : "当前页面已经是共享资源库。你可以直接使用这些资源，但成员邀请和角色调整需要 owner 或 admin 操作。"
+    : "当前页面属于 personal workspace，资源默认私有，不支持直接邀请成员共享。";
 
   const currentItems = useMemo(() => {
     if (activeSection === "subject") {
@@ -1571,6 +1581,14 @@ export function LibrariesStudio({
                 >
                   进入画布
                 </Link>
+                {isTeamWorkspace ? (
+                  <Link
+                    className="inline-flex h-9 items-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted"
+                    href={`/workspaces/${workspaceId}/members`}
+                  >
+                    {canManageMembers ? "成员与共享" : "查看成员权限"}
+                  </Link>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1619,7 +1637,25 @@ export function LibrariesStudio({
 
             <section className="flex min-w-0 flex-col bg-white">
               <div className="border-b border-black/5 px-4 py-4 sm:px-6">
-                <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div className="flex flex-col gap-4">
+                  <div className="rounded-[20px] border border-black/5 bg-[#fafafb] px-4 py-3">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">{sharingTitle}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">{sharingDescription}</p>
+                      </div>
+                      {isTeamWorkspace ? (
+                        <Link
+                          className="inline-flex h-9 items-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-white"
+                          href={`/workspaces/${workspaceId}/members`}
+                        >
+                          {canManageMembers ? "去邀请成员" : "查看成员列表"}
+                        </Link>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                   <div className="space-y-0.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="text-2xl font-semibold tracking-tight text-foreground">{activeMeta.title}</h2>
@@ -1641,6 +1677,7 @@ export function LibrariesStudio({
                       />
                     </div>
                   </div>
+                </div>
                 </div>
               </div>
 

@@ -6,6 +6,7 @@ import { listCanvases } from "@/application/services/canvas-service";
 import { listInstructionPresets } from "@/application/services/instruction-preset-service";
 import { listLibraryItems } from "@/application/services/library-item-service";
 import { listTasks } from "@/application/services/task-service";
+import { CreateTeamWorkspacePanel } from "@/components/workspace/create-team-workspace-panel";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
@@ -319,6 +320,8 @@ export default async function Home() {
                     ))}
                   </div>
                 </div>
+
+                <CreateTeamWorkspacePanel />
 
                 <div className="rounded-2xl border bg-background p-4">
                   <div className="mb-2 flex items-center gap-2">
