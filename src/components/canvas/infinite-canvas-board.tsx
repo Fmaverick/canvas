@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import {
+  BatchRunResultsPanel,
   ExpandedTextEditor,
   getReferenceAssetDownloadName,
   ImageNodePanel,
@@ -59,6 +60,7 @@ import {
   setCanvasNodeGroupId,
   triggerDownload,
   type CanvasNode,
+  type CanvasBatchRunResult,
   type CanvasNodeReferenceAsset,
   type CanvasNodeResourceRefs,
   type StoryboardShot,
@@ -77,6 +79,7 @@ export function InfiniteCanvasBoard({
   nodes,
   edges,
   tasks,
+  batchRuns,
   canvasId,
   subjects,
   scenes,
@@ -137,6 +140,9 @@ export function InfiniteCanvasBoard({
   const [pendingConnectionPointer, setPendingConnectionPointer] = useState<{ x: number; y: number } | null>(null);
   const [batchRunCount, setBatchRunCount] = useState(1);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isBatchResultsOpen, setIsBatchResultsOpen] = useState(batchRuns.length > 0);
+  const [selectedBatchRunId, setSelectedBatchRunId] = useState<string | null>(batchRuns[0]?.id ?? null);
+  const [batchPreviewPage, setBatchPreviewPage] = useState(1);
   const [selectionRect, setSelectionRect] = useState<{
     startX: number;
     startY: number;
@@ -232,6 +238,41 @@ export function InfiniteCanvasBoard({
   const groupedSelectionNodeIds = groupedSelectionId ? groupNodeIdsMap.get(groupedSelectionId) ?? [] : [];
   const hasGroupedSelection =
     Boolean(groupedSelectionId) && groupedSelectionNodeIds.every((nodeId) => effectiveSelectedNodeIds.includes(nodeId));
+  const matchingBatchRuns = useMemo(() => {
+    if (effectiveSelectedNodeIds.length === 0) {
+      return batchRuns;
+    }
+
+    const selectedNodeIdSet = new Set(effectiveSelectedNodeIds);
+
+    return batchRuns.filter((batchRun) => batchRun.selectedNodesJson.some((node) => selectedNodeIdSet.has(node.id)));
+  }, [batchRuns, effectiveSelectedNodeIds]);
+  const isBatchRunSelectionFiltered = effectiveSelectedNodeIds.length > 0 && matchingBatchRuns.length > 0;
+  const visibleBatchRuns = isBatchRunSelectionFiltered ? matchingBatchRuns : batchRuns;
+  const activeBatchRun =
+    visibleBatchRuns.find((batchRun) => batchRun.id === selectedBatchRunId) ?? visibleBatchRuns[0] ?? null;
+  const activeBatchRunPreviewItems = useMemo(() => {
+    if (!activeBatchRun) {
+      return [];
+    }
+
+    if (!isBatchRunSelectionFiltered) {
+      return activeBatchRun.runs;
+    }
+
+    const selectedNodeIdSet = new Set(effectiveSelectedNodeIds);
+    const filteredRuns = activeBatchRun.runs.filter((run) => selectedNodeIdSet.has(run.nodeId));
+
+    return filteredRuns.length > 0 ? filteredRuns : activeBatchRun.runs;
+  }, [activeBatchRun, effectiveSelectedNodeIds, isBatchRunSelectionFiltered]);
+  const batchPreviewPageSize = 4;
+  const batchPreviewTotalPages = Math.max(1, Math.ceil(activeBatchRunPreviewItems.length / batchPreviewPageSize));
+  const paginatedBatchPreviewItems = useMemo(() => {
+    const currentPage = Math.min(batchPreviewPage, batchPreviewTotalPages);
+    const startIndex = (currentPage - 1) * batchPreviewPageSize;
+
+    return activeBatchRunPreviewItems.slice(startIndex, startIndex + batchPreviewPageSize);
+  }, [activeBatchRunPreviewItems, batchPreviewPage, batchPreviewTotalPages]);
   const hasRunningSelectedNode = selectedNodes.some((node) => {
     const latestTask = latestTaskByNode.get(node.id);
 
@@ -348,6 +389,33 @@ export function InfiniteCanvasBoard({
       setSelectedNodeId(null);
     }
   }, [nodes, selectedNodeId]);
+
+  useEffect(() => {
+    if (visibleBatchRuns.length === 0) {
+      setIsBatchResultsOpen(false);
+      setSelectedBatchRunId(null);
+
+      return;
+    }
+
+    if (!selectedBatchRunId || !visibleBatchRuns.some((batchRun) => batchRun.id === selectedBatchRunId)) {
+      setSelectedBatchRunId(visibleBatchRuns[0].id);
+    }
+  }, [selectedBatchRunId, visibleBatchRuns]);
+
+  useEffect(() => {
+    if (batchRuns.length > 0) {
+      setIsBatchResultsOpen(true);
+    }
+  }, [batchRuns]);
+
+  useEffect(() => {
+    setBatchPreviewPage((currentPage) => Math.min(currentPage, batchPreviewTotalPages));
+  }, [batchPreviewTotalPages]);
+
+  useEffect(() => {
+    setBatchPreviewPage(1);
+  }, [selectedBatchRunId, effectiveSelectedNodeIds]);
 
   useEffect(() => {
     if (selectedNode?.type === "text") {
@@ -2338,6 +2406,56 @@ export function InfiniteCanvasBoard({
     );
   }
 
+  function inferBatchRunExtension(run: CanvasBatchRunResult) {
+    if (run.assetFileName && run.assetFileName.includes(".")) {
+      return run.assetFileName.split(".").pop() ?? "bin";
+    }
+
+    if (run.assetMimeType?.startsWith("image/") && run.assetFileUrl) {
+      return inferImageExtension(run.assetFileUrl, run.assetMimeType);
+    }
+
+    if (run.assetMimeType?.startsWith("video/") && run.assetFileUrl) {
+      return inferVideoExtension(run.assetFileUrl, run.assetMimeType);
+    }
+
+    if (run.assetMimeType?.startsWith("audio/")) {
+      return run.assetMimeType.split("/")[1] ?? "mp3";
+    }
+
+    if (run.resultType === "json") {
+      return "json";
+    }
+
+    if (run.resultType === "text") {
+      return "txt";
+    }
+
+    return "bin";
+  }
+
+  function downloadBatchRunResult(run: CanvasBatchRunResult) {
+    const safeNodeTitle = run.nodeTitle.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ") || "result";
+    const runSuffix = `run-${String(run.runIndex ?? 0).padStart(2, "0")}`;
+    const extension = inferBatchRunExtension(run);
+
+    if (run.assetFileUrl) {
+      triggerDownload(run.assetFileUrl, `${safeNodeTitle}-${runSuffix}.${extension}`);
+
+      return;
+    }
+
+    if (typeof run.contentText !== "string" || run.contentText.length === 0) {
+      return;
+    }
+
+    const blob = new Blob([run.contentText], { type: run.resultType === "json" ? "application/json" : "text/plain;charset=utf-8" });
+    const objectUrl = URL.createObjectURL(blob);
+
+    triggerDownload(objectUrl, `${safeNodeTitle}-${runSuffix}.${extension}`);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
+
   async function startVideoNodePreview(nodeId: string) {
     const nextVideo = videoPreviewRefs.current[nodeId];
 
@@ -2632,6 +2750,10 @@ export function InfiniteCanvasBoard({
         onPointerDown={(event) => {
           if (isCanvasInteractiveTarget(event.target)) {
             return;
+          }
+
+          if (isBatchResultsOpen) {
+            setIsBatchResultsOpen(false);
           }
 
           setSelectedEdgeId(null);
@@ -3126,6 +3248,42 @@ export function InfiniteCanvasBoard({
           videoLastFrameInputRef={videoLastFrameInputRef}
           videoReferenceInputRef={videoReferenceInputRef}
         />
+      ) : null}
+
+      {visibleBatchRuns.length > 0 && isBatchResultsOpen ? (
+        <BatchRunResultsPanel
+          activeBatchRunId={activeBatchRun?.id ?? null}
+          batchRuns={visibleBatchRuns}
+          canvasId={canvasId}
+          currentPage={Math.min(batchPreviewPage, batchPreviewTotalPages)}
+          filteredBySelection={isBatchRunSelectionFiltered}
+          onClose={() => setIsBatchResultsOpen(false)}
+          onDownloadRun={downloadBatchRunResult}
+          onNextPage={() => setBatchPreviewPage((currentPage) => Math.min(batchPreviewTotalPages, currentPage + 1))}
+          onPreviousPage={() => setBatchPreviewPage((currentPage) => Math.max(1, currentPage - 1))}
+          onSelectBatchRun={(batchRunId) => {
+            setSelectedBatchRunId(batchRunId);
+            setBatchPreviewPage(1);
+          }}
+          paginatedRuns={paginatedBatchPreviewItems}
+          selectedNodeCount={effectiveSelectedNodeIds.length}
+          totalPages={batchPreviewTotalPages}
+          workspaceId={workspaceId}
+        />
+      ) : null}
+
+      {batchRuns.length > 0 && !isBatchResultsOpen ? (
+        <div className="pointer-events-none absolute bottom-6 right-6 z-20 flex justify-end">
+          <div className="pointer-events-auto">
+            <button
+              className="inline-flex h-10 items-center rounded-xl border border-border bg-background/96 px-4 text-sm font-medium text-foreground shadow-lg backdrop-blur transition hover:bg-muted"
+              type="button"
+              onClick={() => setIsBatchResultsOpen(true)}
+            >
+              查看批量结果
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {selectedNode && (isTextNodeSelected || isStoryboardNodeSelected) && isExpandedEditorOpen ? (

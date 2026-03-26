@@ -81,6 +81,50 @@ export type CanvasTask = {
   finishedAt: string | Date | null;
 };
 
+export type CanvasBatchRunNode = {
+  id: string;
+  title: string;
+  type: string;
+};
+
+export type CanvasBatchRunResult = {
+  id: string;
+  nodeId: string;
+  taskId: string | null;
+  requestId: string | null;
+  runIndex: number | null;
+  nodeType: string;
+  nodeTitle: string;
+  status: string;
+  resultType: string | null;
+  contentText: string | null;
+  assetId: string | null;
+  resultMeta: Record<string, unknown> | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  startedAt: string | Date | null;
+  finishedAt: string | Date | null;
+  createdAt: string | Date;
+  assetFileName: string | null;
+  assetFileUrl: string | null;
+  assetMimeType: string | null;
+};
+
+export type CanvasBatchRunDetail = {
+  id: string;
+  mode: string;
+  status: string;
+  requestedRunCount: number;
+  totalNodeRunCount: number;
+  completedNodeRunCount: number;
+  succeededNodeRunCount: number;
+  failedNodeRunCount: number;
+  selectedNodesJson: CanvasBatchRunNode[];
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  runs: CanvasBatchRunResult[];
+};
+
 export type InfiniteCanvasBoardProps = {
   workspaceId: string;
   canEdit: boolean;
@@ -88,6 +132,7 @@ export type InfiniteCanvasBoardProps = {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   tasks: CanvasTask[];
+  batchRuns: CanvasBatchRunDetail[];
   canvasId: string;
   subjects: LibraryItemOption[];
   scenes: LibraryItemOption[];
@@ -235,6 +280,36 @@ export const quickCreateOptions: QuickCreateOption[] = [
     description: "动态分镜、镜头脚本",
   },
 ];
+
+export function getCanvasBatchRunTitle(batchRun: { selectedNodesJson: CanvasBatchRunNode[] }) {
+  if (!Array.isArray(batchRun.selectedNodesJson) || batchRun.selectedNodesJson.length === 0) {
+    return "未命名节点组";
+  }
+
+  const labels = batchRun.selectedNodesJson.map((node) => node.title).filter(Boolean).slice(0, 4);
+
+  return labels.length > 0 ? labels.join("、") : "未命名节点组";
+}
+
+export function formatCanvasDateTime(value: string | Date | null) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour12: false,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
 
 export function normalizeStringList(value: unknown) {
   if (!Array.isArray(value)) {

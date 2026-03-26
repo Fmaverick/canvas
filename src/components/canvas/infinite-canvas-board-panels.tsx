@@ -1,17 +1,22 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Clapperboard, Download, Expand, Sparkles, Upload, X } from "lucide-react";
+import Image from "next/image";
+import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 import {
+  formatCanvasDateTime,
   DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   clampNumber,
+  getCanvasBatchRunTitle,
   inferImageExtension,
   getStoryboardShotAssetNames,
+  type CanvasBatchRunDetail,
+  type CanvasBatchRunResult,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
   type StoryboardShot,
@@ -1109,6 +1114,348 @@ export function ExpandedTextEditor({
               <Button disabled={isSavingPrompt} type="button" variant="outline" onClick={onSave}>
                 {isSavingPrompt ? "保存中..." : "保存内容"}
               </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type BatchRunResultsPanelProps = {
+  workspaceId: string;
+  canvasId: string;
+  batchRuns: CanvasBatchRunDetail[];
+  activeBatchRunId: string | null;
+  filteredBySelection: boolean;
+  selectedNodeCount: number;
+  currentPage: number;
+  totalPages: number;
+  paginatedRuns: CanvasBatchRunResult[];
+  onSelectBatchRun: (batchRunId: string) => void;
+  onPreviousPage: () => void;
+  onNextPage: () => void;
+  onDownloadRun: (run: CanvasBatchRunResult) => void;
+  onClose: () => void;
+};
+
+function batchActionLinkClass(primary: boolean) {
+  return primary
+    ? "inline-flex h-9 items-center rounded-xl bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
+    : "inline-flex h-9 items-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted";
+}
+
+function statusTone(status: string) {
+  if (status === "failed" || status === "partial_failed") {
+    return "bg-[#fff1f1] text-[#b42318]";
+  }
+
+  if (status === "processing" || status === "queued") {
+    return "bg-[#f5f7ff] text-[#344054]";
+  }
+
+  if (status === "succeeded") {
+    return "bg-[#f2f8f3] text-[#166534]";
+  }
+
+  return "bg-[#f4f4f5] text-[#52525b]";
+}
+
+function getRunStatusLabel(status: string) {
+  if (status === "queued") {
+    return "排队中";
+  }
+
+  if (status === "processing") {
+    return "处理中";
+  }
+
+  if (status === "succeeded") {
+    return "已成功";
+  }
+
+  if (status === "failed") {
+    return "已失败";
+  }
+
+  return status;
+}
+
+function getRunPreviewKind(run: CanvasBatchRunResult) {
+  if (run.assetMimeType?.startsWith("image/") || run.resultType === "image") {
+    return "image";
+  }
+
+  if (run.assetMimeType?.startsWith("video/") || run.resultType === "video") {
+    return "video";
+  }
+
+  if (run.assetMimeType?.startsWith("audio/") || run.resultType === "audio") {
+    return "audio";
+  }
+
+  if (run.resultType === "json") {
+    return "json";
+  }
+
+  return "text";
+}
+
+function getRunMeta(run: CanvasBatchRunResult) {
+  if (run.finishedAt) {
+    return `完成于 ${formatCanvasDateTime(run.finishedAt)}`;
+  }
+
+  if (run.startedAt) {
+    return `开始于 ${formatCanvasDateTime(run.startedAt)}`;
+  }
+
+  return `创建于 ${formatCanvasDateTime(run.createdAt)}`;
+}
+
+export function BatchRunResultsPanel({
+  workspaceId,
+  canvasId,
+  batchRuns,
+  activeBatchRunId,
+  filteredBySelection,
+  selectedNodeCount,
+  currentPage,
+  totalPages,
+  paginatedRuns,
+  onSelectBatchRun,
+  onPreviousPage,
+  onNextPage,
+  onDownloadRun,
+  onClose,
+}: BatchRunResultsPanelProps) {
+  const activeBatchRun = batchRuns.find((batchRun) => batchRun.id === activeBatchRunId) ?? batchRuns[0] ?? null;
+
+  if (!activeBatchRun) {
+    return null;
+  }
+
+  return (
+    <div className="pointer-events-none absolute bottom-6 right-6 z-20 flex justify-end">
+      <div className="pointer-events-auto w-[min(420px,calc(100vw-3rem))] overflow-hidden rounded-[28px] border bg-background/96 shadow-lg backdrop-blur">
+        <div className="border-b px-4 py-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-foreground">批量结果</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {filteredBySelection
+                  ? selectedNodeCount > 1
+                    ? `已按当前选中的 ${selectedNodeCount} 个节点筛选结果。`
+                    : "已按当前节点筛选结果。"
+                  : "展示当前画布最近批量运行结果。"}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                className={batchActionLinkClass(false)}
+                href={`/tasks?workspaceId=${workspaceId}&tab=batches&detailType=batch&detailId=${activeBatchRun.id}`}
+              >
+                任务中心
+              </a>
+              <button className={batchActionLinkClass(false)} type="button" onClick={onClose}>
+                关闭
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+            {batchRuns.map((batchRun) => {
+              const isActive = batchRun.id === activeBatchRun.id;
+
+              return (
+                <button
+                  key={batchRun.id}
+                  className={`min-w-[196px] rounded-[18px] border px-3 py-3 text-left transition ${
+                    isActive ? "border-primary/20 bg-primary/5" : "border-black/5 bg-[#fcfcfd] hover:border-black/10"
+                  }`}
+                  type="button"
+                  onClick={() => onSelectBatchRun(batchRun.id)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2.5 py-1 text-[11px] ${statusTone(batchRun.status)}`}>
+                      {batchRun.status === "partial_failed" ? "部分失败" : getRunStatusLabel(batchRun.status)}
+                    </span>
+                    <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                      {batchRun.requestedRunCount} 轮
+                    </span>
+                  </div>
+                  <p className="mt-3 line-clamp-2 text-sm font-medium text-foreground">{getCanvasBatchRunTitle(batchRun)}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{formatCanvasDateTime(batchRun.createdAt)}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="max-h-[68vh] overflow-y-auto px-4 py-4">
+          <div className="rounded-[22px] border border-black/5 bg-[#fcfcfd] p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(activeBatchRun.status)}`}>
+                {activeBatchRun.status === "partial_failed" ? "部分失败" : getRunStatusLabel(activeBatchRun.status)}
+              </span>
+              <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                {activeBatchRun.mode === "single_node" ? "单节点批量" : "多节点成组"}
+              </span>
+            </div>
+
+            <div className="mt-3 space-y-1">
+              <p className="text-sm font-medium text-foreground">{getCanvasBatchRunTitle(activeBatchRun)}</p>
+              <p className="text-xs text-muted-foreground">
+                节点执行 {activeBatchRun.completedNodeRunCount} / {activeBatchRun.totalNodeRunCount} · 成功{" "}
+                {activeBatchRun.succeededNodeRunCount} · 失败 {activeBatchRun.failedNodeRunCount}
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <a
+                className={batchActionLinkClass(true)}
+                href={`/api/tasks/batch-runs/${activeBatchRun.id}/download?workspaceId=${workspaceId}`}
+              >
+                批量下载
+              </a>
+              <a
+                className={batchActionLinkClass(false)}
+                href={`/canvases/${canvasId}?workspaceId=${workspaceId}`}
+              >
+                刷新画布
+              </a>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[22px] border border-black/5 bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-foreground">结果预览</p>
+                <p className="text-xs text-muted-foreground">按分页查看当前批量输出，并直接下载单条结果。</p>
+              </div>
+              <div className="rounded-full border border-black/8 bg-[#fcfcfd] px-2.5 py-1 text-xs text-muted-foreground">
+                第 {currentPage} / {Math.max(totalPages, 1)} 页
+              </div>
+            </div>
+
+            {paginatedRuns.length === 0 ? (
+              <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
+                当前筛选范围下还没有可预览的结果。
+              </div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                {paginatedRuns.map((run) => {
+                  const previewKind = getRunPreviewKind(run);
+
+                  return (
+                    <div key={run.id} className="rounded-[18px] border border-black/5 bg-[#fcfcfd] p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full px-2.5 py-1 text-[11px] ${statusTone(run.status)}`}>
+                          {getRunStatusLabel(run.status)}
+                        </span>
+                        <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                          Run {run.runIndex ?? "—"}
+                        </span>
+                        <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                          {run.nodeTitle}
+                        </span>
+                      </div>
+
+                      <p className="mt-3 text-xs text-muted-foreground">{getRunMeta(run)}</p>
+
+                      {run.status === "succeeded" && previewKind === "image" && run.assetFileUrl ? (
+                        <div className="relative mt-3 h-48 overflow-hidden rounded-[18px] border border-black/5 bg-white">
+                          <Image alt={run.nodeTitle} className="object-cover" fill sizes="420px" src={run.assetFileUrl} />
+                        </div>
+                      ) : null}
+
+                      {run.status === "succeeded" && previewKind === "video" && run.assetFileUrl ? (
+                        <div className="mt-3 overflow-hidden rounded-[18px] border border-black/5 bg-white">
+                          <video className="h-48 w-full object-cover" controls playsInline preload="metadata" src={run.assetFileUrl} />
+                        </div>
+                      ) : null}
+
+                      {run.status === "succeeded" && previewKind === "audio" && run.assetFileUrl ? (
+                        <div className="mt-3 rounded-[18px] border border-black/5 bg-white p-3">
+                          <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                            <AudioLines className="size-4" />
+                            音频结果
+                          </div>
+                          <audio className="w-full" controls preload="metadata" src={run.assetFileUrl} />
+                        </div>
+                      ) : null}
+
+                      {run.status === "succeeded" && !run.assetFileUrl ? (
+                        <div className="mt-3 rounded-[18px] border border-black/5 bg-white p-3">
+                          <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                            {previewKind === "json" ? <Clapperboard className="size-4" /> : <Type className="size-4" />}
+                            {previewKind === "json" ? "JSON 结果" : "文本结果"}
+                          </div>
+                          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-6 text-muted-foreground">
+                            {run.contentText || "当前结果没有可展示的正文内容。"}
+                          </pre>
+                        </div>
+                      ) : null}
+
+                      {run.status === "failed" ? (
+                        <div className="mt-3 rounded-[18px] border border-[#f0c7c7] bg-[#fff6f6] px-3 py-3 text-xs leading-6 text-[#b42318]">
+                          {run.errorCode ? `${run.errorCode} · ` : ""}
+                          {run.errorMessage || "当前运行失败，但没有返回额外错误信息。"}
+                        </div>
+                      ) : null}
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        {run.status === "succeeded" ? (
+                          <button
+                            className={batchActionLinkClass(false)}
+                            type="button"
+                            onClick={() => onDownloadRun(run)}
+                          >
+                            <Download className="mr-1 size-4" />
+                            下载结果
+                          </button>
+                        ) : null}
+
+                        <div className="inline-flex items-center gap-1 rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                          {previewKind === "image" ? <ImageIcon className="size-3.5" /> : null}
+                          {previewKind === "video" ? <Video className="size-3.5" /> : null}
+                          {previewKind === "audio" ? <AudioLines className="size-3.5" /> : null}
+                          {previewKind === "text" || previewKind === "json" ? <Type className="size-3.5" /> : null}
+                          {run.resultType ?? "unknown"}
+                        </div>
+
+                        {run.requestId ? (
+                          <span className="truncate rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                            {run.requestId}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <button
+                className={batchActionLinkClass(false)}
+                disabled={currentPage <= 1}
+                type="button"
+                onClick={onPreviousPage}
+              >
+                <ChevronLeft className="mr-1 size-4" />
+                上一页
+              </button>
+              <p className="text-xs text-muted-foreground">分页仅影响预览，不影响批量下载内容。</p>
+              <button
+                className={batchActionLinkClass(false)}
+                disabled={currentPage >= totalPages}
+                type="button"
+                onClick={onNextPage}
+              >
+                下一页
+                <ChevronRight className="ml-1 size-4" />
+              </button>
             </div>
           </div>
         </div>

@@ -6,7 +6,7 @@ import { listAssetsByOwner } from "@/application/services/asset-service";
 import { getCanvasDetail } from "@/application/services/canvas-service";
 import { listInstructionPresets } from "@/application/services/instruction-preset-service";
 import { listLibraryItems } from "@/application/services/library-item-service";
-import { listTasks } from "@/application/services/task-service";
+import { getNodeRunBatch, listNodeRunBatches, listTasks } from "@/application/services/task-service";
 import { InfiniteCanvasBoard } from "@/components/canvas/infinite-canvas-board";
 import { normalizeResourceRefs } from "@/components/canvas/infinite-canvas-board.shared";
 import { Badge } from "@/components/ui/badge";
@@ -162,17 +162,30 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
   const { workspaceId, canvas } = resolvedCanvasWorkspace;
   const activeWorkspace =
     currentUserResult.workspaces.find((workspace) => workspace.id === workspaceId) ?? currentUserResult.workspaces[0];
-  const [tasks, subjects, scenes, instructionPresets] = await Promise.all([
+  const [tasks, batchRunSummaries, subjects, scenes, instructionPresets] = await Promise.all([
     listTasks({
       workspaceId,
       canvasId,
       limit: 50,
     }),
+    listNodeRunBatches({
+      workspaceId,
+      canvasId,
+      limit: 12,
+    }),
     listLibraryItems({ workspaceId, kind: "subject" }),
     listLibraryItems({ workspaceId, kind: "scene" }),
     listInstructionPresets({ workspaceId, userId: currentUserResult.user.id }),
   ]);
-  const [enrichedSubjects, enrichedScenes] = await Promise.all([
+  const [batchRuns, enrichedSubjects, enrichedScenes] = await Promise.all([
+    Promise.all(
+      batchRunSummaries.map((batchRun) =>
+        getNodeRunBatch({
+          workspaceId,
+          batchRunId: batchRun.id,
+        }),
+      ),
+    ),
     enrichLibraryItemsWithAssets(workspaceId, subjects),
     enrichLibraryItemsWithAssets(workspaceId, scenes),
   ]);
@@ -186,6 +199,7 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
   return (
     <main className="min-h-screen bg-muted/30 text-foreground">
       <InfiniteCanvasBoard
+        batchRuns={batchRuns}
         canEdit={canEdit}
         canGenerate={canGenerate}
         canvasId={canvas.id}
