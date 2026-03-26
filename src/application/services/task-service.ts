@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { and, asc, desc, eq, inArray, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or } from "drizzle-orm";
 import { z } from "zod";
 
 import { createGeneratedAsset, listAssetsByOwner } from "@/application/services/asset-service";
@@ -41,6 +41,7 @@ export const runNodeInputSchema = z.object({
   overrideSettings: z.record(z.string(), z.unknown()).default({}),
   batchRunId: z.uuid().optional(),
   batchRunIndex: z.coerce.number().int().positive().optional(),
+  existingNodeRunId: z.uuid().optional(),
 });
 
 export const getTaskInputSchema = z.object({
@@ -146,6 +147,18 @@ function normalizeOutputContent(outputSnapshot: Record<string, unknown> | null) 
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function isTerminalNodeRunStatus(status: string | null | undefined) {
+  return status === "succeeded" || status === "failed";
+}
+
+function normalizeRecord(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  return {};
 }
 
 function createBatchRunRequestId(batchRunId: string, runIndex: number, nodeId: string) {
@@ -576,6 +589,198 @@ async function getUpstreamNodes(workspaceId: string, canvasId: string, upstreamN
     .filter((node): node is NonNullable<typeof node> => Boolean(node));
 }
 
+function buildOutputSnapshotFromNodeRun(run: {
+  taskId: string | null;
+  resultType: string | null;
+  contentText: string | null;
+  assetId: string | null;
+  resultMeta: Record<string, unknown> | null;
+  assetFileUrl: string | null;
+  assetMimeType: string | null;
+  finishedAt: Date | null;
+}) {
+  const resultMeta = normalizeRecord(run.resultMeta);
+  const assetFileUrl = typeof run.assetFileUrl === "string" && run.assetFileUrl.trim().length > 0 ? run.assetFileUrl : null;
+  const generatedAt = (run.finishedAt ?? new Date()).toISOString();
+
+  if (run.resultType === "image") {
+    const imageUrl =
+      assetFileUrl ??
+      (typeof resultMeta.imageUrl === "string" && resultMeta.imageUrl.trim().length > 0 ? resultMeta.imageUrl : null) ??
+      (typeof run.contentText === "string" && run.contentText.trim().length > 0 ? run.contentText : null);
+
+    if (!imageUrl) {
+      return null;
+    }
+
+    return {
+      taskId: run.taskId ?? undefined,
+      outputType: "image",
+      content: imageUrl,
+      assets: run.assetId
+        ? [
+            {
+              assetId: run.assetId,
+              assetType: "image",
+              url: imageUrl,
+              mimeType: run.assetMimeType ?? undefined,
+            },
+          ]
+        : undefined,
+      structuredData: {
+        ...resultMeta,
+        imageUrl,
+        assetId: run.assetId ?? resultMeta.assetId ?? undefined,
+      },
+      generatedAt,
+    };
+  }
+
+  if (run.resultType === "video") {
+    const videoUrl =
+      assetFileUrl ??
+      (typeof resultMeta.videoUrl === "string" && resultMeta.videoUrl.trim().length > 0 ? resultMeta.videoUrl : null) ??
+      (typeof run.contentText === "string" && run.contentText.trim().length > 0 ? run.contentText : null);
+
+    if (!videoUrl) {
+      return null;
+    }
+
+    return {
+      taskId: run.taskId ?? undefined,
+      outputType: "video",
+      content: videoUrl,
+      assets: run.assetId
+        ? [
+            {
+              assetId: run.assetId,
+              assetType: "video",
+              url: videoUrl,
+              mimeType: run.assetMimeType ?? undefined,
+            },
+          ]
+        : undefined,
+      structuredData: {
+        ...resultMeta,
+        videoUrl,
+        assetId: run.assetId ?? resultMeta.assetId ?? undefined,
+      },
+      generatedAt,
+    };
+  }
+
+  if (run.resultType === "audio") {
+    const audioUrl =
+      assetFileUrl ??
+      (typeof resultMeta.audioUrl === "string" && resultMeta.audioUrl.trim().length > 0 ? resultMeta.audioUrl : null) ??
+      (typeof run.contentText === "string" && run.contentText.trim().length > 0 ? run.contentText : null);
+
+    if (!audioUrl) {
+      return null;
+    }
+
+    return {
+      taskId: run.taskId ?? undefined,
+      outputType: "audio",
+      content: audioUrl,
+      assets: run.assetId
+        ? [
+            {
+              assetId: run.assetId,
+              assetType: "audio",
+              url: audioUrl,
+              mimeType: run.assetMimeType ?? undefined,
+            },
+          ]
+        : undefined,
+      structuredData: {
+        ...resultMeta,
+        audioUrl,
+        assetId: run.assetId ?? resultMeta.assetId ?? undefined,
+      },
+      generatedAt,
+    };
+  }
+
+  if (run.resultType === "json" || run.resultType === "text") {
+    const content = typeof run.contentText === "string" ? run.contentText : "";
+    const structuredData =
+      resultMeta.structuredData && typeof resultMeta.structuredData === "object" && !Array.isArray(resultMeta.structuredData)
+        ? (resultMeta.structuredData as Record<string, unknown>)
+        : undefined;
+
+    if (content.trim().length === 0 && !structuredData) {
+      return null;
+    }
+
+    return {
+      taskId: run.taskId ?? undefined,
+      outputType: run.resultType === "json" ? "json" : "text",
+      content,
+      structuredData,
+      generatedAt,
+    };
+  }
+
+  return null;
+}
+
+async function getUpstreamNodesForExecution(
+  input: Pick<
+    z.infer<typeof runNodeInputSchema>,
+    "workspaceId" | "canvasId" | "batchRunId" | "batchRunIndex"
+  >,
+  upstreamNodeIds: string[],
+) {
+  const upstreamNodes = await getUpstreamNodes(input.workspaceId, input.canvasId, upstreamNodeIds);
+
+  if (!input.batchRunId || !input.batchRunIndex || upstreamNodes.length === 0) {
+    return upstreamNodes;
+  }
+
+  const batchNodeRuns = await db
+    .select({
+      nodeId: nodeRuns.nodeId,
+      taskId: nodeRuns.taskId,
+      status: nodeRuns.status,
+      resultType: nodeRuns.resultType,
+      contentText: nodeRuns.contentText,
+      assetId: nodeRuns.assetId,
+      resultMeta: nodeRuns.resultMeta,
+      errorCode: nodeRuns.errorCode,
+      errorMessage: nodeRuns.errorMessage,
+      finishedAt: nodeRuns.finishedAt,
+      assetFileUrl: assets.fileUrl,
+      assetMimeType: assets.mimeType,
+    })
+    .from(nodeRuns)
+    .leftJoin(assets, eq(assets.id, nodeRuns.assetId))
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, input.workspaceId),
+        eq(nodeRuns.batchRunId, input.batchRunId),
+        eq(nodeRuns.runIndex, input.batchRunIndex),
+        inArray(nodeRuns.nodeId, upstreamNodeIds),
+      ),
+    );
+
+  const batchNodeRunMap = new Map(batchNodeRuns.map((run) => [run.nodeId, run]));
+
+  return upstreamNodes.map((node) => {
+    const batchNodeRun = batchNodeRunMap.get(node.id);
+
+    if (!batchNodeRun) {
+      return node;
+    }
+
+    return {
+      ...node,
+      status: batchNodeRun.status,
+      outputSnapshot: buildOutputSnapshotFromNodeRun(batchNodeRun),
+    };
+  });
+}
+
 async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNodeForRun>>) {
   const assetIds = uniqueStrings(
     ((node.resourceRefs as { assetIds?: string[] } | null)?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string"),
@@ -748,7 +953,7 @@ function sortNodesForBatchRun(
 
 async function buildExecutionPayload(
   node: Awaited<ReturnType<typeof assertNodeForRun>>,
-  upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodes>>,
+  upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodesForExecution>>,
   referenceAssets: Awaited<ReturnType<typeof getNodeReferenceAssets>>,
   input: z.infer<typeof runNodeInputSchema>,
 ) {
@@ -908,6 +1113,147 @@ async function refreshNodeRunBatchSummary(batchRunId: string) {
     .where(eq(nodeRunBatches.id, batchRunId));
 }
 
+async function getNodeRunRecord(nodeRunId: string) {
+  const [nodeRun] = await db
+    .select()
+    .from(nodeRuns)
+    .where(eq(nodeRuns.id, nodeRunId))
+    .limit(1);
+
+  if (!nodeRun) {
+    throw new ApiError(404, "NODE_RUN_NOT_FOUND", "节点运行记录不存在。");
+  }
+
+  return nodeRun;
+}
+
+async function getBatchRunRecord(batchRunId: string) {
+  const [batchRun] = await db
+    .select()
+    .from(nodeRunBatches)
+    .where(eq(nodeRunBatches.id, batchRunId))
+    .limit(1);
+
+  if (!batchRun) {
+    throw new ApiError(404, "BATCH_RUN_NOT_FOUND", "批量运行记录不存在。");
+  }
+
+  return batchRun;
+}
+
+async function getSelectedEdgesForBatchRun(batchRun: Awaited<ReturnType<typeof getBatchRunRecord>>) {
+  const nodeIds = batchRun.selectedNodesJson.map((node) => node.id);
+
+  return getCanvasEdgesForNodes(batchRun.workspaceId, batchRun.canvasId, nodeIds);
+}
+
+async function triggerBatchRunProgress(batchRunId: string, runIndex: number) {
+  const batchRun = await getBatchRunRecord(batchRunId);
+  const selectedNodes = batchRun.selectedNodesJson;
+  const selectedNodeIds = selectedNodes.map((node) => node.id);
+  const selectedEdges = await getSelectedEdgesForBatchRun(batchRun);
+  const batchNodeRuns = await db
+    .select()
+    .from(nodeRuns)
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, batchRun.workspaceId),
+        eq(nodeRuns.batchRunId, batchRun.id),
+        eq(nodeRuns.runIndex, runIndex),
+      ),
+    );
+  const nodeRunMap = new Map(batchNodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun]));
+  const incomingMap = new Map<string, string[]>(
+    selectedNodeIds.map((nodeId) => [
+      nodeId,
+      selectedEdges.filter((edge) => edge.targetNodeId === nodeId).map((edge) => edge.sourceNodeId),
+    ]),
+  );
+  const blockedNodeRuns = selectedNodes
+    .map((node) => {
+      const nodeRun = nodeRunMap.get(node.id);
+
+      if (!nodeRun || nodeRun.taskId || isTerminalNodeRunStatus(nodeRun.status) || nodeRun.status === "launching") {
+        return null;
+      }
+
+      const dependencyNodeIds = incomingMap.get(node.id) ?? [];
+
+      if (dependencyNodeIds.length === 0) {
+        return null;
+      }
+
+      const dependencyRuns = dependencyNodeIds.map((dependencyNodeId) => nodeRunMap.get(dependencyNodeId)).filter(Boolean);
+
+      if (dependencyRuns.length !== dependencyNodeIds.length) {
+        return null;
+      }
+
+      if (dependencyRuns.some((dependencyRun) => dependencyRun?.status === "failed")) {
+        return nodeRun;
+      }
+
+      return null;
+    })
+    .filter((nodeRun): nodeRun is NonNullable<typeof nodeRun> => Boolean(nodeRun));
+
+  for (const blockedNodeRun of blockedNodeRuns) {
+    await updateNodeRunRecord(blockedNodeRun.id, {
+      taskId: blockedNodeRun.taskId,
+      status: "failed",
+      resultType: blockedNodeRun.resultType,
+      contentText: blockedNodeRun.contentText,
+      assetId: blockedNodeRun.assetId,
+      resultMeta: normalizeRecord(blockedNodeRun.resultMeta),
+      errorCode: "UPSTREAM_NODE_FAILED",
+      errorMessage: "批量链路中的上游节点失败，当前节点已被阻断。",
+      startedAt: blockedNodeRun.startedAt,
+      finishedAt: new Date(),
+    });
+  }
+
+  const refreshedBatchNodeRuns = await db
+    .select()
+    .from(nodeRuns)
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, batchRun.workspaceId),
+        eq(nodeRuns.batchRunId, batchRun.id),
+        eq(nodeRuns.runIndex, runIndex),
+      ),
+    );
+  const refreshedNodeRunMap = new Map(refreshedBatchNodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun]));
+  const readyNodeRuns = selectedNodes
+    .map((node) => {
+      const nodeRun = refreshedNodeRunMap.get(node.id);
+
+      if (!nodeRun || nodeRun.taskId || isTerminalNodeRunStatus(nodeRun.status) || nodeRun.status === "launching") {
+        return null;
+      }
+
+      const dependencyNodeIds = incomingMap.get(node.id) ?? [];
+
+      if (dependencyNodeIds.length === 0) {
+        return nodeRun;
+      }
+
+      const dependencyRuns = dependencyNodeIds.map((dependencyNodeId) => refreshedNodeRunMap.get(dependencyNodeId)).filter(Boolean);
+
+      if (dependencyRuns.length !== dependencyNodeIds.length) {
+        return null;
+      }
+
+      if (dependencyRuns.some((dependencyRun) => dependencyRun?.status !== "succeeded")) {
+        return null;
+      }
+
+      return nodeRun;
+    })
+    .filter((nodeRun): nodeRun is NonNullable<typeof nodeRun> => Boolean(nodeRun));
+
+  await Promise.all(readyNodeRuns.map((nodeRun) => launchBatchNodeRun(nodeRun.id)));
+}
+
 async function updateNodeRunRecord(
   nodeRunId: string | null | undefined,
   payload: Partial<{
@@ -947,6 +1293,7 @@ async function updateNodeRunRecord(
   const [record] = await db
     .select({
       batchRunId: nodeRuns.batchRunId,
+      runIndex: nodeRuns.runIndex,
     })
     .from(nodeRuns)
     .where(eq(nodeRuns.id, nodeRunId))
@@ -954,6 +1301,60 @@ async function updateNodeRunRecord(
 
   if (record?.batchRunId) {
     await refreshNodeRunBatchSummary(record.batchRunId);
+
+    if (record.runIndex && isTerminalNodeRunStatus(payload.status)) {
+      await triggerBatchRunProgress(record.batchRunId, record.runIndex);
+    }
+  }
+}
+
+async function launchBatchNodeRun(nodeRunId: string) {
+  const claimedAt = new Date();
+  const [claimedNodeRun] = await db
+    .update(nodeRuns)
+    .set({
+      status: "launching",
+      updatedAt: claimedAt,
+    })
+    .where(and(eq(nodeRuns.id, nodeRunId), isNull(nodeRuns.taskId), eq(nodeRuns.status, "queued")))
+    .returning();
+
+  if (!claimedNodeRun) {
+    return null;
+  }
+
+  try {
+    const batchRun =
+      claimedNodeRun.batchRunId && claimedNodeRun.runIndex ? await getBatchRunRecord(claimedNodeRun.batchRunId) : null;
+
+    return await runNode({
+      workspaceId: claimedNodeRun.workspaceId,
+      canvasId: claimedNodeRun.canvasId,
+      nodeId: claimedNodeRun.nodeId,
+      actorUserId: batchRun?.createdBy ?? claimedNodeRun.workspaceId,
+      requestId: claimedNodeRun.requestId,
+      useUpstreamOutputs: true,
+      mergeStrategy: "merge_all",
+      overrideSettings: {},
+      batchRunId: claimedNodeRun.batchRunId ?? undefined,
+      batchRunIndex: claimedNodeRun.runIndex ?? undefined,
+      existingNodeRunId: claimedNodeRun.id,
+    });
+  } catch (error) {
+    await updateNodeRunRecord(claimedNodeRun.id, {
+      taskId: null,
+      status: "failed",
+      resultType: null,
+      contentText: null,
+      assetId: null,
+      resultMeta: {},
+      errorCode: error instanceof ApiError ? error.code : "BATCH_NODE_RUN_FAILED",
+      errorMessage: error instanceof Error ? error.message : "批量链路节点启动失败。",
+      startedAt: null,
+      finishedAt: new Date(),
+    });
+
+    return null;
   }
 }
 
@@ -1014,7 +1415,7 @@ async function getTaskRecord(taskId: string) {
   return task;
 }
 
-async function getTaskNode(taskId: string, nodeId: string) {
+async function getTaskNode(nodeId: string) {
   const [node] = await db
     .select()
     .from(canvasNodes)
@@ -1036,7 +1437,7 @@ function assertTaskBelongsToWorkspace(task: Awaited<ReturnType<typeof getTaskRec
 
 async function executeTask(taskId: string) {
   const task = await getTaskRecord(taskId);
-  const node = await getTaskNode(taskId, task.nodeId as string);
+  const node = await getTaskNode(task.nodeId as string);
   const startedAt = new Date();
 
   await db
@@ -1459,28 +1860,44 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
     };
   }
 
+  const existingNodeRun = parsed.existingNodeRunId ? await getNodeRunRecord(parsed.existingNodeRunId) : null;
+
+  if (existingNodeRun) {
+    if (
+      existingNodeRun.workspaceId !== parsed.workspaceId ||
+      existingNodeRun.canvasId !== parsed.canvasId ||
+      existingNodeRun.nodeId !== parsed.nodeId
+    ) {
+      throw new ApiError(409, "NODE_RUN_INVALID", "节点运行记录与当前执行请求不匹配。");
+    }
+  }
+
   const node = await assertNodeForRun(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
   const incomingEdges = await getIncomingEdges(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
   const upstreamNodeIds = await resolveSelectedUpstreamNodeIds(parsed, incomingEdges);
-  const upstreamNodes = await getUpstreamNodes(parsed.workspaceId, parsed.canvasId, upstreamNodeIds);
+  const upstreamNodes = await getUpstreamNodesForExecution(parsed, upstreamNodeIds);
   const referenceAssets = await getNodeReferenceAssets(node);
   const requestPayload = await buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
 
   const createdTask = await db.transaction(async (tx) => {
-    const [nodeRun] = await tx
-      .insert(nodeRuns)
-      .values({
-        workspaceId: parsed.workspaceId,
-        canvasId: parsed.canvasId,
-        nodeId: parsed.nodeId,
-        batchRunId: parsed.batchRunId ?? null,
-        requestId: parsed.requestId,
-        runIndex: parsed.batchRunIndex ?? null,
-        nodeType: node.type,
-        nodeTitle: node.title,
-        status: "queued",
-      })
-      .returning();
+    const nodeRun = existingNodeRun
+      ? existingNodeRun
+      : (
+          await tx
+            .insert(nodeRuns)
+            .values({
+              workspaceId: parsed.workspaceId,
+              canvasId: parsed.canvasId,
+              nodeId: parsed.nodeId,
+              batchRunId: parsed.batchRunId ?? null,
+              requestId: parsed.requestId,
+              runIndex: parsed.batchRunIndex ?? null,
+              nodeType: node.type,
+              nodeTitle: node.title,
+              status: "queued",
+            })
+            .returning()
+        )[0];
     const [task] = await tx
       .insert(generationTasks)
       .values({
@@ -1500,6 +1917,15 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
         pollCount: 0,
       })
       .returning();
+
+    await tx
+      .update(nodeRuns)
+      .set({
+        taskId: task.id,
+        status: "queued",
+        updatedAt: new Date(),
+      })
+      .where(eq(nodeRuns.id, nodeRun.id));
 
     await tx
       .update(canvasNodes)
@@ -1794,7 +2220,7 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
 
   assertTaskBelongsToWorkspace(task, parsed.workspaceId);
 
-  const node = await getTaskNode(task.id, task.nodeId as string);
+  const node = await getTaskNode(task.nodeId as string);
 
   if (task.taskType !== "video") {
     throw new ApiError(400, "TASK_POLL_UNSUPPORTED", "Polling is currently supported for video tasks only.");
@@ -1860,6 +2286,23 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           updatedAt: finishedAt,
         })
         .where(eq(canvasNodes.id, node.id));
+    });
+
+    await updateNodeRunRecord(task.nodeRunId, {
+      taskId: task.id,
+      status: "succeeded",
+      resultType: "video",
+      contentText: providerStatus.videoUrl ?? null,
+      assetId: null,
+      resultMeta: {
+        ...(task.responsePayload as Record<string, unknown> | null),
+        poll: providerStatus.rawResponse,
+        videoUrl: providerStatus.videoUrl,
+        progress: providerStatus.progress,
+      },
+      errorCode: null,
+      errorMessage: null,
+      finishedAt,
     });
 
     return {
@@ -1951,7 +2394,7 @@ export async function retryTask(input: z.infer<typeof retryTaskInputSchema>) {
     throw new ApiError(409, "TASK_RETRY_CONFLICT", "Task is not bound to a canvas node.");
   }
 
-  await getTaskNode(task.id, nodeId);
+  await getTaskNode(nodeId);
 
   const updatedAt = new Date();
 
@@ -2091,35 +2534,23 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
       selectedNodesJson: sortedNodes,
     })
     .returning();
+  const plannedNodeRuns = Array.from({ length: parsed.runCount }, (_, index) => index + 1).flatMap((runIndex) =>
+    sortedNodes.map((node) => ({
+      workspaceId: parsed.workspaceId,
+      canvasId: parsed.canvasId,
+      nodeId: node.id,
+      batchRunId: batchRun.id,
+      requestId: createBatchRunRequestId(batchRun.id, runIndex, node.id),
+      runIndex,
+      nodeType: node.type,
+      nodeTitle: node.title,
+      status: "queued",
+    })),
+  );
 
-  const items = [];
-
-  for (let runIndex = 1; runIndex <= parsed.runCount; runIndex += 1) {
-    for (const node of sortedNodes) {
-      const task = await runNode({
-        workspaceId: parsed.workspaceId,
-        canvasId: parsed.canvasId,
-        nodeId: node.id,
-        actorUserId: parsed.actorUserId,
-        requestId: createBatchRunRequestId(batchRun.id, runIndex, node.id),
-        useUpstreamOutputs: true,
-        mergeStrategy: "merge_all",
-        overrideSettings: {},
-        batchRunId: batchRun.id,
-        batchRunIndex: runIndex,
-      });
-
-      items.push({
-        nodeId: node.id,
-        nodeTitle: node.title,
-        taskId: task.taskId,
-        status: task.status,
-        runIndex,
-      });
-    }
-  }
-
+  await db.insert(nodeRuns).values(plannedNodeRuns);
   await refreshNodeRunBatchSummary(batchRun.id);
+  await Promise.all(Array.from({ length: parsed.runCount }, (_, index) => triggerBatchRunProgress(batchRun.id, index + 1)));
 
   const [latestBatchRun] = await db
     .select()
@@ -2134,7 +2565,13 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
     nodeCount: sortedNodes.length,
     status: latestBatchRun?.status ?? "processing",
     totalNodeRunCount,
-    items,
+    items: plannedNodeRuns.map((nodeRun) => ({
+      nodeId: nodeRun.nodeId,
+      nodeTitle: nodeRun.nodeTitle,
+      taskId: null,
+      status: nodeRun.status,
+      runIndex: nodeRun.runIndex,
+    })),
   };
 }
 

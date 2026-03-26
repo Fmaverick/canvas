@@ -2,16 +2,38 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
-import { listNodeRunBatches, listTasks } from "@/application/services/task-service";
+import { getNodeRunBatch, listNodeRunBatches, listTasks } from "@/application/services/task-service";
 import { Badge } from "@/components/ui/badge";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 
 type TaskCenterPageProps = {
   searchParams?: Promise<{
     workspaceId?: string;
     status?: string;
     taskType?: string;
+    tab?: string;
+    page?: string;
+    detailType?: string;
+    detailId?: string;
   }>;
 };
+
+type TaskRecord = Awaited<ReturnType<typeof listTasks>>[number];
+type BatchRunRecord = Awaited<ReturnType<typeof listNodeRunBatches>>[number];
+type BatchRunDetail = Awaited<ReturnType<typeof getNodeRunBatch>>;
+
+const tabOptions = [
+  { label: "任务列表", value: "tasks" },
+  { label: "批量记录", value: "batches" },
+] as const;
 
 const taskStatusOptions = [
   { label: "全部状态", value: undefined },
@@ -43,6 +65,13 @@ const typeLabel = {
   image: "图片",
   video: "视频",
   audio: "音频",
+} as const;
+
+const roleLabel = {
+  owner: "Owner",
+  admin: "Admin",
+  editor: "Editor",
+  viewer: "Viewer",
 } as const;
 
 function actionLinkClass(primary: boolean) {
@@ -127,7 +156,91 @@ function getNextPollDisplay(value: Date | null, taskStatus: string, taskType: st
   return formatted;
 }
 
-function buildHref(workspaceId: string | undefined, status: string | undefined, taskType: string | undefined) {
+function getTaskAttention(task: TaskRecord) {
+  const nextPollDue =
+    task.taskType === "video" &&
+    task.status === "processing" &&
+    task.nextPollAt instanceof Date &&
+    task.nextPollAt.getTime() <= Date.now();
+
+  if (task.status === "failed") {
+    return {
+      label: "需要排查",
+      description: task.errorMessage ? "当前记录已返回错误信息，建议优先查看错误码与 provider 响应。" : "当前记录执行失败，建议优先检查节点输入与 provider 配置。",
+      tone: "bg-[#fff1f1] text-[#b42318]",
+    };
+  }
+
+  if (nextPollDue) {
+    return {
+      label: "等待轮询",
+      description: "视频任务已到下一次轮询时间，适合优先关注 provider 回写结果。",
+      tone: "bg-[#fff7ed] text-[#c2410c]",
+    };
+  }
+
+  if (task.status === "processing" || task.status === "queued") {
+    return {
+      label: "运行中",
+      description: "任务仍处于排队或执行阶段，可结合重试和轮询次数继续观察。",
+      tone: "bg-[#f5f7ff] text-[#344054]",
+    };
+  }
+
+  if (task.status === "succeeded") {
+    return {
+      label: "已完成",
+      description: "任务已成功结束，可回到画布或结果视图继续后续操作。",
+      tone: "bg-[#f2f8f3] text-[#166534]",
+    };
+  }
+
+  return {
+    label: "已停止",
+    description: "当前任务不再继续推进，可结合上下文决定是否重新发起。",
+    tone: "bg-[#f4f4f5] text-[#52525b]",
+  };
+}
+
+function getTaskLifecycleLabel(task: TaskRecord) {
+  if (task.finishedAt) {
+    return `完成于 ${formatDateTime(task.finishedAt)}`;
+  }
+
+  if (task.startedAt) {
+    return `开始于 ${formatDateTime(task.startedAt)}`;
+  }
+
+  return `创建于 ${formatDateTime(task.createdAt)}`;
+}
+
+function getTaskCanvasHref(task: TaskRecord, workspaceId: string | undefined) {
+  if (!task.canvasId) {
+    return null;
+  }
+
+  const params = new URLSearchParams();
+
+  if (workspaceId) {
+    params.set("workspaceId", workspaceId);
+  }
+
+  const query = params.toString();
+
+  return query ? `/canvases/${task.canvasId}?${query}` : `/canvases/${task.canvasId}`;
+}
+
+function buildHref(
+  workspaceId: string | undefined,
+  status: string | undefined,
+  taskType: string | undefined,
+  options?: {
+    tab?: string;
+    page?: number;
+    detailType?: string;
+    detailId?: string;
+  },
+) {
   const params = new URLSearchParams();
 
   if (workspaceId) {
@@ -142,6 +255,19 @@ function buildHref(workspaceId: string | undefined, status: string | undefined, 
     params.set("taskType", taskType);
   }
 
+  if (options?.tab) {
+    params.set("tab", options.tab);
+  }
+
+  if (options?.page && options.page > 1) {
+    params.set("page", String(options.page));
+  }
+
+  if (options?.detailType && options?.detailId) {
+    params.set("detailType", options.detailType);
+    params.set("detailId", options.detailId);
+  }
+
   const query = params.toString();
 
   return query ? `/tasks?${query}` : "/tasks";
@@ -152,6 +278,49 @@ function resolveOptionLabel(
   value: string | undefined,
 ) {
   return options.find((option) => option.value === value)?.label ?? options[0]?.label ?? "全部";
+}
+
+function getPageNumber(value: string | undefined) {
+  if (!value) {
+    return 1;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function getVisiblePages(currentPage: number, totalPages: number) {
+  if (totalPages <= 5) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+
+  if (currentPage <= 3) {
+    return [1, 2, 3, 4, 5];
+  }
+
+  if (currentPage >= totalPages - 2) {
+    return [totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+  }
+
+  return [currentPage - 2, currentPage - 1, currentPage, currentPage + 1, currentPage + 2];
+}
+
+function getBatchRunTitle(batchRun: BatchRunRecord) {
+  if (!Array.isArray(batchRun.selectedNodesJson) || batchRun.selectedNodesJson.length === 0) {
+    return "未命名节点组";
+  }
+
+  const labels = batchRun.selectedNodesJson
+    .map((node) => (node && typeof node === "object" && "title" in node && typeof node.title === "string" ? node.title : ""))
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return labels.length > 0 ? labels.join("、") : "未命名节点组";
 }
 
 export default async function TaskCenterPage({ searchParams }: TaskCenterPageProps) {
@@ -211,6 +380,7 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
     resolvedSearchParams?.taskType && ["text", "image", "video", "audio", "storyboard"].includes(resolvedSearchParams.taskType)
       ? resolvedSearchParams.taskType
       : undefined;
+  const activeTab = resolvedSearchParams?.tab === "batches" ? "batches" : "tasks";
   const tasks = activeWorkspaceId
     ? await listTasks({
         workspaceId: activeWorkspaceId,
@@ -225,6 +395,30 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
         limit: 30,
       })
     : [];
+  const requestedPage = getPageNumber(resolvedSearchParams?.page);
+  const pageSize = activeTab === "tasks" ? 6 : 5;
+  const activeCollectionCount = activeTab === "tasks" ? tasks.length : batchRuns.length;
+  const totalPages = Math.max(1, Math.ceil(activeCollectionCount / pageSize));
+  const currentPage = Math.min(requestedPage, totalPages);
+  const paginatedTasks = tasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const paginatedBatchRuns = batchRuns.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const selectedTask =
+    activeTab === "tasks" && resolvedSearchParams?.detailType === "task" && resolvedSearchParams.detailId
+      ? tasks.find((task) => task.id === resolvedSearchParams.detailId) ?? null
+      : null;
+  let selectedBatchDetail: BatchRunDetail | null = null;
+
+  if (activeTab === "batches" && resolvedSearchParams?.detailType === "batch" && resolvedSearchParams.detailId && activeWorkspaceId) {
+    try {
+      selectedBatchDetail = await getNodeRunBatch({
+        workspaceId: activeWorkspaceId,
+        batchRunId: resolvedSearchParams.detailId,
+      });
+    } catch {
+      selectedBatchDetail = null;
+    }
+  }
+
 
   const metrics = {
     total: tasks.length,
@@ -236,10 +430,11 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
   const activeTaskTypeLabel = resolveOptionLabel(taskTypeOptions, activeTaskType);
   const overviewStats = [
     { label: "当前空间", value: activeWorkspace?.name ?? "未选择", accent: "bg-[#f7f7f8]" },
-    { label: "当前角色", value: activeWorkspace?.role ?? "—", accent: "bg-[#f7f7f8]" },
+    { label: "当前角色", value: activeWorkspace?.role ? roleLabel[activeWorkspace.role as keyof typeof roleLabel] : "—", accent: "bg-[#f7f7f8]" },
     { label: "运行中任务", value: String(metrics.processing), accent: "bg-[#f5f7ff]" },
     { label: "成功 / 失败", value: `${metrics.succeeded} / ${metrics.failed}`, accent: "bg-[#f7f7f8]" },
   ];
+  const visiblePages = getVisiblePages(currentPage, totalPages);
 
   return (
     <main className="min-h-screen bg-[#f5f5f7] px-4 py-5 sm:px-6 lg:px-8">
@@ -313,7 +508,9 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
                     </div>
                     <div className="rounded-[18px] bg-[#fcfcfd] p-4">
                       <p className="text-xs text-muted-foreground">当前角色</p>
-                      <p className="mt-2 font-medium text-foreground">{activeWorkspace?.role ?? "—"}</p>
+                      <p className="mt-2 font-medium text-foreground">
+                        {activeWorkspace?.role ? roleLabel[activeWorkspace.role as keyof typeof roleLabel] : "—"}
+                      </p>
                     </div>
                     <div className="rounded-[18px] bg-[#fcfcfd] p-4">
                       <p className="text-xs text-muted-foreground">任务类型</p>
@@ -401,187 +598,575 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
 
               <div className="px-5 py-5 sm:px-6">
                 <div className={surfaceClassName()}>
-                  <div className="flex flex-col gap-3 border-b border-black/5 pb-5 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground">批量运行记录</p>
-                        <Badge variant="outline" className="border-black/8 bg-white text-foreground">
-                          {batchRuns.length}
-                        </Badge>
+                  <div className="flex flex-col gap-4 border-b border-black/5 pb-5">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-foreground">记录中心</p>
+                          <Badge variant="outline" className="border-black/8 bg-white text-foreground">
+                            {activeTab === "tasks" ? metrics.total : batchRuns.length}
+                          </Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground">拆成 tab 浏览、分页切换、按需查看详情，减少单屏堆叠信息。</p>
                       </div>
-                      <p className="text-sm text-muted-foreground">查看单节点批量运行和多节点成组运行，并直接下载每轮结果归档。</p>
+                      <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                        <span className="rounded-full bg-[#f5f7ff] px-2.5 py-1">运行中 {metrics.processing}</span>
+                        <span className="rounded-full bg-[#f2f8f3] px-2.5 py-1">成功 {metrics.succeeded}</span>
+                        <span className="rounded-full bg-[#fff1f1] px-2.5 py-1">失败 {metrics.failed}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {tabOptions.map((option) => (
+                        <Link
+                          key={option.value}
+                          className={filterLinkClass(option.value === activeTab)}
+                          href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                            tab: option.value,
+                          })}
+                        >
+                          {option.label}
+                          <span className="ml-1 text-muted-foreground">
+                            {option.value === "tasks" ? metrics.total : batchRuns.length}
+                          </span>
+                        </Link>
+                      ))}
                     </div>
                   </div>
 
-                  <div className="mt-5 space-y-3">
-                    {batchRuns.length === 0 ? (
-                      <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
-                        当前空间还没有批量运行记录。
-                      </div>
-                    ) : (
-                      batchRuns.map((batchRun) => (
-                        <div key={batchRun.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
-                          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                            <div className="min-w-0 space-y-3">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(batchRun.status)}`}>
-                                  {batchRun.status === "partial_failed" ? "部分失败" : statusLabel[batchRun.status as keyof typeof statusLabel] ?? batchRun.status}
-                                </span>
-                                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
-                                  {batchRun.mode === "single_node" ? "单节点批量" : "多节点成组"}
-                                </span>
+                  {activeTab === "tasks" ? (
+                    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(320px,0.7fr)]">
+                      <div className="space-y-3">
+                        {paginatedTasks.length === 0 ? (
+                          <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
+                            当前筛选条件下没有任务记录。
+                          </div>
+                        ) : (
+                          paginatedTasks.map((task) => {
+                            const taskStatus = task.status as keyof typeof statusLabel;
+                            const taskType = task.taskType as keyof typeof typeLabel;
+                            const attention = getTaskAttention(task);
+
+                            return (
+                              <div key={task.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4">
+                                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                  <div className="min-w-0 flex-1 space-y-3">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(task.status)}`}>
+                                        {statusLabel[taskStatus]}
+                                      </span>
+                                      <span className={`rounded-full px-2.5 py-1 text-xs ${typeTone(task.taskType)}`}>
+                                        {typeLabel[taskType]}
+                                      </span>
+                                      <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                        {task.provider}
+                                      </span>
+                                      <span className={`rounded-full px-2.5 py-1 text-xs ${attention.tone}`}>{attention.label}</span>
+                                    </div>
+
+                                    <div className="space-y-1">
+                                      <p className="font-medium text-foreground">{task.nodeTitle ?? "未绑定节点"}</p>
+                                      <p className="text-sm text-muted-foreground">
+                                        {task.canvasName ?? "未绑定画布"} · {task.model}
+                                      </p>
+                                    </div>
+
+                                    <div className="grid gap-3 sm:grid-cols-3">
+                                      <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                        <p className="text-xs text-muted-foreground">运行焦点</p>
+                                        <p className="mt-2 text-sm font-medium text-foreground">{attention.description}</p>
+                                      </div>
+                                      <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                        <p className="text-xs text-muted-foreground">轮询与重试</p>
+                                        <p className="mt-2 text-sm font-medium text-foreground">
+                                          {task.retryCount} / {task.pollCount}
+                                        </p>
+                                      </div>
+                                      <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                        <p className="text-xs text-muted-foreground">生命周期</p>
+                                        <p className="mt-2 text-sm font-medium text-foreground">{getTaskLifecycleLabel(task)}</p>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex shrink-0 flex-wrap gap-2">
+                                    <Link
+                                      className={actionLinkClass(true)}
+                                      href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                        tab: "tasks",
+                                        page: currentPage,
+                                        detailType: "task",
+                                        detailId: task.id,
+                                      })}
+                                    >
+                                      查看详情
+                                    </Link>
+                                  </div>
+                                </div>
                               </div>
-                              <div className="space-y-1">
-                                <h3 className="font-medium text-foreground">
-                                  {Array.isArray(batchRun.selectedNodesJson) && batchRun.selectedNodesJson.length > 0
-                                    ? batchRun.selectedNodesJson
-                                        .map((node) =>
-                                          node && typeof node === "object" && "title" in node && typeof node.title === "string" ? node.title : "",
-                                        )
-                                        .filter(Boolean)
-                                        .slice(0, 4)
-                                        .join("、")
-                                    : "未命名节点组"}
-                                </h3>
-                                <p className="text-sm text-muted-foreground">
-                                  运行次数 {batchRun.requestedRunCount} · 节点执行 {batchRun.completedNodeRunCount} / {batchRun.totalNodeRunCount}
-                                </p>
+                            );
+                          })
+                        )}
+
+                        {totalPages > 1 ? (
+                          <Pagination className="justify-start">
+                            <PaginationContent>
+                              {currentPage > 1 ? (
+                                <PaginationItem>
+                                  <PaginationPrevious
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "tasks",
+                                      page: currentPage - 1,
+                                    })}
+                                    text="上一页"
+                                  />
+                                </PaginationItem>
+                              ) : null}
+
+                              {visiblePages[0] > 1 ? (
+                                <>
+                                  <PaginationItem>
+                                    <PaginationLink
+                                      href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                        tab: "tasks",
+                                        page: 1,
+                                      })}
+                                      isActive={currentPage === 1}
+                                    >
+                                      1
+                                    </PaginationLink>
+                                  </PaginationItem>
+                                  {visiblePages[0] > 2 ? (
+                                    <PaginationItem>
+                                      <PaginationEllipsis />
+                                    </PaginationItem>
+                                  ) : null}
+                                </>
+                              ) : null}
+
+                              {visiblePages.map((pageNumber) => (
+                                <PaginationItem key={pageNumber}>
+                                  <PaginationLink
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "tasks",
+                                      page: pageNumber,
+                                    })}
+                                    isActive={pageNumber === currentPage}
+                                  >
+                                    {pageNumber}
+                                  </PaginationLink>
+                                </PaginationItem>
+                              ))}
+
+                              {visiblePages[visiblePages.length - 1] < totalPages ? (
+                                <>
+                                  {visiblePages[visiblePages.length - 1] < totalPages - 1 ? (
+                                    <PaginationItem>
+                                      <PaginationEllipsis />
+                                    </PaginationItem>
+                                  ) : null}
+                                  <PaginationItem>
+                                    <PaginationLink
+                                      href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                        tab: "tasks",
+                                        page: totalPages,
+                                      })}
+                                      isActive={currentPage === totalPages}
+                                    >
+                                      {totalPages}
+                                    </PaginationLink>
+                                  </PaginationItem>
+                                </>
+                              ) : null}
+
+                              {currentPage < totalPages ? (
+                                <PaginationItem>
+                                  <PaginationNext
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "tasks",
+                                      page: currentPage + 1,
+                                    })}
+                                    text="下一页"
+                                  />
+                                </PaginationItem>
+                              ) : null}
+                            </PaginationContent>
+                          </Pagination>
+                        ) : null}
+                      </div>
+
+                      <div className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
+                        {selectedTask ? (
+                          (() => {
+                            const taskStatus = selectedTask.status as keyof typeof statusLabel;
+                            const taskType = selectedTask.taskType as keyof typeof typeLabel;
+                            const attention = getTaskAttention(selectedTask);
+                            const canvasHref = getTaskCanvasHref(selectedTask, activeWorkspaceId);
+
+                            return (
+                              <div className="space-y-4">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(selectedTask.status)}`}>
+                                    {statusLabel[taskStatus]}
+                                  </span>
+                                  <span className={`rounded-full px-2.5 py-1 text-xs ${typeTone(selectedTask.taskType)}`}>
+                                    {typeLabel[taskType]}
+                                  </span>
+                                  <span className={`rounded-full px-2.5 py-1 text-xs ${attention.tone}`}>{attention.label}</span>
+                                </div>
+
+                                <div className="space-y-1">
+                                  <p className="text-sm text-muted-foreground">任务详情</p>
+                                  <h3 className="text-lg font-semibold tracking-tight text-foreground">
+                                    {selectedTask.nodeTitle ?? "未绑定节点"}
+                                  </h3>
+                                  <p className="text-sm text-muted-foreground">
+                                    {selectedTask.canvasName ?? "未绑定画布"} · {selectedTask.model}
+                                  </p>
+                                </div>
+
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">请求标识</p>
+                                    <p className="mt-2 truncate font-medium text-foreground">{selectedTask.requestId}</p>
+                                  </div>
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">Provider Task</p>
+                                    <p className="mt-2 truncate font-medium text-foreground">{selectedTask.providerTaskId ?? "—"}</p>
+                                  </div>
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">重试 / 轮询</p>
+                                    <p className="mt-2 font-medium text-foreground">
+                                      {selectedTask.retryCount} / {selectedTask.pollCount}
+                                    </p>
+                                  </div>
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">下次轮询</p>
+                                    <p className="mt-2 font-medium text-foreground">
+                                      {getNextPollDisplay(selectedTask.nextPollAt, selectedTask.status, selectedTask.taskType)}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">时间轴</p>
+                                    <p className="mt-2 text-sm font-medium text-foreground">创建于 {formatDateTime(selectedTask.createdAt)}</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">开始于 {formatDateTime(selectedTask.startedAt)}</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">完成于 {formatDateTime(selectedTask.finishedAt)}</p>
+                                  </div>
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">错误与结果</p>
+                                    <p
+                                      className={`mt-2 text-sm font-medium ${
+                                        selectedTask.errorMessage ? "text-[#b42318]" : "text-foreground"
+                                      }`}
+                                    >
+                                      {selectedTask.errorMessage
+                                        ? `${selectedTask.errorCode ?? "ERROR"} · ${selectedTask.errorMessage}`
+                                        : "当前记录没有错误信息。"}
+                                    </p>
+                                    <p className="mt-3 text-xs text-muted-foreground">{attention.description}</p>
+                                  </div>
+                                </div>
+
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">任务 ID</p>
+                                    <p className="mt-2 truncate font-medium text-foreground">{selectedTask.id}</p>
+                                  </div>
+                                  <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                    <p className="text-xs text-muted-foreground">画布 / 节点</p>
+                                    <p className="mt-2 truncate font-medium text-foreground">{selectedTask.canvasId ?? "—"}</p>
+                                    <p className="mt-1 truncate text-sm text-muted-foreground">{selectedTask.nodeId ?? "—"}</p>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  {canvasHref ? (
+                                    <Link className={actionLinkClass(true)} href={canvasHref}>
+                                      回到画布
+                                    </Link>
+                                  ) : null}
+                                  <Link
+                                    className={actionLinkClass(false)}
+                                    href={buildHref(activeWorkspaceId, selectedTask.status, activeTaskType, {
+                                      tab: "tasks",
+                                    })}
+                                  >
+                                    查看同状态任务
+                                  </Link>
+                                  <Link
+                                    className={actionLinkClass(false)}
+                                    href={buildHref(activeWorkspaceId, activeStatus, selectedTask.taskType, {
+                                      tab: "tasks",
+                                    })}
+                                  >
+                                    查看同类型任务
+                                  </Link>
+                                </div>
+                              </div>
+                            );
+                          })()
+                        ) : (
+                          <div className="flex min-h-[320px] flex-col items-center justify-center rounded-[18px] border border-dashed border-black/8 bg-white px-6 py-8 text-center">
+                            <p className="text-sm font-medium text-foreground">任务详情</p>
+                            <p className="mt-2 max-w-sm text-sm text-muted-foreground">
+                              从左侧选择一条任务记录，再集中查看请求标识、轮询状态、错误信息与回到画布入口。
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(320px,0.7fr)]">
+                      <div className="space-y-3">
+                        {paginatedBatchRuns.length === 0 ? (
+                          <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
+                            当前空间还没有批量运行记录。
+                          </div>
+                        ) : (
+                          paginatedBatchRuns.map((batchRun) => (
+                            <div key={batchRun.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4">
+                              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                <div className="min-w-0 flex-1 space-y-3">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(batchRun.status)}`}>
+                                      {batchRun.status === "partial_failed"
+                                        ? "部分失败"
+                                        : statusLabel[batchRun.status as keyof typeof statusLabel] ?? batchRun.status}
+                                    </span>
+                                    <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                      {batchRun.mode === "single_node" ? "单节点批量" : "多节点成组"}
+                                    </span>
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <p className="font-medium text-foreground">{getBatchRunTitle(batchRun)}</p>
+                                    <p className="text-sm text-muted-foreground">
+                                      运行次数 {batchRun.requestedRunCount} · 节点执行 {batchRun.completedNodeRunCount} /{" "}
+                                      {batchRun.totalNodeRunCount}
+                                    </p>
+                                  </div>
+
+                                  <div className="grid gap-3 sm:grid-cols-3">
+                                    <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                      <p className="text-xs text-muted-foreground">成功 / 失败</p>
+                                      <p className="mt-2 text-sm font-medium text-foreground">
+                                        {batchRun.succeededNodeRunCount} / {batchRun.failedNodeRunCount}
+                                      </p>
+                                    </div>
+                                    <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                      <p className="text-xs text-muted-foreground">创建于</p>
+                                      <p className="mt-2 text-sm font-medium text-foreground">{formatDateTime(batchRun.createdAt)}</p>
+                                    </div>
+                                    <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                      <p className="text-xs text-muted-foreground">更新于</p>
+                                      <p className="mt-2 text-sm font-medium text-foreground">{formatDateTime(batchRun.updatedAt)}</p>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 flex-wrap gap-2">
+                                  <Link
+                                    className={actionLinkClass(true)}
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "batches",
+                                      page: currentPage,
+                                      detailType: "batch",
+                                      detailId: batchRun.id,
+                                    })}
+                                  >
+                                    查看详情
+                                  </Link>
+                                  <Link
+                                    className={actionLinkClass(false)}
+                                    href={`/api/tasks/batch-runs/${batchRun.id}/download?workspaceId=${activeWorkspaceId}`}
+                                  >
+                                    批量下载
+                                  </Link>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+
+                        {totalPages > 1 ? (
+                          <Pagination className="justify-start">
+                            <PaginationContent>
+                              {currentPage > 1 ? (
+                                <PaginationItem>
+                                  <PaginationPrevious
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "batches",
+                                      page: currentPage - 1,
+                                    })}
+                                    text="上一页"
+                                  />
+                                </PaginationItem>
+                              ) : null}
+
+                              {visiblePages[0] > 1 ? (
+                                <>
+                                  <PaginationItem>
+                                    <PaginationLink
+                                      href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                        tab: "batches",
+                                        page: 1,
+                                      })}
+                                      isActive={currentPage === 1}
+                                    >
+                                      1
+                                    </PaginationLink>
+                                  </PaginationItem>
+                                  {visiblePages[0] > 2 ? (
+                                    <PaginationItem>
+                                      <PaginationEllipsis />
+                                    </PaginationItem>
+                                  ) : null}
+                                </>
+                              ) : null}
+
+                              {visiblePages.map((pageNumber) => (
+                                <PaginationItem key={pageNumber}>
+                                  <PaginationLink
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "batches",
+                                      page: pageNumber,
+                                    })}
+                                    isActive={pageNumber === currentPage}
+                                  >
+                                    {pageNumber}
+                                  </PaginationLink>
+                                </PaginationItem>
+                              ))}
+
+                              {visiblePages[visiblePages.length - 1] < totalPages ? (
+                                <>
+                                  {visiblePages[visiblePages.length - 1] < totalPages - 1 ? (
+                                    <PaginationItem>
+                                      <PaginationEllipsis />
+                                    </PaginationItem>
+                                  ) : null}
+                                  <PaginationItem>
+                                    <PaginationLink
+                                      href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                        tab: "batches",
+                                        page: totalPages,
+                                      })}
+                                      isActive={currentPage === totalPages}
+                                    >
+                                      {totalPages}
+                                    </PaginationLink>
+                                  </PaginationItem>
+                                </>
+                              ) : null}
+
+                              {currentPage < totalPages ? (
+                                <PaginationItem>
+                                  <PaginationNext
+                                    href={buildHref(activeWorkspaceId, activeStatus, activeTaskType, {
+                                      tab: "batches",
+                                      page: currentPage + 1,
+                                    })}
+                                    text="下一页"
+                                  />
+                                </PaginationItem>
+                              ) : null}
+                            </PaginationContent>
+                          </Pagination>
+                        ) : null}
+                      </div>
+
+                      <div className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
+                        {selectedBatchDetail ? (
+                          <div className="space-y-4">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(selectedBatchDetail.status)}`}>
+                                {selectedBatchDetail.status === "partial_failed"
+                                  ? "部分失败"
+                                  : statusLabel[selectedBatchDetail.status as keyof typeof statusLabel] ?? selectedBatchDetail.status}
+                              </span>
+                              <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                {selectedBatchDetail.mode === "single_node" ? "单节点批量" : "多节点成组"}
+                              </span>
+                            </div>
+
+                            <div className="space-y-1">
+                              <p className="text-sm text-muted-foreground">批量运行详情</p>
+                              <h3 className="text-lg font-semibold tracking-tight text-foreground">
+                                {getBatchRunTitle(selectedBatchDetail)}
+                              </h3>
+                              <p className="text-sm text-muted-foreground">
+                                运行次数 {selectedBatchDetail.requestedRunCount} · 节点执行 {selectedBatchDetail.completedNodeRunCount} /{" "}
+                                {selectedBatchDetail.totalNodeRunCount}
+                              </p>
+                            </div>
+
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                <p className="text-xs text-muted-foreground">批量 ID</p>
+                                <p className="mt-2 truncate font-medium text-foreground">{selectedBatchDetail.id}</p>
+                              </div>
+                              <div className="rounded-[18px] border border-black/5 bg-white px-4 py-3">
+                                <p className="text-xs text-muted-foreground">创建 / 更新</p>
+                                <p className="mt-2 text-sm font-medium text-foreground">{formatDateTime(selectedBatchDetail.createdAt)}</p>
+                                <p className="mt-1 text-sm text-muted-foreground">{formatDateTime(selectedBatchDetail.updatedAt)}</p>
                               </div>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-2">
+                            <div className="rounded-[18px] border border-black/5 bg-white p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">运行明细</p>
+                                  <p className="text-sm text-muted-foreground">按 runIndex 展示当前批量中的节点运行结果。</p>
+                                </div>
+                                <Badge variant="outline" className="border-black/8 bg-white text-foreground">
+                                  {selectedBatchDetail.runs.length}
+                                </Badge>
+                              </div>
+
+                              <div className="mt-4 space-y-3">
+                                {selectedBatchDetail.runs.map((run) => (
+                                  <div key={run.id} className="rounded-[16px] border border-black/5 bg-[#fcfcfd] p-3">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(run.status)}`}>
+                                        {statusLabel[run.status as keyof typeof statusLabel] ?? run.status}
+                                      </span>
+                                      <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                        Run {run.runIndex}
+                                      </span>
+                                    </div>
+                                    <p className="mt-3 text-sm font-medium text-foreground">{run.nodeTitle}</p>
+                                    <p className="mt-1 text-sm text-muted-foreground">{run.requestId ?? "无 requestId"}</p>
+                                    <p className={`mt-2 text-sm ${run.errorMessage ? "text-[#b42318]" : "text-muted-foreground"}`}>
+                                      {run.errorMessage ? `${run.errorCode ?? "ERROR"} · ${run.errorMessage}` : run.contentText || "当前明细没有错误信息。"}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
                               <Link
                                 className={actionLinkClass(true)}
-                                href={`/api/tasks/batch-runs/${batchRun.id}/download?workspaceId=${activeWorkspaceId}`}
+                                href={`/api/tasks/batch-runs/${selectedBatchDetail.id}/download?workspaceId=${activeWorkspaceId}`}
                               >
                                 批量下载
                               </Link>
                             </div>
                           </div>
-
-                          <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                              <p className="text-xs text-muted-foreground">批量 ID</p>
-                              <p className="mt-2 truncate font-medium text-foreground">{batchRun.id}</p>
-                            </div>
-                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                              <p className="text-xs text-muted-foreground">成功 / 失败</p>
-                              <p className="mt-2 font-medium text-foreground">
-                                {batchRun.succeededNodeRunCount} / {batchRun.failedNodeRunCount}
-                              </p>
-                            </div>
-                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                              <p className="text-xs text-muted-foreground">创建于</p>
-                              <p className="mt-2 font-medium text-foreground">{formatDateTime(batchRun.createdAt)}</p>
-                            </div>
-                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                              <p className="text-xs text-muted-foreground">更新于</p>
-                              <p className="mt-2 font-medium text-foreground">{formatDateTime(batchRun.updatedAt)}</p>
-                            </div>
+                        ) : (
+                          <div className="flex min-h-[320px] flex-col items-center justify-center rounded-[18px] border border-dashed border-black/8 bg-white px-6 py-8 text-center">
+                            <p className="text-sm font-medium text-foreground">批量详情</p>
+                            <p className="mt-2 max-w-sm text-sm text-muted-foreground">
+                              从左侧选择一条批量记录，再查看节点运行明细、整体状态分布与批量下载入口。
+                            </p>
                           </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className={surfaceClassName()}>
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground">任务列表</p>
-                        <Badge variant="outline" className="border-black/8 bg-white text-foreground">
-                          {metrics.total}
-                        </Badge>
+                        )}
                       </div>
-                      <p className="text-sm text-muted-foreground">展示 provider、轮询、重试、错误与节点归属信息。</p>
                     </div>
-                    <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span className="rounded-full bg-[#f5f7ff] px-2.5 py-1">运行中 {metrics.processing}</span>
-                      <span className="rounded-full bg-[#f2f8f3] px-2.5 py-1">成功 {metrics.succeeded}</span>
-                      <span className="rounded-full bg-[#fff1f1] px-2.5 py-1">失败 {metrics.failed}</span>
-                    </div>
-                  </div>
-
-                  <div className="mt-5 space-y-3">
-                    {tasks.length === 0 ? (
-                      <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
-                        当前筛选条件下没有任务记录。
-                      </div>
-                    ) : (
-                      tasks.map((task) => {
-                        const taskStatus = task.status as keyof typeof statusLabel;
-                        const taskType = task.taskType as keyof typeof typeLabel;
-
-                        return (
-                          <div key={task.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
-                            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                              <div className="min-w-0 space-y-3">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(task.status)}`}>
-                                    {statusLabel[taskStatus]}
-                                  </span>
-                                  <span className={`rounded-full px-2.5 py-1 text-xs ${typeTone(task.taskType)}`}>
-                                    {typeLabel[taskType]}
-                                  </span>
-                                  <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
-                                    {task.provider}
-                                  </span>
-                                </div>
-                                <div className="space-y-1">
-                                  <h3 className="truncate font-medium text-foreground">{task.nodeTitle ?? "未绑定节点"}</h3>
-                                  <p className="text-sm text-muted-foreground">
-                                    {task.canvasName ?? "未绑定画布"} · {task.model}
-                                  </p>
-                                </div>
-                              </div>
-
-                              <div className="shrink-0 space-y-1 text-xs text-muted-foreground">
-                                <p>创建于 {formatDateTime(task.createdAt)}</p>
-                                <p>更新于 {formatDateTime(task.updatedAt)}</p>
-                              </div>
-                            </div>
-
-                            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">任务 ID</p>
-                                <p className="mt-2 truncate font-medium text-foreground">{task.id}</p>
-                              </div>
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">Provider Task</p>
-                                <p className="mt-2 truncate font-medium text-foreground">{task.providerTaskId ?? "—"}</p>
-                              </div>
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">重试 / 轮询</p>
-                                <p className="mt-2 font-medium text-foreground">
-                                  {task.retryCount} / {task.pollCount}
-                                </p>
-                              </div>
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">下次轮询</p>
-                                <p className="mt-2 font-medium text-foreground">
-                                  {getNextPollDisplay(task.nextPollAt, task.status, task.taskType)}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">Request ID</p>
-                                <p className="mt-2 truncate font-medium text-foreground">{task.requestId}</p>
-                              </div>
-                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
-                                <p className="text-xs text-muted-foreground">错误信息</p>
-                                <p className={`mt-2 font-medium ${task.errorMessage ? "text-[#b42318]" : "text-foreground"}`}>
-                                  {task.errorMessage ? `${task.errorCode ?? "ERROR"} · ${task.errorMessage}` : "—"}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
+                  )}
                 </div>
               </div>
             </section>
