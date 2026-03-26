@@ -1,4 +1,4 @@
-import { desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, or } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
@@ -49,7 +49,10 @@ export async function listWorkspaces(input: z.infer<typeof listWorkspacesInputSc
       role: workspaceMembers.role,
     })
     .from(workspaces)
-    .leftJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+    .leftJoin(
+      workspaceMembers,
+      and(eq(workspaceMembers.workspaceId, workspaces.id), eq(workspaceMembers.userId, parsed.userId)),
+    )
     .where(or(eq(workspaces.ownerId, parsed.userId), eq(workspaceMembers.userId, parsed.userId)))
     .orderBy(desc(workspaces.updatedAt));
 

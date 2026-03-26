@@ -1,9 +1,9 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 
+import { getCurrentUserFromRequest } from "@/application/services/auth-service";
 import { listTasks } from "@/application/services/task-service";
-import { listWorkspaces } from "@/application/services/workspace-service";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 type TaskCenterPageProps = {
   searchParams?: Promise<{
@@ -29,14 +29,6 @@ const taskTypeOptions = [
   { label: "视频", value: "video" },
 ] as const;
 
-const statusBadgeVariant = {
-  queued: "outline",
-  processing: "secondary",
-  succeeded: "default",
-  failed: "destructive",
-  canceled: "ghost",
-} as const;
-
 const statusLabel = {
   queued: "排队中",
   processing: "处理中",
@@ -53,10 +45,58 @@ const typeLabel = {
   audio: "音频",
 } as const;
 
-function linkButtonClass(active: boolean) {
+function actionLinkClass(primary: boolean) {
+  return primary
+    ? "inline-flex h-9 items-center rounded-xl bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
+    : "inline-flex h-9 items-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted";
+}
+
+function filterLinkClass(active: boolean) {
   return active
-    ? "inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/80"
-    : "inline-flex h-8 items-center justify-center rounded-lg border border-border bg-background px-2.5 text-sm font-medium text-foreground transition-all hover:bg-muted";
+    ? "inline-flex items-center rounded-full border border-black/10 bg-white px-3 py-1.5 text-sm font-medium text-foreground shadow-[0_8px_24px_-24px_rgba(15,23,42,0.24)]"
+    : "inline-flex items-center rounded-full border border-transparent bg-transparent px-3 py-1.5 text-sm text-muted-foreground transition hover:border-black/8 hover:bg-white";
+}
+
+function surfaceClassName(compact = false) {
+  return compact
+    ? "rounded-[20px] border border-black/5 bg-white p-4"
+    : "rounded-[24px] border border-black/5 bg-white p-5 sm:p-6";
+}
+
+function statusTone(status: string) {
+  if (status === "failed") {
+    return "bg-[#fff1f1] text-[#b42318]";
+  }
+
+  if (status === "processing" || status === "queued") {
+    return "bg-[#f5f7ff] text-[#344054]";
+  }
+
+  if (status === "succeeded") {
+    return "bg-[#f2f8f3] text-[#166534]";
+  }
+
+  return "bg-[#f4f4f5] text-[#52525b]";
+}
+
+function typeTone(taskType: string) {
+  if (taskType === "video") {
+    return "bg-[#f4f3ff] text-[#5b21b6]";
+  }
+
+  if (taskType === "image") {
+    return "bg-[#fff7ed] text-[#c2410c]";
+  }
+
+  if (taskType === "storyboard") {
+    return "bg-[#eef4ff] text-[#1d4ed8]";
+  }
+
+  if (taskType === "audio") {
+    return "bg-[#f5f3ff] text-[#6d28d9]";
+  }
+
+  return "bg-[#f4f4f5] text-[#52525b]";
 }
 
 function formatDateTime(value: Date | null) {
@@ -107,10 +147,62 @@ function buildHref(workspaceId: string | undefined, status: string | undefined, 
   return query ? `/tasks?${query}` : "/tasks";
 }
 
+function resolveOptionLabel(
+  options: ReadonlyArray<{ label: string; value: string | undefined }>,
+  value: string | undefined,
+) {
+  return options.find((option) => option.value === value)?.label ?? options[0]?.label ?? "全部";
+}
+
 export default async function TaskCenterPage({ searchParams }: TaskCenterPageProps) {
+  const cookieStore = await cookies();
+  const request = new Request("http://localhost/tasks", {
+    headers: {
+      cookie: cookieStore.toString(),
+    },
+  });
+
+  let currentUserResult: Awaited<ReturnType<typeof getCurrentUserFromRequest>> | null = null;
+
+  try {
+    currentUserResult = await getCurrentUserFromRequest(request);
+  } catch {
+    currentUserResult = null;
+  }
+
+  if (!currentUserResult) {
+    return (
+      <main className="min-h-screen bg-[#f5f5f7] px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] w-full max-w-4xl flex-col items-center justify-center gap-6 rounded-[28px] border border-black/5 bg-white px-6 py-10 text-center shadow-[0_12px_36px_-28px_rgba(15,23,42,0.16)]">
+          <Badge variant="outline" className="border-black/8 bg-[#fcfcfd] text-foreground">
+            任务中心
+          </Badge>
+          <div className="space-y-3">
+            <h1 className="text-4xl font-semibold tracking-tight">请先登录后查看任务中心</h1>
+            <p className="text-base leading-7 text-muted-foreground">
+              当前任务中心依赖会话态来解析当前用户，以及你可访问的 workspace 范围。
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-3">
+            <Link className={actionLinkClass(true)} href="/login">
+              去登录
+            </Link>
+            <Link className={actionLinkClass(false)} href="/register">
+              去注册
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
-  const workspaces = await listWorkspaces({});
-  const activeWorkspaceId = resolvedSearchParams?.workspaceId ?? workspaces[0]?.id;
+  const workspaces = currentUserResult.workspaces;
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === resolvedSearchParams?.workspaceId) ??
+    workspaces.find((workspace) => workspace.type === "personal") ??
+    workspaces[0];
+  const activeWorkspaceId = activeWorkspace?.id;
   const activeStatus =
     resolvedSearchParams?.status && ["queued", "processing", "succeeded", "failed", "canceled"].includes(resolvedSearchParams.status)
       ? resolvedSearchParams.status
@@ -130,195 +222,279 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
 
   const metrics = {
     total: tasks.length,
-    processing: tasks.filter((task) => task.status === "processing").length,
+    processing: tasks.filter((task) => task.status === "processing" || task.status === "queued").length,
     failed: tasks.filter((task) => task.status === "failed").length,
     succeeded: tasks.filter((task) => task.status === "succeeded").length,
   };
+  const activeStatusLabel = resolveOptionLabel(taskStatusOptions, activeStatus);
+  const activeTaskTypeLabel = resolveOptionLabel(taskTypeOptions, activeTaskType);
+  const overviewStats = [
+    { label: "当前空间", value: activeWorkspace?.name ?? "未选择", accent: "bg-[#f7f7f8]" },
+    { label: "当前角色", value: activeWorkspace?.role ?? "—", accent: "bg-[#f7f7f8]" },
+    { label: "运行中任务", value: String(metrics.processing), accent: "bg-[#f5f7ff]" },
+    { label: "成功 / 失败", value: `${metrics.succeeded} / ${metrics.failed}`, accent: "bg-[#f7f7f8]" },
+  ];
 
   return (
-    <main className="min-h-screen bg-muted/30">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 py-8 lg:px-8">
-        <section className="rounded-3xl border bg-background px-6 py-8 shadow-sm lg:px-8">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-3">
-              <Badge>任务中心</Badge>
-              <div className="space-y-2">
-                <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">集中查看节点运行、轮询与重试状态</h1>
-                <p className="max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">
-                  当前页面聚焦 generation_tasks 主链路，统一查看文本、图片、视频任务的状态、错误、轮询计划和重试次数。
-                </p>
+    <main className="min-h-screen bg-[#f5f5f7] px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-[1440px]">
+        <section className="overflow-hidden rounded-[28px] border border-black/5 bg-white shadow-[0_12px_36px_-28px_rgba(15,23,42,0.16)]">
+          <div className="border-b border-black/5 bg-[#fcfcfd] px-5 py-4 sm:px-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="size-3 rounded-full bg-[#ff5f57]" />
+                  <span className="size-3 rounded-full bg-[#febc2e]" />
+                  <span className="size-3 rounded-full bg-[#28c840]" />
+                  <div className="ml-2 flex items-center gap-2 text-sm text-muted-foreground">
+                    <span className="rounded-full border border-border/60 bg-background px-2 py-0.5 text-foreground">
+                      Task Center
+                    </span>
+                    <span className="hidden sm:inline">{activeWorkspace?.name ?? "未选择空间"}</span>
+                    {activeStatus ? (
+                      <span className="hidden rounded-full border border-border/60 bg-background px-2 py-0.5 text-xs sm:inline">
+                        {activeStatusLabel}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="space-y-0.5">
+                  <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                    集中查看节点运行、轮询与重试状态
+                  </h1>
+                  <p className="text-sm text-muted-foreground">
+                    只展示你当前可访问的 workspace 任务，把筛选、状态和关键错误收拢到同一视图。
+                  </p>
+                </div>
               </div>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <Link className={linkButtonClass(false)} href="/">
-                返回首页
-              </Link>
-              {activeWorkspaceId ? (
-                <Link className={linkButtonClass(true)} href={`/tasks?workspaceId=${activeWorkspaceId}`}>
-                  刷新当前空间
+
+              <div className="flex flex-wrap gap-2">
+                {activeWorkspaceId ? (
+                  <Link className={actionLinkClass(true)} href={`/tasks?workspaceId=${activeWorkspaceId}`}>
+                    刷新当前空间
+                  </Link>
+                ) : null}
+                <Link className={actionLinkClass(false)} href={activeWorkspaceId ? `/canvases?workspaceId=${activeWorkspaceId}` : "/canvases"}>
+                  进入画布
                 </Link>
-              ) : null}
+                <Link
+                  className={actionLinkClass(false)}
+                  href={activeWorkspaceId ? `/dashboard?workspaceId=${activeWorkspaceId}` : "/dashboard"}
+                >
+                  返回工作台
+                </Link>
+                <Link className={actionLinkClass(false)} href="/">
+                  返回首页
+                </Link>
+              </div>
             </div>
           </div>
-        </section>
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <Card size="sm">
-            <CardHeader>
-              <CardDescription>当前空间任务数</CardDescription>
-              <CardTitle className="text-2xl">{metrics.total}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card size="sm">
-            <CardHeader>
-              <CardDescription>处理中</CardDescription>
-              <CardTitle className="text-2xl">{metrics.processing}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card size="sm">
-            <CardHeader>
-              <CardDescription>已成功</CardDescription>
-              <CardTitle className="text-2xl">{metrics.succeeded}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card size="sm">
-            <CardHeader>
-              <CardDescription>已失败</CardDescription>
-              <CardTitle className="text-2xl">{metrics.failed}</CardTitle>
-            </CardHeader>
-          </Card>
-        </section>
+          <div className="grid gap-0 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <aside className="border-t border-black/5 bg-[#fafafb] p-5 sm:p-6 xl:border-r xl:border-t-0">
+              <div className="space-y-4">
+                <div className={surfaceClassName()}>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">筛选概览</p>
+                    <p className="text-sm text-muted-foreground">任务范围始终限定在你当前可访问的 workspace 内。</p>
+                  </div>
 
-        <section className="grid gap-6 xl:grid-cols-[1fr_2fr]">
-          <Card>
-            <CardHeader>
-              <CardTitle>筛选</CardTitle>
-              <CardDescription>先选 workspace，再按状态或类型筛任务。</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-3">
-                <p className="text-sm font-medium">工作空间</p>
-                <div className="flex flex-wrap gap-2">
-                  {workspaces.map((workspace) => (
-                    <Link
-                      key={workspace.id}
-                      className={linkButtonClass(workspace.id === activeWorkspaceId)}
-                      href={buildHref(workspace.id, activeStatus, activeTaskType)}
-                    >
-                      {workspace.name}
-                    </Link>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-sm font-medium">任务状态</p>
-                <div className="flex flex-wrap gap-2">
-                  {taskStatusOptions.map((option) => (
-                    <Link
-                      key={option.label}
-                      className={linkButtonClass(option.value === activeStatus)}
-                      href={buildHref(activeWorkspaceId, option.value, activeTaskType)}
-                    >
-                      {option.label}
-                    </Link>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-sm font-medium">任务类型</p>
-                <div className="flex flex-wrap gap-2">
-                  {taskTypeOptions.map((option) => (
-                    <Link
-                      key={option.label}
-                      className={linkButtonClass(option.value === activeTaskType)}
-                      href={buildHref(activeWorkspaceId, activeStatus, option.value)}
-                    >
-                      {option.label}
-                    </Link>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>任务列表</CardTitle>
-              <CardDescription>展示 provider、轮询、重试、错误与节点归属信息。</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {tasks.length === 0 ? (
-                <div className="rounded-2xl border border-dashed bg-muted/30 p-8 text-sm text-muted-foreground">
-                  当前筛选条件下没有任务记录。
-                </div>
-              ) : (
-                tasks.map((task) => {
-                  const taskStatus = task.status as keyof typeof statusBadgeVariant;
-                  const taskType = task.taskType as keyof typeof typeLabel;
-
-                  return (
-                    <div key={task.id} className="rounded-2xl border bg-muted/20 p-4">
-                      <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant={statusBadgeVariant[taskStatus]}>{statusLabel[taskStatus]}</Badge>
-                            <Badge variant="outline">{typeLabel[taskType]}</Badge>
-                            <Badge variant="ghost">{task.provider}</Badge>
-                          </div>
-                          <div>
-                            <h3 className="font-medium">{task.nodeTitle ?? "未绑定节点"}</h3>
-                            <p className="text-sm text-muted-foreground">
-                              {task.canvasName ?? "未绑定画布"} · {task.model}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          <p>创建于 {formatDateTime(task.createdAt)}</p>
-                          <p>更新于 {formatDateTime(task.updatedAt)}</p>
-                        </div>
-                      </div>
-
-                      <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">任务 ID</p>
-                          <p className="truncate font-medium">{task.id}</p>
-                        </div>
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">Provider Task</p>
-                          <p className="truncate font-medium">{task.providerTaskId ?? "—"}</p>
-                        </div>
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">重试 / 轮询</p>
-                          <p className="font-medium">
-                            {task.retryCount} / {task.pollCount}
-                          </p>
-                        </div>
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">下次轮询</p>
-                          <p className="font-medium">{getNextPollDisplay(task.nextPollAt, task.status, task.taskType)}</p>
-                        </div>
-                      </div>
-
-                      <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">Request ID</p>
-                          <p className="truncate font-medium">{task.requestId}</p>
-                        </div>
-                        <div className="rounded-xl border bg-background px-3 py-2">
-                          <p className="text-xs text-muted-foreground">错误信息</p>
-                          <p className="font-medium text-destructive/90">
-                            {task.errorMessage ? `${task.errorCode ?? "ERROR"} · ${task.errorMessage}` : "—"}
-                          </p>
-                        </div>
-                      </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
+                    <div className="rounded-[18px] bg-[#fcfcfd] p-4">
+                      <p className="text-xs text-muted-foreground">工作空间</p>
+                      <p className="mt-2 font-medium text-foreground">{activeWorkspace?.name ?? "未选择"}</p>
                     </div>
-                  );
-                })
-              )}
-            </CardContent>
-          </Card>
+                    <div className="rounded-[18px] bg-[#fcfcfd] p-4">
+                      <p className="text-xs text-muted-foreground">当前角色</p>
+                      <p className="mt-2 font-medium text-foreground">{activeWorkspace?.role ?? "—"}</p>
+                    </div>
+                    <div className="rounded-[18px] bg-[#fcfcfd] p-4">
+                      <p className="text-xs text-muted-foreground">任务类型</p>
+                      <p className="mt-2 font-medium text-foreground">{activeTaskTypeLabel}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={surfaceClassName()}>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">工作空间</p>
+                    <p className="text-sm text-muted-foreground">这里只展示你当前账号可访问的空间，并保留原有筛选条件。</p>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {workspaces.map((workspace) => (
+                      <Link
+                        key={workspace.id}
+                        className={filterLinkClass(workspace.id === activeWorkspaceId)}
+                        href={buildHref(workspace.id, activeStatus, activeTaskType)}
+                      >
+                        {workspace.name}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={surfaceClassName()}>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">任务状态</p>
+                    <p className="text-sm text-muted-foreground">按处理阶段收窄范围，优先定位重试与异常任务。</p>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {taskStatusOptions.map((option) => (
+                      <Link
+                        key={option.label}
+                        className={filterLinkClass(option.value === activeStatus)}
+                        href={buildHref(activeWorkspaceId, option.value, activeTaskType)}
+                      >
+                        {option.label}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={surfaceClassName()}>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">任务类型</p>
+                    <p className="text-sm text-muted-foreground">文本、分镜、图片、视频沿用统一浏览节奏，切换时不打断排查流程。</p>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {taskTypeOptions.map((option) => (
+                      <Link
+                        key={option.label}
+                        className={filterLinkClass(option.value === activeTaskType)}
+                        href={buildHref(activeWorkspaceId, activeStatus, option.value)}
+                      >
+                        {option.label}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={surfaceClassName(true)}>
+                  <p className="text-sm font-medium text-foreground">浏览建议</p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    先确认当前 workspace，再聚焦失败任务、轮询到期任务和 provider 错误。
+                  </p>
+                </div>
+              </div>
+            </aside>
+
+            <section className="min-w-0 bg-white">
+              <div className="border-b border-black/5 px-5 py-5 sm:px-6">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {overviewStats.map((item) => (
+                    <div key={item.label} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4">
+                      <div className={`inline-flex rounded-full px-2 py-1 text-xs text-muted-foreground ${item.accent}`}>
+                        {item.label}
+                      </div>
+                      <p className="mt-4 text-xl font-semibold tracking-tight text-foreground">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="px-5 py-5 sm:px-6">
+                <div className={surfaceClassName()}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">任务列表</p>
+                        <Badge variant="outline" className="border-black/8 bg-white text-foreground">
+                          {metrics.total}
+                        </Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">展示 provider、轮询、重试、错误与节点归属信息。</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <span className="rounded-full bg-[#f5f7ff] px-2.5 py-1">运行中 {metrics.processing}</span>
+                      <span className="rounded-full bg-[#f2f8f3] px-2.5 py-1">成功 {metrics.succeeded}</span>
+                      <span className="rounded-full bg-[#fff1f1] px-2.5 py-1">失败 {metrics.failed}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 space-y-3">
+                    {tasks.length === 0 ? (
+                      <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
+                        当前筛选条件下没有任务记录。
+                      </div>
+                    ) : (
+                      tasks.map((task) => {
+                        const taskStatus = task.status as keyof typeof statusLabel;
+                        const taskType = task.taskType as keyof typeof typeLabel;
+
+                        return (
+                          <div key={task.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                              <div className="min-w-0 space-y-3">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(task.status)}`}>
+                                    {statusLabel[taskStatus]}
+                                  </span>
+                                  <span className={`rounded-full px-2.5 py-1 text-xs ${typeTone(task.taskType)}`}>
+                                    {typeLabel[taskType]}
+                                  </span>
+                                  <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                    {task.provider}
+                                  </span>
+                                </div>
+                                <div className="space-y-1">
+                                  <h3 className="truncate font-medium text-foreground">{task.nodeTitle ?? "未绑定节点"}</h3>
+                                  <p className="text-sm text-muted-foreground">
+                                    {task.canvasName ?? "未绑定画布"} · {task.model}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="shrink-0 space-y-1 text-xs text-muted-foreground">
+                                <p>创建于 {formatDateTime(task.createdAt)}</p>
+                                <p>更新于 {formatDateTime(task.updatedAt)}</p>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">任务 ID</p>
+                                <p className="mt-2 truncate font-medium text-foreground">{task.id}</p>
+                              </div>
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">Provider Task</p>
+                                <p className="mt-2 truncate font-medium text-foreground">{task.providerTaskId ?? "—"}</p>
+                              </div>
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">重试 / 轮询</p>
+                                <p className="mt-2 font-medium text-foreground">
+                                  {task.retryCount} / {task.pollCount}
+                                </p>
+                              </div>
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">下次轮询</p>
+                                <p className="mt-2 font-medium text-foreground">
+                                  {getNextPollDisplay(task.nextPollAt, task.status, task.taskType)}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">Request ID</p>
+                                <p className="mt-2 truncate font-medium text-foreground">{task.requestId}</p>
+                              </div>
+                              <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                                <p className="text-xs text-muted-foreground">错误信息</p>
+                                <p className={`mt-2 font-medium ${task.errorMessage ? "text-[#b42318]" : "text-foreground"}`}>
+                                  {task.errorMessage ? `${task.errorCode ?? "ERROR"} · ${task.errorMessage}` : "—"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
       </div>
     </main>

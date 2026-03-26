@@ -37,7 +37,10 @@ async function listAccessibleWorkspaces(userId: string) {
       role: workspaceMembers.role,
     })
     .from(workspaces)
-    .leftJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+    .leftJoin(
+      workspaceMembers,
+      and(eq(workspaceMembers.workspaceId, workspaces.id), eq(workspaceMembers.userId, userId)),
+    )
     .where(or(eq(workspaces.ownerId, userId), eq(workspaceMembers.userId, userId)))
     .orderBy(desc(workspaces.updatedAt));
 
