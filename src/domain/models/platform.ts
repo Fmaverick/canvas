@@ -1,6 +1,6 @@
 export type WorkspaceMode = "personal" | "team" | "admin";
 
-export type CanvasNodeType = "text" | "image" | "video" | "audio";
+export type CanvasNodeType = "text" | "image" | "video" | "audio" | "storyboard";
 
 export type TaskStatus =
   | "queued"

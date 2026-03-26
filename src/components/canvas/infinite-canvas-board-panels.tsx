@@ -1,17 +1,20 @@
 "use client";
 
-import { Download, Expand, Upload, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clapperboard, Download, Expand, Sparkles, Upload, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 import {
+  DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   clampNumber,
   inferImageExtension,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
+  type StoryboardShot,
+  type StoryboardNodeSettings,
   type VideoGenerationMode,
   type VideoNodeSettings,
 } from "@/components/canvas/infinite-canvas-board.shared";
@@ -89,6 +92,398 @@ export function TextNodePanel({
                     ? "已提交"
                     : "AI 生成内容"}
             </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type StoryboardNodePanelProps = {
+  selectedNode: CanvasNode;
+  canEdit: boolean;
+  canGenerate: boolean;
+  draftPrompt: string;
+  draftSettings: StoryboardNodeSettings;
+  storyboardShots: StoryboardShot[];
+  storyboardTotalDurationSec: number;
+  activeShotIndex: number;
+  activeShotDraft: StoryboardShot | null;
+  isSavingPrompt: boolean;
+  isSavingShot: boolean;
+  isTaskActive: boolean;
+  isGenerating: boolean;
+  isCreatingVideoNode: boolean;
+  onPromptChange: (value: string) => void;
+  onSettingsChange: (updater: (current: StoryboardNodeSettings) => StoryboardNodeSettings) => void;
+  onActiveShotChange: (shotIndex: number) => void;
+  onActiveShotDraftChange: (updater: (current: StoryboardShot | null) => StoryboardShot | null) => void;
+  onSavePrompt: () => void;
+  onSaveShot: () => void;
+  onGenerate: () => void;
+  onCreateVideoNode: () => void;
+  onGenerateVideo: () => void;
+  onCreateCurrentShotVideoNode: () => void;
+  onGenerateCurrentShotVideo: () => void;
+};
+
+export function StoryboardNodePanel({
+  selectedNode,
+  canEdit,
+  canGenerate,
+  draftPrompt,
+  draftSettings,
+  storyboardShots,
+  storyboardTotalDurationSec,
+  activeShotIndex,
+  activeShotDraft,
+  isSavingPrompt,
+  isSavingShot,
+  isTaskActive,
+  isGenerating,
+  isCreatingVideoNode,
+  onPromptChange,
+  onSettingsChange,
+  onActiveShotChange,
+  onActiveShotDraftChange,
+  onSavePrompt,
+  onSaveShot,
+  onGenerate,
+  onCreateVideoNode,
+  onGenerateVideo,
+  onCreateCurrentShotVideoNode,
+  onGenerateCurrentShotVideo,
+}: StoryboardNodePanelProps) {
+  const hasShots = storyboardShots.length > 0;
+
+  return (
+    <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
+      <div className="flex max-h-[68vh] w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border bg-background/96 shadow-lg">
+        <div className="flex items-center justify-between gap-3 border-b px-3 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{selectedNode.title}</p>
+            <p className="text-xs text-muted-foreground">
+              这里会按 shotOutFormat 模板输出结构化分镜 JSON，上游文本与分镜连线会自动拼进当前节点 prompt。
+            </p>
+          </div>
+          <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
+            模板 · {draftSettings.templateFile}
+          </div>
+        </div>
+
+        <div className="space-y-3 overflow-y-auto px-3 py-3">
+          <div className="grid gap-3 lg:grid-cols-[1.05fr_0.95fr]">
+            <Textarea
+              className="min-h-32 max-h-48 max-w-full resize-y rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2"
+              placeholder="输入故事梗概、角色、场景、节奏、镜头风格和关键动作，系统会自动生成连续分镜。"
+              value={draftPrompt}
+              onChange={(event) => onPromptChange(event.target.value)}
+            />
+
+            <div className="grid min-w-0 gap-3">
+              <div className="grid min-w-0 gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2">
+                <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                  <span>镜头数量</span>
+                  <Input
+                    disabled={!canEdit}
+                    max={24}
+                    min={1}
+                    type="number"
+                    value={draftSettings.shotCount}
+                    onChange={(event) =>
+                      onSettingsChange((current) => ({
+                        ...current,
+                        shotCount: clampNumber(
+                          Number(event.target.value) || DEFAULT_STORYBOARD_NODE_SETTINGS.shotCount,
+                          1,
+                          24,
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <div className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                  <span>输出状态</span>
+                  <div className="flex h-9 min-w-0 items-center overflow-hidden rounded-xl border bg-background px-3 text-sm text-foreground">
+                    {hasShots ? `${storyboardShots.length} 个镜头已生成` : "尚未生成分镜"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">目标镜头</div>
+                  <div className="mt-1 text-lg font-semibold">{draftSettings.shotCount}</div>
+                </div>
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">已解析镜头</div>
+                  <div className="mt-1 text-lg font-semibold">{storyboardShots.length}</div>
+                </div>
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">预估总时长</div>
+                  <div className="mt-1 text-lg font-semibold">{storyboardTotalDurationSec > 0 ? `${storyboardTotalDurationSec}s` : "待生成"}</div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。生成完成后可以直接创建分镜视频节点。
+              </div>
+            </div>
+          </div>
+
+          {hasShots && activeShotDraft ? (
+            <div className="overflow-hidden rounded-[24px] border bg-muted/18 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">Shot 编辑器</p>
+                  <p className="text-xs text-muted-foreground">左右切换镜头，单独修改当前 shot，并为它创建专属视频节点。</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    disabled={activeShotIndex <= 0}
+                    size="icon"
+                    type="button"
+                    variant="outline"
+                    onClick={() => onActiveShotChange(Math.max(0, activeShotIndex - 1))}
+                  >
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                  <div className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground">
+                    Shot {activeShotDraft.sequence} / {storyboardShots.length}
+                  </div>
+                  <Button
+                    disabled={activeShotIndex >= storyboardShots.length - 1}
+                    size="icon"
+                    type="button"
+                    variant="outline"
+                    onClick={() => onActiveShotChange(Math.min(storyboardShots.length - 1, activeShotIndex + 1))}
+                  >
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3 xl:grid-cols-[0.92fr_1.08fr]">
+                <div className="grid min-w-0 gap-3">
+                  <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                    <span>场景名</span>
+                    <Input
+                      disabled={!canEdit}
+                      value={activeShotDraft.sceneLabel}
+                      onChange={(event) =>
+                        onActiveShotDraftChange((current) =>
+                          current
+                            ? {
+                                ...current,
+                                sceneLabel: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                  </label>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>景别</span>
+                      <Input
+                        disabled={!canEdit}
+                        value={activeShotDraft.size}
+                        onChange={(event) =>
+                          onActiveShotDraftChange((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  size: event.target.value,
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>机位 / 运动</span>
+                      <Input
+                        disabled={!canEdit}
+                        value={activeShotDraft.camera}
+                        onChange={(event) =>
+                          onActiveShotDraftChange((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  camera: event.target.value,
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>情绪</span>
+                      <Input
+                        disabled={!canEdit}
+                        value={activeShotDraft.emotion}
+                        onChange={(event) =>
+                          onActiveShotDraftChange((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  emotion: event.target.value,
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>时长</span>
+                      <Input
+                        disabled={!canEdit}
+                        min={1}
+                        type="number"
+                        value={activeShotDraft.duration ?? ""}
+                        onChange={(event) =>
+                          onActiveShotDraftChange((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  duration: event.target.value ? Math.max(1, Number(event.target.value)) : null,
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    <span>对白</span>
+                    <Input
+                      disabled={!canEdit}
+                      value={activeShotDraft.dialogue}
+                      onChange={(event) =>
+                        onActiveShotDraftChange((current) =>
+                          current
+                            ? {
+                                ...current,
+                                dialogue: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="grid min-w-0 gap-3">
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    <span>镜头描述</span>
+                    <Textarea
+                      className="min-h-24 max-h-40 max-w-full resize-y rounded-2xl bg-background"
+                      disabled={!canEdit}
+                      value={activeShotDraft.description}
+                      onChange={(event) =>
+                        onActiveShotDraftChange((current) =>
+                          current
+                            ? {
+                                ...current,
+                                description: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    <span>视频生成 Prompt</span>
+                    <Textarea
+                      className="min-h-28 max-h-44 max-w-full resize-y rounded-2xl bg-background"
+                      disabled={!canEdit}
+                      value={activeShotDraft.videoPrompt}
+                      onChange={(event) =>
+                        onActiveShotDraftChange((current) =>
+                          current
+                            ? {
+                                ...current,
+                                videoPrompt: event.target.value,
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-muted-foreground">当前 shot 会同步回分镜 JSON，并可直接生成单镜头视频节点。</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button disabled={isSavingShot || !canEdit} size="sm" type="button" variant="outline" onClick={onSaveShot}>
+                    {isSavingShot ? "保存中..." : "保存当前 Shot"}
+                  </Button>
+                  <Button
+                    disabled={isCreatingVideoNode || !canEdit}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={onCreateCurrentShotVideoNode}
+                  >
+                    <Clapperboard className="mr-1 size-4" />
+                    当前 Shot 视频节点
+                  </Button>
+                  <Button
+                    disabled={isCreatingVideoNode || !canEdit || !canGenerate}
+                    size="sm"
+                    type="button"
+                    onClick={onGenerateCurrentShotVideo}
+                  >
+                    <Sparkles className="mr-1 size-4" />
+                    生成当前 Shot 视频
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              目标输出 {draftSettings.shotCount} 个连续镜头
+              {isTaskActive
+                ? " · 当前正在生成中"
+                : hasShots
+                  ? " · 当前分镜已可直接转为视频节点。"
+                  : " · 生成结果会作为结构化 JSON 回写到节点。"}
+            </p>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <Button disabled={isSavingPrompt || !canEdit} size="sm" type="button" variant="outline" onClick={onSavePrompt}>
+                {isSavingPrompt ? "保存中..." : "保存配置"}
+              </Button>
+              <Button
+                disabled={isSavingPrompt || isGenerating || isTaskActive || !canGenerate}
+                size="sm"
+                type="button"
+                onClick={onGenerate}
+              >
+                {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成分镜"}
+              </Button>
+              <Button
+                disabled={!hasShots || isCreatingVideoNode || !canEdit}
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={onCreateVideoNode}
+              >
+                <Clapperboard className="mr-1 size-4" />
+                {isCreatingVideoNode ? "创建中..." : "创建视频节点"}
+              </Button>
+              <Button
+                disabled={!hasShots || isCreatingVideoNode || !canGenerate || !canEdit}
+                size="sm"
+                type="button"
+                onClick={onGenerateVideo}
+              >
+                <Sparkles className="mr-1 size-4" />
+                {isCreatingVideoNode ? "处理中..." : "一键生成分镜视频"}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -649,6 +1044,8 @@ export function ExpandedTextEditor({
   onClose,
   onSave,
 }: ExpandedTextEditorProps) {
+  const isStoryboardNode = selectedNode.type === "storyboard";
+
   return (
     <div className="absolute inset-0 z-30 overflow-y-auto bg-background/70 p-6 backdrop-blur-sm">
       <div className="mx-auto my-6 flex min-h-[calc(100vh-3rem)] w-full max-w-5xl items-center justify-center">
@@ -656,7 +1053,9 @@ export function ExpandedTextEditor({
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <p className="text-base font-semibold">{selectedNode.title}</p>
-              <p className="text-sm text-muted-foreground">这里是文本节点正文编辑区，双击节点后直接进入，用于手工编辑最终内容。</p>
+              <p className="text-sm text-muted-foreground">
+                {isStoryboardNode ? "这里是分镜节点 JSON 输出编辑区，可手工修正最终结构化结果。" : "这里是文本节点正文编辑区，双击节点后直接进入，用于手工编辑最终内容。"}
+              </p>
             </div>
             <Button size="sm" type="button" variant="outline" onClick={onClose}>
               关闭
@@ -671,7 +1070,9 @@ export function ExpandedTextEditor({
           />
 
           <div className="mt-4 flex items-center justify-between gap-3">
-            <p className="text-sm text-muted-foreground">这里保存的是文本节点正文，不是 AI 提示词。</p>
+            <p className="text-sm text-muted-foreground">
+              {isStoryboardNode ? "这里保存的是分镜 JSON 输出，不是 AI 提示词。" : "这里保存的是文本节点正文，不是 AI 提示词。"}
+            </p>
             <div className="flex items-center gap-2">
               <Button disabled={isSavingPrompt} type="button" variant="outline" onClick={onSave}>
                 {isSavingPrompt ? "保存中..." : "保存内容"}

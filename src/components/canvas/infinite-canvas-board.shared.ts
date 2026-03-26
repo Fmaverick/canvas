@@ -1,6 +1,6 @@
-import { AudioLines, ImageIcon, Type, Video } from "lucide-react";
+import { AudioLines, Clapperboard, ImageIcon, Type, Video } from "lucide-react";
 
-export type CanvasNodeType = "text" | "image" | "video" | "audio";
+export type CanvasNodeType = "text" | "image" | "video" | "audio" | "storyboard";
 export type CanvasConnectionSemantic = "prompt" | "reference_image";
 
 export type CanvasNodeReferenceAsset = {
@@ -109,6 +109,30 @@ export type VideoNodeSettings = {
   shotPrompts: string[];
 };
 
+export type StoryboardNodeSettings = {
+  shotCount: number;
+  responseFormat: "json";
+  templateFile: string;
+};
+
+export type StoryboardShotCharacter = {
+  name: string;
+  description: string;
+};
+
+export type StoryboardShot = {
+  sequence: number;
+  sceneLabel: string;
+  duration: number | null;
+  description: string;
+  videoPrompt: string;
+  emotion: string;
+  camera: string;
+  size: string;
+  dialogue: string;
+  characters: StoryboardShotCharacter[];
+};
+
 export type QuickCreateOption = {
   label: string;
   value: CanvasNodeType;
@@ -131,6 +155,8 @@ export const GRID_MAJOR_SIZE = 140;
 export const NODE_WIDTH = 248;
 export const NODE_HEIGHT = 132;
 export const TEXT_NODE_SIZE = 220;
+export const STORYBOARD_NODE_WIDTH = 420;
+export const STORYBOARD_NODE_HEIGHT = 300;
 export const IMAGE_NODE_MIN_WIDTH = 180;
 export const IMAGE_NODE_MAX_WIDTH = 320;
 export const IMAGE_NODE_MIN_HEIGHT = 140;
@@ -151,6 +177,12 @@ export const DEFAULT_VIDEO_NODE_SETTINGS: VideoNodeSettings = {
   lastFrameAssetId: null,
   referenceAssetIds: [],
   shotPrompts: [],
+};
+
+export const DEFAULT_STORYBOARD_NODE_SETTINGS: StoryboardNodeSettings = {
+  shotCount: 6,
+  responseFormat: "json",
+  templateFile: "shotOutFormat.md",
 };
 
 export const quickCreateOptions: QuickCreateOption[] = [
@@ -186,6 +218,14 @@ export const quickCreateOptions: QuickCreateOption[] = [
     lightTint: "from-emerald-100 to-cyan-50",
     description: "配音、音频草案",
   },
+  {
+    label: "分镜",
+    value: "storyboard",
+    icon: Clapperboard,
+    tint: "from-violet-100 to-indigo-50",
+    lightTint: "from-violet-100 to-indigo-50",
+    description: "动态分镜、镜头脚本",
+  },
 ];
 
 export function normalizeStringList(value: unknown) {
@@ -215,7 +255,10 @@ export function getCanvasConnectionSemantic(
   sourceType: string,
   targetType: string,
 ): CanvasConnectionSemantic | null {
-  if (sourceType === "text" && (targetType === "text" || targetType === "image" || targetType === "video")) {
+  if (
+    (sourceType === "text" || sourceType === "storyboard") &&
+    (targetType === "text" || targetType === "storyboard" || targetType === "image" || targetType === "video")
+  ) {
     return "prompt";
   }
 
@@ -241,11 +284,11 @@ export function getCanvasConnectionLabel(sourceType: string, targetType: string)
 }
 
 export function canCanvasNodeStartConnection(nodeType: string) {
-  return nodeType === "text" || nodeType === "image";
+  return nodeType === "text" || nodeType === "storyboard" || nodeType === "image";
 }
 
 export function canCanvasNodeReceiveConnection(nodeType: string) {
-  return nodeType === "text" || nodeType === "image" || nodeType === "video";
+  return nodeType === "text" || nodeType === "storyboard" || nodeType === "image" || nodeType === "video";
 }
 
 export function clampNumber(value: number, min: number, max: number) {
@@ -358,6 +401,123 @@ export function getTextNodeContent(outputSnapshot: Record<string, unknown> | nul
   }
 
   return typeof outputSnapshot.content === "string" ? outputSnapshot.content : "";
+}
+
+export function normalizeStoryboardNodeSettings(
+  settingsJson: Record<string, unknown> | null | undefined,
+): StoryboardNodeSettings {
+  const shotCountCandidate =
+    typeof settingsJson?.shotCount === "number" ? settingsJson.shotCount : DEFAULT_STORYBOARD_NODE_SETTINGS.shotCount;
+
+  return {
+    shotCount: clampNumber(Math.round(shotCountCandidate), 1, 24),
+    responseFormat: "json",
+    templateFile:
+      typeof settingsJson?.templateFile === "string" && settingsJson.templateFile.trim().length > 0
+        ? settingsJson.templateFile.trim()
+        : DEFAULT_STORYBOARD_NODE_SETTINGS.templateFile,
+  };
+}
+
+export function serializeStoryboardNodeSettings(settings: StoryboardNodeSettings) {
+  return {
+    shotCount: settings.shotCount,
+    responseFormat: settings.responseFormat,
+    templateFile: settings.templateFile,
+  };
+}
+
+export function getStoryboardShotCount(outputSnapshot: Record<string, unknown> | null) {
+  return getStoryboardShots(outputSnapshot).length;
+}
+
+export function getStoryboardRawShots(outputSnapshot: Record<string, unknown> | null) {
+  const structuredData =
+    outputSnapshot?.structuredData && typeof outputSnapshot.structuredData === "object"
+      ? (outputSnapshot.structuredData as Record<string, unknown>)
+      : null;
+  const shots = structuredData?.shots;
+
+  if (!Array.isArray(shots)) {
+    return [];
+  }
+
+  return shots.filter((shot): shot is Record<string, unknown> => Boolean(shot && typeof shot === "object"));
+}
+
+export function getStoryboardShots(outputSnapshot: Record<string, unknown> | null): StoryboardShot[] {
+  return getStoryboardRawShots(outputSnapshot)
+    .map((shot, index) => {
+      const shotRecord = shot as Record<string, unknown>;
+      const characters = Array.isArray(shotRecord.characters)
+        ? shotRecord.characters
+            .map((character) => {
+              if (!character || typeof character !== "object") {
+                return null;
+              }
+
+              const characterRecord = character as Record<string, unknown>;
+
+              return {
+                name: typeof characterRecord.name === "string" ? characterRecord.name.trim() : "",
+                description:
+                  typeof characterRecord.description === "string" ? characterRecord.description.trim() : "",
+              };
+            })
+            .filter((character): character is StoryboardShotCharacter => Boolean(character))
+        : [];
+      const durationValue = shotRecord.duration;
+      const duration =
+        typeof durationValue === "number" && Number.isFinite(durationValue) ? Math.max(1, Math.round(durationValue)) : null;
+
+      return {
+        sequence:
+          typeof shotRecord.sequence === "number" && Number.isFinite(shotRecord.sequence)
+            ? Math.max(1, Math.round(shotRecord.sequence))
+            : index + 1,
+        sceneLabel: typeof shotRecord.sceneLabel === "string" ? shotRecord.sceneLabel.trim() : "",
+        duration,
+        description: typeof shotRecord.description === "string" ? shotRecord.description.trim() : "",
+        videoPrompt: typeof shotRecord.videoPrompt === "string" ? shotRecord.videoPrompt.trim() : "",
+        emotion: typeof shotRecord.emotion === "string" ? shotRecord.emotion.trim() : "",
+        camera: typeof shotRecord.camera === "string" ? shotRecord.camera.trim() : "",
+        size: typeof shotRecord.size === "string" ? shotRecord.size.trim() : "",
+        dialogue: typeof shotRecord.dialogue === "string" ? shotRecord.dialogue.trim() : "",
+        characters,
+      };
+    })
+    .filter((shot): shot is StoryboardShot => Boolean(shot));
+}
+
+export function getStoryboardTotalDuration(outputSnapshot: Record<string, unknown> | null) {
+  return getStoryboardShots(outputSnapshot).reduce((total, shot) => total + (shot.duration ?? 0), 0);
+}
+
+export function getStoryboardPreviewText(outputSnapshot: Record<string, unknown> | null) {
+  const structuredData =
+    outputSnapshot?.structuredData && typeof outputSnapshot.structuredData === "object"
+      ? (outputSnapshot.structuredData as Record<string, unknown>)
+      : null;
+  const shots = Array.isArray(structuredData?.shots) ? structuredData.shots : [];
+  const firstShot = shots[0];
+
+  if (firstShot && typeof firstShot === "object") {
+    const firstShotRecord = firstShot as Record<string, unknown>;
+    const candidates = [
+      firstShotRecord.description,
+      firstShotRecord.videoPrompt,
+      firstShotRecord.sceneLabel,
+      firstShotRecord.dialogue,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+    }
+  }
+
+  return getTextNodeContent(outputSnapshot);
 }
 
 export function getImageNodeOutputSource(outputSnapshot: Record<string, unknown> | null) {

@@ -200,7 +200,7 @@
 | id | uuid | 主键 |
 | canvas_id | uuid | 画布 ID |
 | workspace_id | uuid | 空间 ID |
-| type | varchar(20) | text / image / video / audio |
+| type | varchar(20) | text / storyboard / image / video / audio |
 | title | varchar(255) | 节点标题 |
 | created_by | uuid | 创建人 |
 | copied_from_node_id | uuid nullable | 复制来源节点 |
@@ -251,7 +251,7 @@
 | workspace_id | uuid nullable | 团队模板所属空间，个人模板可为空 |
 | created_by | uuid | 创建人 |
 | scope | varchar(20) | personal / workspace / system |
-| type | varchar(20) | text / image / video / audio |
+| type | varchar(20) | text / storyboard / image / video / audio |
 | name | varchar(255) | 模板名称 |
 | description | text nullable | 模板说明 |
 | cover_asset_id | uuid nullable | 模板封面 |

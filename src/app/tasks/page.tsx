@@ -24,6 +24,7 @@ const taskStatusOptions = [
 const taskTypeOptions = [
   { label: "全部类型", value: undefined },
   { label: "文本", value: "text" },
+  { label: "分镜", value: "storyboard" },
   { label: "图片", value: "image" },
   { label: "视频", value: "video" },
 ] as const;
@@ -46,6 +47,7 @@ const statusLabel = {
 
 const typeLabel = {
   text: "文本",
+  storyboard: "分镜",
   image: "图片",
   video: "视频",
   audio: "音频",
@@ -114,14 +116,14 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
       ? resolvedSearchParams.status
       : undefined;
   const activeTaskType =
-    resolvedSearchParams?.taskType && ["text", "image", "video", "audio"].includes(resolvedSearchParams.taskType)
+    resolvedSearchParams?.taskType && ["text", "image", "video", "audio", "storyboard"].includes(resolvedSearchParams.taskType)
       ? resolvedSearchParams.taskType
       : undefined;
   const tasks = activeWorkspaceId
     ? await listTasks({
         workspaceId: activeWorkspaceId,
         status: activeStatus as "queued" | "processing" | "succeeded" | "failed" | "canceled" | undefined,
-        taskType: activeTaskType as "text" | "image" | "video" | "audio" | undefined,
+        taskType: activeTaskType as "text" | "image" | "video" | "audio" | "storyboard" | undefined,
         limit: 100,
       })
     : [];

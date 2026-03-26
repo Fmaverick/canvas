@@ -36,6 +36,7 @@
 一期支持以下类型：
 
 - `text`
+- `storyboard`
 - `image`
 - `video`
 - `audio`
@@ -50,7 +51,7 @@
 ## 5. 标准节点结构
 
 ```ts
-type CanvasNodeType = "text" | "image" | "video" | "audio";
+type CanvasNodeType = "text" | "storyboard" | "image" | "video" | "audio";
 
 type NodeRuntimeStatus =
   | "idle"
@@ -239,7 +240,32 @@ interface TextNodeParams {
 - 文本内容
 - 结构化 JSON
 
-### 12.2 图片节点
+### 12.2 分镜节点
+
+#### 用途
+
+- 剧情分镜拆解
+- 连续镜头规划
+- 视频镜头脚本输出
+- 结构化 shot JSON 输出
+
+#### params 建议
+
+```ts
+interface StoryboardNodeParams {
+  shotCount?: number;
+  responseFormat?: "json";
+  templateFile?: string;
+}
+```
+
+#### 输出
+
+- 结构化 JSON
+- `shots` 数组
+- 可直接复用的视频镜头 prompt
+
+### 12.3 图片节点
 
 #### 用途
 
@@ -265,7 +291,7 @@ interface ImageNodeParams {
 - 缩略图
 - 尺寸信息
 
-### 12.3 视频节点
+### 12.4 视频节点
 
 #### 用途
 
@@ -293,7 +319,7 @@ interface VideoNodeParams {
 - 时长
 - 分辨率
 
-### 12.4 音频节点
+### 12.5 音频节点
 
 #### 用途
 
@@ -408,6 +434,13 @@ interface NodeTemplate {
 - 上游图片生成描述引用
 - 上游视频提取脚本摘要
 - 上游音频提取文本稿或情绪描述
+
+#### 分镜节点
+
+- 上游文本与分镜结果拼接为镜头简报
+- 输出保持 JSON 结构
+- 模板文件定义字段骨架
+- 生成结果可继续作为视频节点 Prompt 来源
 
 #### 图片节点
 

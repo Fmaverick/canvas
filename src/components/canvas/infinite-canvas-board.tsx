@@ -4,7 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
-import { ExpandedTextEditor, getReferenceAssetDownloadName, ImageNodePanel, TextNodePanel, VideoNodePanel } from "@/components/canvas/infinite-canvas-board-panels";
+import {
+  ExpandedTextEditor,
+  getReferenceAssetDownloadName,
+  ImageNodePanel,
+  StoryboardNodePanel,
+  TextNodePanel,
+  VideoNodePanel,
+} from "@/components/canvas/infinite-canvas-board-panels";
 import { InfiniteCanvasBoardCreatePanel } from "@/components/canvas/infinite-canvas-board-create-panel";
 import { InfiniteCanvasBoardNodeCard } from "@/components/canvas/infinite-canvas-board-node-card";
 import {
@@ -18,6 +25,7 @@ import {
   runCanvasNode,
 } from "@/components/canvas/infinite-canvas-board.api";
 import {
+  DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   GRID_MAJOR_SIZE,
   GRID_MINOR_SIZE,
@@ -30,22 +38,30 @@ import {
   getManagedVideoAssetIds,
   getPersistedVideoNodeSettings,
   getReferenceAssetById,
+  getStoryboardRawShots,
+  getStoryboardShots,
+  getStoryboardTotalDuration,
   getTextNodeContent,
   getVideoNodeOutputSource,
   inferImageExtension,
   inferVideoExtension,
   isFormFieldTarget,
   normalizeResourceRefs,
+  normalizeStoryboardNodeSettings,
   normalizeVideoNodeSettings,
   quickCreateOptions,
+  serializeStoryboardNodeSettings,
+  serializeVideoNodeSettings,
   triggerDownload,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
   type CanvasNodeResourceRefs,
+  type StoryboardShot,
   type CanvasNodeType,
   type InstructionPresetOption,
   type InfiniteCanvasBoardProps,
   type LibraryItemOption,
+  type StoryboardNodeSettings,
 } from "@/components/canvas/infinite-canvas-board.shared";
 import { cn } from "@/lib/utils";
 
@@ -80,17 +96,23 @@ export function InfiniteCanvasBoard({
   const [savingNodeId, setSavingNodeId] = useState<string | null>(null);
   const [imagePreviewSizes, setImagePreviewSizes] = useState<Record<string, { width: number; height: number }>>({});
   const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftStoryboardSettings, setDraftStoryboardSettings] = useState<StoryboardNodeSettings>(DEFAULT_STORYBOARD_NODE_SETTINGS);
+  const [selectedStoryboardShotIndex, setSelectedStoryboardShotIndex] = useState(0);
+  const [draftStoryboardShot, setDraftStoryboardShot] = useState<StoryboardShot | null>(null);
   const [draftImagePrompt, setDraftImagePrompt] = useState("");
   const [draftVideoPrompt, setDraftVideoPrompt] = useState("");
   const [draftVideoSettings, setDraftVideoSettings] = useState(DEFAULT_VIDEO_NODE_SETTINGS);
   const [draftResourceRefs, setDraftResourceRefs] = useState<CanvasNodeResourceRefs>(() => normalizeResourceRefs(nodes[0]?.resourceRefs));
   const [expandedTextContent, setExpandedTextContent] = useState("");
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
+  const [isSavingStoryboardShot, setIsSavingStoryboardShot] = useState(false);
   const [isSavingImagePrompt, setIsSavingImagePrompt] = useState(false);
   const [isSavingVideoPrompt, setIsSavingVideoPrompt] = useState(false);
   const [isUploadingReferenceImages, setIsUploadingReferenceImages] = useState(false);
   const [isUploadingVideoImages, setIsUploadingVideoImages] = useState(false);
+  const [isCreatingStoryboardVideoNode, setIsCreatingStoryboardVideoNode] = useState(false);
   const [generatingTextNodeId, setGeneratingTextNodeId] = useState<string | null>(null);
+  const [generatingStoryboardNodeId, setGeneratingStoryboardNodeId] = useState<string | null>(null);
   const [generatingImageNodeId, setGeneratingImageNodeId] = useState<string | null>(null);
   const [generatingVideoNodeId, setGeneratingVideoNodeId] = useState<string | null>(null);
   const [editingTextNodeTitleId, setEditingTextNodeTitleId] = useState<string | null>(null);
@@ -148,18 +170,37 @@ export function InfiniteCanvasBoard({
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
   const selectedTask = selectedNode ? latestTaskByNode.get(selectedNode.id) ?? null : null;
   const isTextNodeSelected = selectedNode?.type === "text";
+  const isStoryboardNodeSelected = selectedNode?.type === "storyboard";
   const isImageNodeSelected = selectedNode?.type === "image";
   const isVideoNodeSelected = selectedNode?.type === "video";
   const isTextNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
+  const isStoryboardNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
   const isImageNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
   const isVideoNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
   const isSelectedTextNodeGenerating = selectedNode?.id === generatingTextNodeId;
+  const isSelectedStoryboardNodeGenerating = selectedNode?.id === generatingStoryboardNodeId;
   const isSelectedImageNodeGenerating = selectedNode?.id === generatingImageNodeId;
   const isSelectedVideoNodeGenerating = selectedNode?.id === generatingVideoNodeId;
   const isSelectedTextNodeCoolingDown =
     selectedNode?.id === textGenerateCooldown.nodeId && Date.now() < textGenerateCooldown.expiresAt;
   const selectedImageOutputSource = isImageNodeSelected ? getImageNodeOutputSource(selectedNode.outputSnapshot) : null;
   const selectedVideoOutputSource = isVideoNodeSelected ? getVideoNodeOutputSource(selectedNode.outputSnapshot) : null;
+  const selectedStoryboardRawShots = useMemo(
+    () => (isStoryboardNodeSelected ? getStoryboardRawShots(selectedNode.outputSnapshot) : []),
+    [isStoryboardNodeSelected, selectedNode],
+  );
+  const selectedStoryboardShots = useMemo(
+    () => (isStoryboardNodeSelected ? getStoryboardShots(selectedNode.outputSnapshot) : []),
+    [isStoryboardNodeSelected, selectedNode],
+  );
+  const selectedStoryboardTotalDurationSec = useMemo(
+    () => (isStoryboardNodeSelected ? getStoryboardTotalDuration(selectedNode.outputSnapshot) : 0),
+    [isStoryboardNodeSelected, selectedNode],
+  );
+  const activeStoryboardShotIndex =
+    selectedStoryboardShots.length > 0
+      ? Math.min(selectedStoryboardShots.length - 1, Math.max(0, selectedStoryboardShotIndex))
+      : 0;
   const visibleVideoSettings = getPersistedVideoNodeSettings(draftVideoSettings);
   const selectedVideoFirstFrameAsset = isVideoNodeSelected
     ? getReferenceAssetById(selectedNode.referenceAssets, visibleVideoSettings.firstFrameAssetId)
@@ -200,6 +241,9 @@ export function InfiniteCanvasBoard({
   useEffect(() => {
     if (selectedNode?.type === "text") {
       setDraftPrompt(selectedNode.promptInput ?? "");
+      setDraftStoryboardSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
+      setSelectedStoryboardShotIndex(0);
+      setDraftStoryboardShot(null);
       setDraftImagePrompt("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
@@ -209,8 +253,25 @@ export function InfiniteCanvasBoard({
       return;
     }
 
+    if (selectedNode?.type === "storyboard") {
+      setDraftPrompt(selectedNode.promptInput ?? "");
+      setDraftStoryboardSettings(normalizeStoryboardNodeSettings(selectedNode.settingsJson));
+      setSelectedStoryboardShotIndex(0);
+      setDraftImagePrompt("");
+      setDraftVideoPrompt("");
+      setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
+      setExpandedTextContent(getTextNodeContent(selectedNode.outputSnapshot));
+      setIsExpandedEditorOpen(false);
+
+      return;
+    }
+
     if (selectedNode?.type === "image") {
       setDraftPrompt("");
+      setDraftStoryboardSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
+      setSelectedStoryboardShotIndex(0);
+      setDraftStoryboardShot(null);
       setDraftImagePrompt(selectedNode.promptInput ?? "");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
@@ -223,6 +284,9 @@ export function InfiniteCanvasBoard({
 
     if (selectedNode?.type === "video") {
       setDraftPrompt("");
+      setDraftStoryboardSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
+      setSelectedStoryboardShotIndex(0);
+      setDraftStoryboardShot(null);
       setDraftImagePrompt("");
       setDraftVideoPrompt(selectedNode.promptInput ?? "");
       setDraftVideoSettings(normalizeVideoNodeSettings(selectedNode.settingsJson));
@@ -234,6 +298,9 @@ export function InfiniteCanvasBoard({
     }
 
     setDraftPrompt("");
+    setDraftStoryboardSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
+    setSelectedStoryboardShotIndex(0);
+    setDraftStoryboardShot(null);
     setDraftImagePrompt("");
     setDraftVideoPrompt("");
     setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
@@ -241,6 +308,29 @@ export function InfiniteCanvasBoard({
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
   }, [selectedNode]);
+
+  useEffect(() => {
+    if (!isStoryboardNodeSelected) {
+      setDraftStoryboardShot(null);
+
+      return;
+    }
+
+    setSelectedStoryboardShotIndex((current) =>
+      selectedStoryboardShots.length > 0 ? Math.min(selectedStoryboardShots.length - 1, Math.max(0, current)) : 0,
+    );
+  }, [isStoryboardNodeSelected, selectedStoryboardShots.length]);
+
+  useEffect(() => {
+    if (!isStoryboardNodeSelected) {
+      setDraftStoryboardShot(null);
+
+      return;
+    }
+
+    const activeShot = selectedStoryboardShots[activeStoryboardShotIndex] ?? null;
+    setDraftStoryboardShot(activeShot);
+  }, [activeStoryboardShotIndex, isStoryboardNodeSelected, selectedStoryboardShots]);
 
   useEffect(() => {
     if (!editingTextNodeTitleId) {
@@ -510,7 +600,7 @@ export function InfiniteCanvasBoard({
       const semantic = getCanvasConnectionSemantic(sourceNode.type, targetNode.type);
 
       if (!semantic) {
-        toast.error("当前仅支持 文本→文本/图片/视频，图片→图片/视频。");
+        toast.error("当前仅支持 文本/分镜→文本/分镜/图片/视频，图片→图片/视频。");
         clearPendingConnection();
 
         return;
@@ -614,6 +704,7 @@ export function InfiniteCanvasBoard({
           type,
           title: `${option?.label ?? type}节点 ${nextNodeIndex}`,
           promptInput: "",
+          settingsJson: type === "storyboard" ? serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS) : undefined,
           positionX: Math.round(x),
           positionY: Math.round(y),
         },
@@ -642,6 +733,242 @@ export function InfiniteCanvasBoard({
     return [item.promptTemplate, item.negativePrompt ? `Negative Prompt: ${item.negativePrompt}` : null]
       .filter((value): value is string => Boolean(value && value.trim()))
       .join("\n\n");
+  }
+
+  function buildStoryboardVideoPrompt(sourceNode: CanvasNode, storyboardShots: StoryboardShot[]) {
+    const shotDescriptions = storyboardShots.map((shot) =>
+      [`Shot ${shot.sequence}`, shot.sceneLabel, shot.description || shot.videoPrompt]
+        .filter((value): value is string => Boolean(value && value.trim()))
+        .join(" · "),
+    );
+
+    return [sourceNode.promptInput?.trim() ?? "", ...shotDescriptions]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n\n");
+  }
+
+  function buildStoryboardVideoSettings(storyboardShots: StoryboardShot[]) {
+    const shotPrompts = storyboardShots
+      .map((shot) => shot.videoPrompt || shot.description)
+      .filter((value): value is string => Boolean(value && value.trim()));
+    const totalDuration = storyboardShots.reduce((sum, shot) => sum + (shot.duration ?? 0), 0);
+
+    return {
+      ...DEFAULT_VIDEO_NODE_SETTINGS,
+      generationMode: "multi_shot" as const,
+      durationSec: Math.min(30, Math.max(1, totalDuration || Math.max(1, storyboardShots.length * 5))),
+      shotPrompts,
+    };
+  }
+
+  function buildSingleShotVideoPrompt(sourceNode: CanvasNode, shot: StoryboardShot) {
+    return [
+      sourceNode.promptInput?.trim() ?? "",
+      `Shot ${shot.sequence}`,
+      shot.sceneLabel,
+      shot.description,
+      shot.videoPrompt,
+      shot.dialogue ? `Dialogue: ${shot.dialogue}` : null,
+    ]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n\n");
+  }
+
+  function buildSingleShotVideoSettings(shot: StoryboardShot) {
+    return {
+      ...DEFAULT_VIDEO_NODE_SETTINGS,
+      generationMode: "multi_shot" as const,
+      durationSec: Math.min(30, Math.max(1, shot.duration ?? 5)),
+      shotPrompts: [shot.videoPrompt || shot.description].filter((value): value is string => Boolean(value && value.trim())),
+    };
+  }
+
+  async function saveCurrentStoryboardShot() {
+    if (!selectedNode || selectedNode.type !== "storyboard" || !draftStoryboardShot) {
+      return;
+    }
+
+    const rawShots = selectedStoryboardRawShots;
+    const targetShot = rawShots[activeStoryboardShotIndex];
+
+    if (!targetShot) {
+      toast.error("当前 Shot 不存在，无法保存。");
+
+      return;
+    }
+
+    setIsSavingStoryboardShot(true);
+
+    try {
+      const structuredDataSource =
+        selectedNode.outputSnapshot?.structuredData && typeof selectedNode.outputSnapshot.structuredData === "object"
+          ? (selectedNode.outputSnapshot.structuredData as Record<string, unknown>)
+          : {};
+      const nextShots = rawShots.map((shot, index) =>
+        index === activeStoryboardShotIndex
+          ? {
+              ...shot,
+              sequence: draftStoryboardShot.sequence,
+              sceneLabel: draftStoryboardShot.sceneLabel,
+              duration: draftStoryboardShot.duration,
+              description: draftStoryboardShot.description,
+              videoPrompt: draftStoryboardShot.videoPrompt,
+              emotion: draftStoryboardShot.emotion,
+              camera: draftStoryboardShot.camera,
+              size: draftStoryboardShot.size,
+              dialogue: draftStoryboardShot.dialogue,
+            }
+          : shot,
+      );
+      const nextStructuredData = {
+        ...structuredDataSource,
+        shots: nextShots,
+      };
+      const nextContent = JSON.stringify(nextStructuredData, null, 2);
+
+      await patchCanvasNode(
+        apiContext,
+        selectedNode.id,
+        {
+          outputSnapshot: {
+            ...(selectedNode.outputSnapshot ?? {}),
+            outputType: "json",
+            content: nextContent,
+            structuredData: nextStructuredData,
+          },
+        },
+        "当前 Shot 保存失败。",
+      );
+
+      setExpandedTextContent(nextContent);
+      toast.success(`Shot ${draftStoryboardShot.sequence} 已保存。`);
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "当前 Shot 保存失败。");
+    } finally {
+      setIsSavingStoryboardShot(false);
+    }
+  }
+
+  async function createStoryboardShotVideoNode(autoRun: boolean) {
+    if (!selectedNode || selectedNode.type !== "storyboard" || !draftStoryboardShot) {
+      return;
+    }
+
+    setIsCreatingStoryboardVideoNode(true);
+
+    try {
+      const baseX = Number.parseFloat(selectedNode.positionX || "0");
+      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const createdNode = await createCanvasNode(
+        apiContext,
+        {
+          type: "video",
+          title: `${selectedNode.title} · Shot ${draftStoryboardShot.sequence}`,
+          promptInput: buildSingleShotVideoPrompt(selectedNode, draftStoryboardShot),
+          settingsJson: serializeVideoNodeSettings(buildSingleShotVideoSettings(draftStoryboardShot)),
+          resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
+          positionX: Math.round(baseX + 360),
+          positionY: Math.round(baseY + activeStoryboardShotIndex * 48),
+        },
+        autoRun ? "当前 Shot 视频生成失败。" : "当前 Shot 视频节点创建失败。",
+      );
+
+      const createdNodeId = typeof createdNode.id === "string" ? createdNode.id : null;
+
+      if (!createdNodeId) {
+        throw new Error("Shot 视频节点创建成功，但未返回节点 ID。");
+      }
+
+      await createCanvasEdge(
+        apiContext,
+        {
+          sourceNodeId: selectedNode.id,
+          targetNodeId: createdNodeId,
+          mergeMode: "merge_all",
+          priority: 0,
+        },
+        "当前 Shot 视频连线创建失败。",
+      );
+
+      if (autoRun) {
+        await runCanvasNode(apiContext, createdNodeId, `storyboard-shot-video-run-${crypto.randomUUID()}`, "当前 Shot 视频生成失败。");
+      }
+
+      setSelectedNodeId(createdNodeId);
+      toast.success(autoRun ? `Shot ${draftStoryboardShot.sequence} 视频已提交生成。` : `Shot ${draftStoryboardShot.sequence} 视频节点已创建。`);
+      router.refresh();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : autoRun ? "当前 Shot 视频生成失败。" : "当前 Shot 视频节点创建失败。",
+      );
+    } finally {
+      setIsCreatingStoryboardVideoNode(false);
+    }
+  }
+
+  async function createStoryboardVideoNode(autoRun: boolean) {
+    if (!selectedNode || selectedNode.type !== "storyboard") {
+      return;
+    }
+
+    const storyboardShots = getStoryboardShots(selectedNode.outputSnapshot);
+
+    if (storyboardShots.length === 0) {
+      toast.error("请先生成分镜结果，再创建视频节点。");
+
+      return;
+    }
+
+    setIsCreatingStoryboardVideoNode(true);
+
+    try {
+      const baseX = Number.parseFloat(selectedNode.positionX || "0");
+      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const videoSettings = buildStoryboardVideoSettings(storyboardShots);
+      const createdNode = await createCanvasNode(
+        apiContext,
+        {
+          type: "video",
+          title: `${selectedNode.title} · 分镜视频`,
+          promptInput: buildStoryboardVideoPrompt(selectedNode, storyboardShots),
+          settingsJson: serializeVideoNodeSettings(videoSettings),
+          resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
+          positionX: Math.round(baseX + 360),
+          positionY: Math.round(baseY),
+        },
+        autoRun ? "分镜视频创建失败。" : "视频节点创建失败。",
+      );
+
+      const createdNodeId = typeof createdNode.id === "string" ? createdNode.id : null;
+
+      if (!createdNodeId) {
+        throw new Error("视频节点创建成功，但未返回节点 ID。");
+      }
+
+      await createCanvasEdge(
+        apiContext,
+        {
+          sourceNodeId: selectedNode.id,
+          targetNodeId: createdNodeId,
+          mergeMode: "merge_all",
+          priority: 0,
+        },
+        "分镜视频连线创建失败。",
+      );
+
+      if (autoRun) {
+        await runCanvasNode(apiContext, createdNodeId, `storyboard-video-run-${crypto.randomUUID()}`, "分镜视频生成失败。");
+      }
+
+      setSelectedNodeId(createdNodeId);
+      toast.success(autoRun ? "已创建视频节点并提交分镜视频生成。" : "已从分镜创建视频节点。");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : autoRun ? "分镜视频生成失败。" : "视频节点创建失败。");
+    } finally {
+      setIsCreatingStoryboardVideoNode(false);
+    }
   }
 
   async function createNodeFromResource(
@@ -1028,6 +1355,32 @@ export function InfiniteCanvasBoard({
     }
   }
 
+  async function saveStoryboardNodePrompt() {
+    if (!selectedNode || selectedNode.type !== "storyboard") {
+      return;
+    }
+
+    setIsSavingPrompt(true);
+
+    try {
+      await patchCanvasNode(
+        apiContext,
+        selectedNode.id,
+        {
+          promptInput: draftPrompt,
+          settingsJson: serializeStoryboardNodeSettings(draftStoryboardSettings),
+        },
+        "分镜节点配置保存失败。",
+      );
+      toast.success("分镜节点配置已保存。");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "分镜节点配置保存失败。");
+    } finally {
+      setIsSavingPrompt(false);
+    }
+  }
+
   async function triggerTextNodeGeneration() {
     if (!selectedNode || selectedNode.type !== "text") {
       return;
@@ -1053,6 +1406,38 @@ export function InfiniteCanvasBoard({
       toast.error(error instanceof Error ? error.message : "AI 生成失败。");
     } finally {
       setGeneratingTextNodeId((current) => (current === selectedNode.id ? null : current));
+    }
+  }
+
+  async function triggerStoryboardNodeGeneration() {
+    if (!selectedNode || selectedNode.type !== "storyboard") {
+      return;
+    }
+
+    if (isSelectedStoryboardNodeGenerating || isStoryboardNodeTaskActive) {
+      return;
+    }
+
+    setGeneratingStoryboardNodeId(selectedNode.id);
+
+    try {
+      await patchCanvasNode(
+        apiContext,
+        selectedNode.id,
+        {
+          promptInput: draftPrompt,
+          settingsJson: serializeStoryboardNodeSettings(draftStoryboardSettings),
+        },
+        "分镜节点配置保存失败。",
+      );
+      await runCanvasNode(apiContext, selectedNode.id, `storyboard-node-run-${crypto.randomUUID()}`, "分镜生成失败。");
+
+      toast.success("已提交分镜生成请求。");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "分镜生成失败。");
+    } finally {
+      setGeneratingStoryboardNodeId((current) => (current === selectedNode.id ? null : current));
     }
   }
 
@@ -1257,7 +1642,7 @@ export function InfiniteCanvasBoard({
   }
 
   async function saveExpandedTextContent() {
-    if (!selectedNode || selectedNode.type !== "text") {
+    if (!selectedNode || (selectedNode.type !== "text" && selectedNode.type !== "storyboard")) {
       return;
     }
 
@@ -1269,17 +1654,17 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           outputSnapshot: {
-            type: "text",
+            type: selectedNode.type === "storyboard" ? "json" : "text",
             content: expandedTextContent,
           },
         },
-        "文本节点内容保存失败。",
+        selectedNode.type === "storyboard" ? "分镜节点内容保存失败。" : "文本节点内容保存失败。",
       );
 
-      toast.success("文本节点正文已保存。");
+      toast.success(selectedNode.type === "storyboard" ? "分镜节点内容已保存。" : "文本节点正文已保存。");
       router.refresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "文本节点内容保存失败。");
+      toast.error(error instanceof Error ? error.message : selectedNode.type === "storyboard" ? "分镜节点内容保存失败。" : "文本节点内容保存失败。");
     } finally {
       setIsSavingPrompt(false);
     }
@@ -1698,6 +2083,7 @@ export function InfiniteCanvasBoard({
             return (
               <InfiniteCanvasBoardNodeCard
                 key={node.id}
+                activeStoryboardShotIndex={node.id === effectiveSelectedNodeId ? activeStoryboardShotIndex : 0}
                 canEdit={canEdit}
                 canGenerate={canGenerate}
                 canvasId={canvasId}
@@ -1731,6 +2117,10 @@ export function InfiniteCanvasBoard({
                 }}
                 onSaveTitle={(nodeId) => {
                   void saveTextNodeTitle(nodeId);
+                }}
+                onSelectStoryboardShot={(nodeId, shotIndex) => {
+                  setSelectedNodeId(nodeId);
+                  setSelectedStoryboardShotIndex(shotIndex);
                 }}
                 onSelectNode={setSelectedNodeId}
                 onStartDrag={startNodeDrag}
@@ -1775,6 +2165,50 @@ export function InfiniteCanvasBoard({
             void saveTextNodePrompt();
           }}
           selectedNode={selectedNode}
+        />
+      ) : null}
+
+      {selectedNode && isStoryboardNodeSelected ? (
+        <StoryboardNodePanel
+          activeShotDraft={draftStoryboardShot}
+          activeShotIndex={activeStoryboardShotIndex}
+          canEdit={canEdit}
+          canGenerate={canGenerate}
+          draftPrompt={draftPrompt}
+          draftSettings={draftStoryboardSettings}
+          isGenerating={isSelectedStoryboardNodeGenerating}
+          isCreatingVideoNode={isCreatingStoryboardVideoNode}
+          isSavingPrompt={isSavingPrompt}
+          isSavingShot={isSavingStoryboardShot}
+          isTaskActive={isStoryboardNodeTaskActive}
+          onActiveShotChange={setSelectedStoryboardShotIndex}
+          onActiveShotDraftChange={(updater) => setDraftStoryboardShot((current) => updater(current))}
+          onCreateCurrentShotVideoNode={() => {
+            void createStoryboardShotVideoNode(false);
+          }}
+          onCreateVideoNode={() => {
+            void createStoryboardVideoNode(false);
+          }}
+          onGenerate={() => {
+            void triggerStoryboardNodeGeneration();
+          }}
+          onGenerateCurrentShotVideo={() => {
+            void createStoryboardShotVideoNode(true);
+          }}
+          onGenerateVideo={() => {
+            void createStoryboardVideoNode(true);
+          }}
+          onPromptChange={setDraftPrompt}
+          onSavePrompt={() => {
+            void saveStoryboardNodePrompt();
+          }}
+          onSaveShot={() => {
+            void saveCurrentStoryboardShot();
+          }}
+          onSettingsChange={(updater) => setDraftStoryboardSettings((current) => updater(current))}
+          selectedNode={selectedNode}
+          storyboardShots={selectedStoryboardShots}
+          storyboardTotalDurationSec={selectedStoryboardTotalDurationSec}
         />
       ) : null}
 
@@ -1846,7 +2280,7 @@ export function InfiniteCanvasBoard({
         />
       ) : null}
 
-      {selectedNode && isTextNodeSelected && isExpandedEditorOpen ? (
+      {selectedNode && (isTextNodeSelected || isStoryboardNodeSelected) && isExpandedEditorOpen ? (
         <ExpandedTextEditor
           expandedTextContent={expandedTextContent}
           isSavingPrompt={isSavingPrompt}

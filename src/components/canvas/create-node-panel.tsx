@@ -15,7 +15,7 @@ type CreateNodePanelProps = {
   canvasId: string;
   defaultPositionX?: number;
   defaultPositionY?: number;
-  defaultType?: "text" | "image" | "video" | "audio";
+  defaultType?: "text" | "image" | "video" | "audio" | "storyboard";
   compact?: boolean;
   tone?: "light" | "dark";
   onCreated?: () => void;
@@ -32,7 +32,7 @@ export function CreateNodePanel({
   onCreated,
 }: CreateNodePanelProps) {
   const router = useRouter();
-  const [type, setType] = useState<"text" | "image" | "video" | "audio">(defaultType);
+  const [type, setType] = useState<"text" | "image" | "video" | "audio" | "storyboard">(defaultType);
   const [title, setTitle] = useState("");
   const [promptInput, setPromptInput] = useState("");
   const [modelKey, setModelKey] = useState("");
@@ -103,6 +103,7 @@ export function CreateNodePanel({
           onChange={(event) => setType(event.target.value as typeof type)}
         >
           <option value="text">Text</option>
+          <option value="storyboard">Storyboard</option>
           <option value="image">Image</option>
           <option value="video">Video</option>
           <option value="audio">Audio</option>

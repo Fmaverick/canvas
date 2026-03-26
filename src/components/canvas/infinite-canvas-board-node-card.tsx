@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { ImageIcon, Play, Square, Trash2, Video } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clapperboard, ImageIcon, Play, Square, Trash2, Video } from "lucide-react";
 
 import { CanvasTaskActions } from "@/components/canvas/canvas-task-actions";
 import { Badge } from "@/components/ui/badge";
@@ -11,7 +11,13 @@ import { cn } from "@/lib/utils";
 import {
   canCanvasNodeReceiveConnection,
   canCanvasNodeStartConnection,
+  getStoryboardPreviewText,
+  getStoryboardShots,
+  getStoryboardShotCount,
+  getStoryboardTotalDuration,
   DEFAULT_VIDEO_NODE_SETTINGS,
+  STORYBOARD_NODE_HEIGHT,
+  STORYBOARD_NODE_WIDTH,
   TEXT_NODE_SIZE,
   VIDEO_NODE_HEIGHT,
   VIDEO_NODE_WIDTH,
@@ -20,6 +26,7 @@ import {
   getReferenceAssetById,
   getTextNodeContent,
   getVideoNodeOutputSource,
+  normalizeStoryboardNodeSettings,
   normalizeVideoNodeSettings,
   quickCreateOptions,
   statusBadgeVariant,
@@ -64,6 +71,8 @@ type InfiniteCanvasBoardNodeCardProps = {
   onClearPlayingVideoNode: (nodeId: string) => void;
   onStartConnection: (nodeId: string) => void;
   onCompleteConnection: (nodeId: string) => void;
+  activeStoryboardShotIndex?: number;
+  onSelectStoryboardShot?: (nodeId: string, shotIndex: number) => void;
 };
 
 type NodeFloatingTitleBarProps = {
@@ -221,9 +230,12 @@ export function InfiniteCanvasBoardNodeCard({
   onClearPlayingVideoNode,
   onStartConnection,
   onCompleteConnection,
+  activeStoryboardShotIndex = 0,
+  onSelectStoryboardShot,
 }: InfiniteCanvasBoardNodeCardProps) {
   const optionTint = quickCreateOptions.find((option) => option.value === node.type)?.tint ?? "from-slate-100 to-slate-50";
   const isTextNode = node.type === "text";
+  const isStoryboardNode = node.type === "storyboard";
   const isImageNode = node.type === "image";
   const isVideoNode = node.type === "video";
   const canStartConnection = canEdit && canCanvasNodeStartConnection(node.type);
@@ -238,9 +250,18 @@ export function InfiniteCanvasBoardNodeCard({
   const videoLastFrameAsset = isVideoNode ? getReferenceAssetById(node.referenceAssets, videoSettings.lastFrameAssetId) : null;
   const videoPreviewAsset = videoFirstFrameAsset ?? videoReferenceAsset ?? videoLastFrameAsset;
   const imageNodeSize = getImageNodeSize(imagePreviewDimensions);
-  const isTextNodeGenerating =
-    isTextNode &&
-    (latestTask?.status === "queued" || latestTask?.status === "processing" || isCoolingDown);
+  const storyboardSettings = isStoryboardNode ? normalizeStoryboardNodeSettings(node.settingsJson) : null;
+  const storyboardPreview = isStoryboardNode ? getStoryboardPreviewText(node.outputSnapshot) : "";
+  const storyboardShots = isStoryboardNode ? getStoryboardShots(node.outputSnapshot) : [];
+  const storyboardShotCount = isStoryboardNode ? getStoryboardShotCount(node.outputSnapshot) : 0;
+  const storyboardTotalDuration = isStoryboardNode ? getStoryboardTotalDuration(node.outputSnapshot) : 0;
+  const storyboardActiveShot =
+    storyboardShots.length > 0
+      ? storyboardShots[Math.min(storyboardShots.length - 1, Math.max(0, activeStoryboardShotIndex))]
+      : null;
+  const isTextLikeNodeGenerating =
+    (isTextNode || isStoryboardNode) &&
+    (latestTask?.status === "queued" || latestTask?.status === "processing" || (isTextNode && isCoolingDown));
   const isEditingTitle = editingTextNodeTitleId === node.id;
   const isPendingSource = pendingConnectionSourceId === node.id;
   const isConnectionMode = Boolean(pendingConnectionSourceId);
@@ -250,7 +271,7 @@ export function InfiniteCanvasBoardNodeCard({
       aria-label={node.title}
       className={cn(
         "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
-        isTextNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
+        isTextNode || isStoryboardNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
         effectiveSelectedNodeId === node.id ? "ring-2 ring-primary/50" : undefined,
         isPendingSource ? "ring-2 ring-primary/60" : undefined,
         isPendingConnectionTarget ? "ring-2 ring-emerald-500/60 shadow-[0_0_0_10px_rgba(16,185,129,0.08)]" : undefined,
@@ -262,8 +283,8 @@ export function InfiniteCanvasBoardNodeCard({
       style={{
         left: `${screenPoint.x}px`,
         top: `${screenPoint.y}px`,
-        width: `${isTextNode ? TEXT_NODE_SIZE : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : 248}px`,
-        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : 132}px`,
+        width: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_WIDTH : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : 248}px`,
+        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_HEIGHT : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : 132}px`,
         transform: `translate(-50%, -50%) scale(${zoom})`,
         transformOrigin: "center center",
       }}
@@ -271,7 +292,7 @@ export function InfiniteCanvasBoardNodeCard({
       onDoubleClick={() => {
         onSelectNode(node.id);
 
-        if (isTextNode) {
+        if (isTextNode || isStoryboardNode) {
           onOpenTextEditor();
         }
       }}
@@ -335,7 +356,7 @@ export function InfiniteCanvasBoardNodeCard({
             deletingNodeId={deletingNodeId}
             editingTextNodeTitle={editingTextNodeTitle}
             extraStatus={
-              isTextNodeGenerating ? (
+              isTextLikeNodeGenerating ? (
                 <div className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm">
                   生成中
                 </div>
@@ -356,9 +377,171 @@ export function InfiniteCanvasBoardNodeCard({
             <div className="absolute inset-0 bg-white/62" />
             <div className="relative flex h-full flex-col p-5">
               <p className="line-clamp-6 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
-                {getTextNodeContent(node.outputSnapshot) || "双击后直接写内容"}
+                {isStoryboardNode ? storyboardPreview || "生成后会在这里显示分镜 JSON 摘要" : getTextNodeContent(node.outputSnapshot) || "双击后直接写内容"}
               </p>
-              <div className="mt-auto pt-4 text-xs text-muted-foreground">双击节点可放大编辑正文</div>
+              <div className="mt-auto flex items-center justify-between gap-2 pt-4 text-xs text-muted-foreground">
+                <span>{isStoryboardNode ? "双击节点可查看或编辑 JSON 输出" : "双击节点可放大编辑正文"}</span>
+                {isStoryboardNode ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-background/80 px-2 py-1 text-[11px] text-foreground shadow-sm">
+                    <Clapperboard className="size-3" />
+                    {storyboardShotCount > 0 ? `${storyboardShotCount} 镜头` : `${storyboardSettings?.shotCount ?? 0} 镜头目标`}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </>
+      ) : isStoryboardNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            extraStatus={
+              isTextLikeNodeGenerating ? (
+                <div className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm">
+                  生成中
+                </div>
+              ) : null
+            }
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+            <div className="absolute inset-0 bg-white/72" />
+            <div className="relative flex h-full flex-col p-4">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="inline-flex items-center gap-1 rounded-full bg-background/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm">
+                    <Clapperboard className="size-3" />
+                    分镜预览
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    {storyboardPreview || "生成后会在节点上直接预览镜头卡片。"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-2">
+                  <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-foreground shadow-sm">
+                    {storyboardShotCount > 0 ? `${storyboardShotCount} 镜头` : `${storyboardSettings?.shotCount ?? 0} 镜头目标`}
+                  </div>
+                  <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                    {storyboardTotalDuration > 0 ? `${storyboardTotalDuration}s` : "待生成"}
+                  </div>
+                </div>
+              </div>
+
+              {storyboardShots.length > 0 ? (
+                <div className="flex flex-1 flex-col gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="inline-flex size-8 items-center justify-center rounded-full border bg-background/80 text-muted-foreground shadow-sm transition hover:text-foreground disabled:opacity-40"
+                      disabled={activeStoryboardShotIndex <= 0}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectStoryboardShot?.(node.id, Math.max(0, activeStoryboardShotIndex - 1));
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ChevronLeft className="size-4" />
+                    </button>
+                    <div className="min-w-0 flex-1 rounded-full border bg-background/80 px-3 py-1.5 text-center text-[11px] text-muted-foreground shadow-sm">
+                      {storyboardActiveShot ? `当前预览 Shot ${storyboardActiveShot.sequence}` : "当前预览"}
+                    </div>
+                    <button
+                      className="inline-flex size-8 items-center justify-center rounded-full border bg-background/80 text-muted-foreground shadow-sm transition hover:text-foreground disabled:opacity-40"
+                      disabled={activeStoryboardShotIndex >= storyboardShots.length - 1}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectStoryboardShot?.(node.id, Math.min(storyboardShots.length - 1, activeStoryboardShotIndex + 1));
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <ChevronRight className="size-4" />
+                    </button>
+                  </div>
+
+                  {storyboardActiveShot ? (
+                    <div className="flex flex-1 flex-col rounded-[22px] border border-border/70 bg-background/82 p-4 shadow-sm">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-foreground">
+                          Shot {storyboardActiveShot.sequence}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {[
+                            storyboardActiveShot.size,
+                            storyboardActiveShot.camera,
+                            storyboardActiveShot.duration ? `${storyboardActiveShot.duration}s` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || "未标注"}
+                        </span>
+                      </div>
+                      <p className="line-clamp-1 text-sm font-medium text-foreground">
+                        {storyboardActiveShot.sceneLabel || "未命名场景"}
+                      </p>
+                      <p className="mt-2 line-clamp-5 text-xs leading-5 text-muted-foreground">
+                        {storyboardActiveShot.description || storyboardActiveShot.videoPrompt || "暂无镜头描述"}
+                      </p>
+                      <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
+                        {storyboardActiveShot.camera ? (
+                          <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">
+                            {storyboardActiveShot.camera}
+                          </span>
+                        ) : null}
+                        {storyboardActiveShot.emotion ? (
+                          <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">
+                            {storyboardActiveShot.emotion}
+                          </span>
+                        ) : null}
+                        {storyboardActiveShot.dialogue ? (
+                          <span className="rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">对白</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    {storyboardShots.map((shot, index) => (
+                      <button
+                        key={`${node.id}-shot-indicator-${shot.sequence}`}
+                        className={cn(
+                          "min-w-0 flex-1 rounded-full border px-2 py-1 text-[10px] transition",
+                          index === activeStoryboardShotIndex
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "bg-background/72 text-muted-foreground hover:text-foreground",
+                        )}
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onSelectStoryboardShot?.(node.id, index);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
+                        <span className="block truncate">S{shot.sequence}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-1 items-center justify-center rounded-[24px] border border-dashed border-border/70 bg-background/55 p-6 text-center text-sm text-muted-foreground">
+                  先生成分镜，节点本体会直接展示镜头卡片预览
+                </div>
+              )}
+
+              <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <span>双击节点可查看或编辑 JSON 输出</span>
+                <span>{latestTask ? `task ${latestTask.status}` : "尚未运行"}</span>
+              </div>
             </div>
           </div>
         </>

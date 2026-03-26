@@ -230,13 +230,14 @@
 
 ```json
 {
-  "type": "audio",
-  "title": "品牌口播",
-  "prompt_input": "生成一段 15 秒品牌口播",
-  "model_key": "audio.default",
+  "type": "storyboard",
+  "title": "第一版动态分镜",
+  "prompt_input": "主角在暴雨夜冲进便利店，发现线索后回头逃离，整体节奏紧张。",
+  "model_key": "gpt-4o",
   "settings_json": {
-    "duration_sec": 15,
-    "voice_style": "female_warm"
+    "shot_count": 8,
+    "response_format": "json",
+    "template_file": "shotOutFormat.md"
   },
   "resource_refs": {
     "subject_ids": ["subject_1"],
@@ -402,6 +403,12 @@
 ### 11.2 获取节点最近结果
 
 - `GET /api/canvases/:canvasId/nodes/:nodeId/result`
+
+说明：
+
+- `storyboard` 节点返回结构化 JSON 输出
+- `settings_json.template_file` 可指向项目内的分镜模板文件
+- `override_settings.shot_count` 可用于临时覆盖镜头数量
 
 ## 12. 任务中心接口
 

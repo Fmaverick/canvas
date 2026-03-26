@@ -6,7 +6,7 @@ import { getRequestId, jsonError, jsonSuccess } from "@/lib/api";
 
 const taskQuerySchema = z.object({
   status: z.enum(["queued", "processing", "succeeded", "failed", "canceled"]).optional(),
-  taskType: z.enum(["text", "image", "video", "audio"]).optional(),
+  taskType: z.enum(["text", "image", "video", "audio", "storyboard"]).optional(),
   canvasId: z.uuid().optional(),
   nodeId: z.uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).optional(),

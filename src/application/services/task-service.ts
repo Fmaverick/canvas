@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { and, asc, desc, eq, inArray, lte, or } from "drizzle-orm";
 import { z } from "zod";
 
@@ -48,11 +51,23 @@ export const retryTaskInputSchema = z.object({
 export const listTasksInputSchema = z.object({
   workspaceId: z.uuid(),
   status: z.enum(["queued", "processing", "succeeded", "failed", "canceled"]).optional(),
-  taskType: z.enum(["text", "image", "video", "audio"]).optional(),
+  taskType: z.enum(["text", "image", "video", "audio", "storyboard"]).optional(),
   canvasId: z.uuid().optional(),
   nodeId: z.uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).optional(),
 });
+
+const DEFAULT_STORYBOARD_TEMPLATE_FILE = "shotOutFormat.md";
+const DEFAULT_STORYBOARD_SHOT_COUNT = 6;
+const STORYBOARD_SYSTEM_PROMPT =
+  "你是一名专业电影分镜导演、镜头设计师和连续性脚本专家。你必须严格返回一个 JSON 对象，不要输出 Markdown、代码块或任何解释文字。shots 数组必须完整、连续、可直接用于后续视频生成。";
+
+let cachedStoryboardTemplate:
+  | {
+      filePath: string;
+      content: string;
+    }
+  | null = null;
 
 export const runLibraryItemImageGenerationInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -125,7 +140,10 @@ function buildLibraryItemGenerationPrompt(params: {
 }
 
 function resolveUpstreamSemantic(sourceType: string, targetType: string) {
-  if (sourceType === "text" && (targetType === "text" || targetType === "image" || targetType === "video")) {
+  if (
+    (sourceType === "text" || sourceType === "storyboard") &&
+    (targetType === "text" || targetType === "storyboard" || targetType === "image" || targetType === "video")
+  ) {
     return "prompt" as const;
   }
 
@@ -134,6 +152,63 @@ function resolveUpstreamSemantic(sourceType: string, targetType: string) {
   }
 
   return null;
+}
+
+function normalizeStoryboardTemplateFile(templateFile: unknown) {
+  if (typeof templateFile === "string" && templateFile.trim().length > 0) {
+    return templateFile.trim();
+  }
+
+  return DEFAULT_STORYBOARD_TEMPLATE_FILE;
+}
+
+function normalizeStoryboardShotCount(shotCount: unknown) {
+  if (typeof shotCount === "number" && Number.isFinite(shotCount)) {
+    return Math.min(24, Math.max(1, Math.round(shotCount)));
+  }
+
+  return DEFAULT_STORYBOARD_SHOT_COUNT;
+}
+
+function resolveStoryboardTemplatePath(templateFile: string) {
+  return path.isAbsolute(templateFile) ? templateFile : path.join(process.cwd(), templateFile);
+}
+
+function getStoryboardTemplate(templateFile: string) {
+  const filePath = resolveStoryboardTemplatePath(templateFile);
+
+  if (cachedStoryboardTemplate?.filePath === filePath) {
+    return cachedStoryboardTemplate.content;
+  }
+
+  const content = readFileSync(filePath, "utf8");
+  cachedStoryboardTemplate = {
+    filePath,
+    content,
+  };
+
+  return content;
+}
+
+function buildStoryboardGenerationPrompt(prompt: string, settings: Record<string, unknown>) {
+  const templateFile = normalizeStoryboardTemplateFile(settings.templateFile);
+  const shotCount = normalizeStoryboardShotCount(settings.shotCount);
+  const template = getStoryboardTemplate(templateFile);
+  const brief = prompt.trim() || "请生成一套具备明确动作设计、镜头衔接和视频生成提示词的连续分镜。";
+
+  return [
+    "请根据以下创意简报生成一组连续分镜。",
+    `镜头数量必须严格为 ${shotCount} 个，sequence 从 1 递增到 ${shotCount}。`,
+    "输出必须严格遵循下方模板中的字段名和层级结构。",
+    "模板中的注释、说明文字、示例值、占位符和省略号都不要原样出现在最终 JSON 中。",
+    "每个 shot 都必须补全 characters、transition、suggestedAssets、videoPrompt 等字段。",
+    "videoPrompt 必须为英文，其他字段可根据内容自然表达，但整体必须保持 JSON 可解析。",
+    `模板文件：${templateFile}`,
+    "模板内容：",
+    template,
+    "创意简报：",
+    brief,
+  ].join("\n\n");
 }
 
 function extractImageSourceFromString(value: string) {
@@ -638,17 +713,25 @@ async function executeTask(taskId: string) {
       ? requestPayload.referenceImages.filter((imageUrl): imageUrl is string => typeof imageUrl === "string" && imageUrl.trim().length > 0)
       : [];
 
-    if (task.taskType === "text") {
+    if (task.taskType === "text" || task.taskType === "storyboard") {
+      const isStoryboardTask = task.taskType === "storyboard";
+      const generationPrompt = isStoryboardTask ? buildStoryboardGenerationPrompt(prompt, settings) : prompt;
       const output = await generateTextWithCloubic({
-        prompt,
+        prompt: generationPrompt,
         model: task.model === "unassigned" ? undefined : task.model,
-        settings,
+        settings: isStoryboardTask
+          ? {
+              ...settings,
+              responseFormat: "json",
+              systemPrompt: STORYBOARD_SYSTEM_PROMPT,
+            }
+          : settings,
       });
       const structuredData = tryParseStructuredData(output.content);
       const finishedAt = new Date();
       const outputSnapshot = {
         taskId: task.id,
-        outputType: "text",
+        outputType: isStoryboardTask ? "json" : "text",
         content: output.content,
         structuredData,
         generatedAt: finishedAt.toISOString(),
@@ -658,12 +741,13 @@ async function executeTask(taskId: string) {
         await tx.insert(taskResults).values({
           taskId: task.id,
           workspaceId: task.workspaceId,
-          resultType: "text",
+          resultType: isStoryboardTask ? "json" : "text",
           contentText: output.content,
           meta: {
             provider: output.provider,
             model: output.model,
             usage: output.usage,
+            outputType: isStoryboardTask ? "storyboard" : "text",
           },
         });
 
@@ -675,6 +759,7 @@ async function executeTask(taskId: string) {
             model: output.model,
             responsePayload: {
               content: output.content,
+              structuredData,
               usage: output.usage,
               rawResponse: output.rawResponse,
             },
