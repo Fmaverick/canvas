@@ -103,7 +103,7 @@ export const env = {
   cloubicBaseUrl: parsedServerEnv.CLOUBIC_BASE_URL ?? "https://api.cloubic.com/v1",
   cloubicTextModel: parsedServerEnv.CLOUBIC_TEXT_MODEL ?? "gpt-4o",
   cloubicImageModel: parsedServerEnv.CLOUBIC_IMAGE_MODEL ?? "gemini-3-pro-image-preview",
-  cloubicVideoModel: parsedServerEnv.CLOUBIC_VIDEO_MODEL ?? "kling-video-model",
+  cloubicVideoModel: parsedServerEnv.CLOUBIC_VIDEO_MODEL ?? "kling-v3-omni-pro",
   mediaPollBatchSize: parsedServerEnv.MEDIA_POLL_BATCH_SIZE ?? 10,
   internalApiToken: parsedServerEnv.INTERNAL_API_TOKEN,
 };

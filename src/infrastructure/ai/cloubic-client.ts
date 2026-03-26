@@ -74,6 +74,83 @@ function normalizePotentialImageSource(value: string) {
   return trimmed;
 }
 
+function encodeImageUrl(value: string) {
+  const normalized = normalizePotentialImageSource(value);
+
+  return normalized.startsWith("data:image/") ? normalized : encodeURI(normalized);
+}
+
+function normalizeImagePromptLabel(value: string | undefined, index: number) {
+  if (!value) {
+    return `image_${index + 1}`;
+  }
+
+  const normalized = value
+    .trim()
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  return normalized.length > 0 ? normalized : `image_${index + 1}`;
+}
+
+function normalizeVideoReferenceImageEntries(input: {
+  imageUrl?: string;
+  referenceImages: string[];
+  lastFrameImageUrl?: string;
+  referenceImageEntries?: unknown;
+}) {
+  const entries: Array<{ imageUrl: string; label?: string }> = [];
+  const seen = new Set<string>();
+
+  const appendEntry = (imageUrl: string | undefined, label?: string) => {
+    if (!imageUrl) {
+      return;
+    }
+
+    const normalizedUrl = encodeImageUrl(imageUrl);
+
+    if (seen.has(normalizedUrl)) {
+      return;
+    }
+
+    seen.add(normalizedUrl);
+    entries.push({
+      imageUrl: normalizedUrl,
+      ...(label ? { label } : {}),
+    });
+  };
+
+  if (Array.isArray(input.referenceImageEntries)) {
+    for (const entry of input.referenceImageEntries) {
+      if (typeof entry === "string") {
+        appendEntry(entry);
+        continue;
+      }
+
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+
+      const record = entry as Record<string, unknown>;
+      appendEntry(
+        toString(record.url) ?? toString(record.imageUrl) ?? toString(record.image_url),
+        toString(record.label) ?? toString(record.name) ?? toString(record.fileName),
+      );
+    }
+  }
+
+  appendEntry(input.imageUrl);
+
+  for (const referenceImage of input.referenceImages) {
+    appendEntry(referenceImage);
+  }
+
+  appendEntry(input.lastFrameImageUrl);
+
+  return entries;
+}
+
 function extractImageSourceFromString(value: string): string | undefined {
   const trimmed = value.trim();
 
@@ -491,7 +568,14 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
         (shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.trim().length > 0,
       )
     : [];
+  const imageEntries = normalizeVideoReferenceImageEntries({
+    imageUrl,
+    referenceImages,
+    lastFrameImageUrl,
+    referenceImageEntries: input.settings?.referenceImageEntries,
+  });
   const promptSegments = [input.prompt.trim()];
+  const hasImagePlaceholders = /<<<image_\d+>>>/.test(input.prompt);
 
   if (generationMode === "first_last") {
     promptSegments.push("生成模式：首尾帧视频。");
@@ -501,8 +585,12 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
     promptSegments.push(`多镜头脚本：\n${shotPrompts.map((shotPrompt, index) => `${index + 1}. ${shotPrompt}`).join("\n")}`);
   }
 
-  if (referenceImages.length > 0) {
-    promptSegments.push(`参考图数量：${referenceImages.length}。`);
+  if (!hasImagePlaceholders && imageEntries.length > 0) {
+    promptSegments.push(
+      `图像锚点：${imageEntries
+        .map((entry, index) => `${normalizeImagePromptLabel(entry.label, index)}<<<image_${index + 1}>>>`)
+        .join("，")}`,
+    );
   }
 
   if (lastFrameImageUrl) {
@@ -510,7 +598,6 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
   }
 
   const prompt = promptSegments.filter(Boolean).join("\n\n");
-  const images = Array.from(new Set([imageUrl, ...referenceImages].filter((value): value is string => Boolean(value))));
   const multiPromptDurations = distributeShotDurations(duration, shotPrompts.length);
   const multiPrompt =
     generationMode === "multi_shot"
@@ -522,8 +609,16 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
       : [];
   const metadata: Record<string, unknown> = {
     multi_shot: generationMode === "multi_shot",
+    aspect_ratio: size,
     sound,
     generation_mode: generationMode,
+    ...(imageEntries.length > 0
+      ? {
+          image_list: imageEntries.map((entry) => ({
+            image_url: entry.imageUrl,
+          })),
+        }
+      : {}),
     ...(typeof motionStrength === "number" ? { motion_strength: motionStrength } : {}),
   };
 
@@ -533,40 +628,17 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
   }
 
   if (generationMode === "first_last" && lastFrameImageUrl) {
-    metadata.last_frame_image_url = lastFrameImageUrl;
+    metadata.last_frame_image_url = encodeImageUrl(lastFrameImageUrl);
   }
 
   const requestBody: Record<string, unknown> = {
     model: input.model ?? env.cloubicVideoModel,
     duration,
-    size,
     metadata,
   };
 
-  if (generationMode === "multi_shot") {
-    if (prompt) {
-      requestBody.prompt = prompt;
-    }
-
-    if (imageUrl) {
-      requestBody.image = imageUrl;
-    }
-  } else if (generationMode === "first_last") {
-    if (prompt) {
-      requestBody.prompt = prompt;
-    }
-
-    if (imageUrl) {
-      requestBody.image = imageUrl;
-    }
-  } else {
-    if (prompt) {
-      requestBody.prompt = prompt;
-    }
-
-    if (images.length > 0) {
-      requestBody.images = images;
-    }
+  if (prompt) {
+    requestBody.prompt = prompt;
   }
 
   const rawResponse = await requestCloubic("/video/generations", {

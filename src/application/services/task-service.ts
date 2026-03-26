@@ -290,6 +290,137 @@ function normalizeNodeResourceRefs(
   };
 }
 
+function normalizeVideoReferenceImageLabel(value: string | null | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  const label = path.parse(value).name.replace(/[_-]+/g, " ").trim();
+
+  return label.length > 0 ? label : undefined;
+}
+
+function resolveVideoReferenceAssetLabel(
+  asset: {
+    fileName: string;
+    ownerType?: string;
+    ownerId?: string;
+  },
+  libraryItemNameMap: Map<string, string>,
+  fallbackContextLabels: string[],
+) {
+  if (asset.ownerType === "library_item" && asset.ownerId) {
+    const ownerLabel = libraryItemNameMap.get(asset.ownerId);
+
+    if (ownerLabel) {
+      return ownerLabel;
+    }
+  }
+
+  if (fallbackContextLabels.length === 1) {
+    return fallbackContextLabels[0];
+  }
+
+  return normalizeVideoReferenceImageLabel(asset.fileName);
+}
+
+function createVideoReferenceOrderMaps(input: {
+  subjectIds: string[];
+  sceneIds: string[];
+  libraryItemNameMap: Map<string, string>;
+}) {
+  const orderedLibraryItemIds = uniqueStrings([...input.subjectIds, ...input.sceneIds]);
+  const libraryItemPriorityMap = new Map(orderedLibraryItemIds.map((id, index) => [id, index]));
+  const labelPriorityMap = new Map(
+    orderedLibraryItemIds
+      .map((id, index) => {
+        const label = input.libraryItemNameMap.get(id);
+
+        return label ? [label, index] : null;
+      })
+      .filter((entry): entry is [string, number] => Boolean(entry)),
+  );
+
+  return {
+    libraryItemPriorityMap,
+    labelPriorityMap,
+  };
+}
+
+function sortVideoReferenceAssetsByContext<
+  T extends {
+    ownerType?: string;
+    ownerId?: string;
+    label?: string;
+  },
+>(items: T[], orderMaps: ReturnType<typeof createVideoReferenceOrderMaps>) {
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      priority:
+        item.ownerType === "library_item" && item.ownerId && orderMaps.libraryItemPriorityMap.has(item.ownerId)
+          ? (orderMaps.libraryItemPriorityMap.get(item.ownerId) ?? Number.MAX_SAFE_INTEGER)
+          : item.label && orderMaps.labelPriorityMap.has(item.label)
+            ? (orderMaps.labelPriorityMap.get(item.label) ?? Number.MAX_SAFE_INTEGER)
+            : Number.MAX_SAFE_INTEGER,
+    }))
+    .sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+
+      return left.index - right.index;
+    })
+    .map((entry) => entry.item);
+}
+
+function buildVideoReferenceImageEntries(input: {
+  firstFrameAsset?: { fileUrl: string; fileName: string; label?: string };
+  lastFrameAsset?: { fileUrl: string; fileName: string; label?: string };
+  explicitReferenceAssets: Array<{ fileUrl: string; fileName: string; label?: string }>;
+  unassignedReferenceAssets: Array<{ fileUrl: string; fileName: string; label?: string }>;
+  upstreamReferenceImages: Array<{ url: string; label?: string }>;
+  mergedReferenceImages: string[];
+}) {
+  const entries: Array<{ url: string; label?: string }> = [];
+  const seen = new Set<string>();
+
+  const appendEntry = (url: string | undefined, label?: string) => {
+    if (!url || seen.has(url)) {
+      return;
+    }
+
+    seen.add(url);
+    entries.push({
+      url,
+      ...(label ? { label } : {}),
+    });
+  };
+
+  appendEntry(input.firstFrameAsset?.fileUrl, input.firstFrameAsset?.label);
+
+  for (const asset of input.explicitReferenceAssets) {
+    appendEntry(asset.fileUrl, asset.label);
+  }
+
+  for (const asset of input.unassignedReferenceAssets) {
+    appendEntry(asset.fileUrl, asset.label);
+  }
+
+  for (const image of input.upstreamReferenceImages) {
+    appendEntry(image.url, image.label);
+  }
+
+  for (const imageUrl of input.mergedReferenceImages) {
+    appendEntry(imageUrl);
+  }
+
+  appendEntry(input.lastFrameAsset?.fileUrl, input.lastFrameAsset?.label);
+
+  return entries;
+}
+
 async function getUpstreamImagePromptContextMap(
   workspaceId: string,
   nodes: Array<{
@@ -793,6 +924,8 @@ async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNode
   const imageAssets = await db
     .select({
       id: assets.id,
+      ownerType: assets.ownerType,
+      ownerId: assets.ownerId,
       fileUrl: assets.fileUrl,
       fileName: assets.fileName,
       mimeType: assets.mimeType,
@@ -988,6 +1121,16 @@ async function buildExecutionPayload(
   const referenceImageUpstreamOutputs = upstreamOutputs.filter(
     (output) => resolveUpstreamSemantic(output.type, node.type) === "reference_image",
   );
+  const upstreamReferenceImages = referenceImageUpstreamOutputs.flatMap((output) =>
+    output.imageUrl
+      ? [
+          {
+            url: output.imageUrl,
+            ...(output.title.trim() ? { label: output.title.trim() } : {}),
+          },
+        ]
+      : [],
+  );
 
   const promptSegments = [node.promptInput?.trim() ?? ""];
 
@@ -1003,7 +1146,40 @@ async function buildExecutionPayload(
     ...(node.settingsJson as Record<string, unknown>),
     ...input.overrideSettings,
   };
-  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset.fileUrl]));
+  const normalizedNodeRefs = normalizeNodeResourceRefs(node.resourceRefs);
+  const libraryItemIds = uniqueStrings([
+    ...normalizedNodeRefs.subjectIds,
+    ...normalizedNodeRefs.sceneIds,
+    ...referenceAssets
+      .filter((asset) => asset.ownerType === "library_item")
+      .map((asset) => asset.ownerId),
+  ]);
+  const libraryItemNameMap = new Map<string, string>();
+
+  if (libraryItemIds.length > 0) {
+    const libraryItemRecords = await db
+      .select({
+        id: libraryItems.id,
+        name: libraryItems.name,
+      })
+      .from(libraryItems)
+      .where(and(eq(libraryItems.workspaceId, input.workspaceId), inArray(libraryItems.id, libraryItemIds)));
+
+    for (const record of libraryItemRecords) {
+      libraryItemNameMap.set(record.id, record.name);
+    }
+  }
+
+  const fallbackContextLabels = uniqueStrings([
+    ...normalizedNodeRefs.subjectIds.map((id) => libraryItemNameMap.get(id)).filter((value): value is string => Boolean(value)),
+    ...normalizedNodeRefs.sceneIds.map((id) => libraryItemNameMap.get(id)).filter((value): value is string => Boolean(value)),
+  ]);
+  const referenceOrderMaps = createVideoReferenceOrderMaps({
+    subjectIds: normalizedNodeRefs.subjectIds,
+    sceneIds: normalizedNodeRefs.sceneIds,
+    libraryItemNameMap,
+  });
+  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset]));
   const firstFrameAssetId =
     typeof mergedSettings.firstFrameAssetId === "string" && mergedSettings.firstFrameAssetId.trim().length > 0
       ? mergedSettings.firstFrameAssetId
@@ -1022,28 +1198,71 @@ async function buildExecutionPayload(
     ...(lastFrameAssetId ? [lastFrameAssetId] : []),
     ...explicitReferenceAssetIds,
   ]);
-  const explicitReferenceImages = explicitReferenceAssetIds
+  const explicitReferenceImageAssets = explicitReferenceAssetIds
     .map((assetId) => referenceAssetMap.get(assetId))
-    .filter((fileUrl): fileUrl is string => Boolean(fileUrl));
-  const unassignedReferenceImages = referenceAssets
+    .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
+  const unassignedReferenceImageAssets = referenceAssets
     .filter((asset) => !managedVideoAssetIds.includes(asset.id))
-    .map((asset) => asset.fileUrl);
+    .filter((asset) => Boolean(asset.fileUrl));
+  const mergedReferenceImages = ((mergedSettings.referenceImages as unknown[]) ?? []).filter(
+    (imageUrl): imageUrl is string => typeof imageUrl === "string",
+  );
   const referenceImages = uniqueStrings([
-    ...(node.type === "video" ? [...explicitReferenceImages, ...unassignedReferenceImages] : referenceAssets.map((asset) => asset.fileUrl)),
-    ...referenceImageUpstreamOutputs
-      .map((output) => output.imageUrl)
-      .filter((imageUrl): imageUrl is string => Boolean(imageUrl)),
-    ...(((mergedSettings.referenceImages as unknown[]) ?? []).filter(
-      (imageUrl): imageUrl is string => typeof imageUrl === "string",
-    )),
+    ...(node.type === "video"
+      ? [...explicitReferenceImageAssets, ...unassignedReferenceImageAssets].map((asset) => asset.fileUrl)
+      : referenceAssets.map((asset) => asset.fileUrl)),
+    ...upstreamReferenceImages.map((image) => image.url),
+    ...mergedReferenceImages,
   ]);
+  const firstFrameAsset = firstFrameAssetId ? referenceAssetMap.get(firstFrameAssetId) : undefined;
+  const lastFrameAsset = lastFrameAssetId ? referenceAssetMap.get(lastFrameAssetId) : undefined;
   const firstFrameImageUrl =
-    (firstFrameAssetId ? referenceAssetMap.get(firstFrameAssetId) : undefined) ??
+    firstFrameAsset?.fileUrl ??
     (node.type === "video" ? referenceImages[0] : undefined);
-  const lastFrameImageUrl = lastFrameAssetId ? referenceAssetMap.get(lastFrameAssetId) : undefined;
+  const lastFrameImageUrl = lastFrameAsset?.fileUrl;
   const shotPrompts = uniqueStrings(
     ((mergedSettings.shotPrompts as unknown[]) ?? []).filter((item): item is string => typeof item === "string"),
   );
+  const labeledFirstFrameAsset = firstFrameAsset
+    ? {
+        ...firstFrameAsset,
+        label: resolveVideoReferenceAssetLabel(firstFrameAsset, libraryItemNameMap, fallbackContextLabels),
+      }
+    : undefined;
+  const labeledLastFrameAsset = lastFrameAsset
+    ? {
+        ...lastFrameAsset,
+        label: resolveVideoReferenceAssetLabel(lastFrameAsset, libraryItemNameMap, fallbackContextLabels),
+      }
+    : undefined;
+  const labeledExplicitReferenceAssets = explicitReferenceImageAssets.map((asset) => ({
+    ...asset,
+    label: resolveVideoReferenceAssetLabel(asset, libraryItemNameMap, fallbackContextLabels),
+  }));
+  const labeledUnassignedReferenceAssets = unassignedReferenceImageAssets.map((asset) => ({
+    ...asset,
+    label: resolveVideoReferenceAssetLabel(asset, libraryItemNameMap, fallbackContextLabels),
+  }));
+  const orderedExplicitReferenceAssets = sortVideoReferenceAssetsByContext(
+    labeledExplicitReferenceAssets,
+    referenceOrderMaps,
+  );
+  const orderedUnassignedReferenceAssets = sortVideoReferenceAssetsByContext(
+    labeledUnassignedReferenceAssets,
+    referenceOrderMaps,
+  );
+  const orderedUpstreamReferenceImages = sortVideoReferenceAssetsByContext(upstreamReferenceImages, referenceOrderMaps);
+  const referenceImageEntries =
+    node.type === "video"
+      ? buildVideoReferenceImageEntries({
+          firstFrameAsset: labeledFirstFrameAsset,
+          lastFrameAsset: labeledLastFrameAsset,
+          explicitReferenceAssets: orderedExplicitReferenceAssets,
+          unassignedReferenceAssets: orderedUnassignedReferenceAssets,
+          upstreamReferenceImages: orderedUpstreamReferenceImages,
+          mergedReferenceImages,
+        })
+      : [];
 
   return {
     workspaceId: input.workspaceId,
@@ -1063,6 +1282,7 @@ async function buildExecutionPayload(
             lastFrameImageUrl,
             imageUrl: firstFrameImageUrl,
             shotPrompts,
+            referenceImageEntries,
           }
         : {}),
     },
