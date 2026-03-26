@@ -30,6 +30,7 @@ type ResourceModalKind = "subject" | "scene" | "instruction";
 
 type InfiniteCanvasBoardCreatePanelProps = {
   canEdit: boolean;
+  canGenerate: boolean;
   isCreateOpen: boolean;
   quickType: CanvasNodeType;
   workspaceId: string;
@@ -38,6 +39,10 @@ type InfiniteCanvasBoardCreatePanelProps = {
   taskCount: number;
   zoomLabel: string;
   hasSelectedNode: boolean;
+  selectedNodeCount: number;
+  selectedNodeTitles: string[];
+  batchRunCount: number;
+  isBatchRunning: boolean;
   subjects: LibraryItemOption[];
   scenes: LibraryItemOption[];
   instructionPresets: InstructionPresetOption[];
@@ -48,6 +53,8 @@ type InfiniteCanvasBoardCreatePanelProps = {
   onCreateInstructionNode: (instructionPreset: InstructionPresetOption) => void;
   onZoomOut: () => void;
   onZoomIn: () => void;
+  onBatchRunCountChange: (value: number) => void;
+  onRunSelectedNodes: () => void;
 };
 
 type ResourceLauncherCardProps = {
@@ -295,6 +302,7 @@ function getInstructionSubtitle(item: InstructionPresetOption) {
 
 export function InfiniteCanvasBoardCreatePanel({
   canEdit,
+  canGenerate,
   isCreateOpen,
   quickType,
   workspaceId,
@@ -303,6 +311,10 @@ export function InfiniteCanvasBoardCreatePanel({
   taskCount,
   zoomLabel,
   hasSelectedNode,
+  selectedNodeCount,
+  selectedNodeTitles,
+  batchRunCount,
+  isBatchRunning,
   subjects,
   scenes,
   instructionPresets,
@@ -313,6 +325,8 @@ export function InfiniteCanvasBoardCreatePanel({
   onCreateInstructionNode,
   onZoomOut,
   onZoomIn,
+  onBatchRunCountChange,
+  onRunSelectedNodes,
 }: InfiniteCanvasBoardCreatePanelProps) {
   const [activeResourceModal, setActiveResourceModal] = useState<ResourceModalKind | null>(null);
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
@@ -395,7 +409,45 @@ export function InfiniteCanvasBoardCreatePanel({
         </div>
       </div>
 
-      <div className="absolute right-5 top-5 z-20 flex items-center gap-2">
+      <div className="absolute right-5 top-5 z-20 flex items-start gap-2">
+        {canGenerate ? (
+          <div className="rounded-[20px] border bg-background px-3 py-2 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-foreground">
+                已选 {selectedNodeCount} 个节点
+              </div>
+              <div className="flex items-center gap-2 rounded-full border px-2 py-1">
+                <span className="text-[11px] text-muted-foreground">次数</span>
+                <input
+                  className="w-14 bg-transparent text-center text-xs text-foreground outline-none"
+                  max={50}
+                  min={1}
+                  type="number"
+                  value={batchRunCount}
+                  onChange={(event) => onBatchRunCountChange(Number(event.target.value))}
+                />
+              </div>
+              <button
+                className={cn(
+                  "rounded-full px-3 py-1.5 text-xs font-medium transition",
+                  selectedNodeCount > 0 && !isBatchRunning
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                    : "cursor-not-allowed bg-muted text-muted-foreground",
+                )}
+                disabled={selectedNodeCount === 0 || isBatchRunning}
+                type="button"
+                onClick={onRunSelectedNodes}
+              >
+                {isBatchRunning ? "批量运行中" : "批量运行"}
+              </button>
+            </div>
+            <div className="mt-2 max-w-[320px] text-[11px] leading-5 text-muted-foreground">
+              {selectedNodeCount > 0
+                ? `${selectedNodeTitles.slice(0, 3).join("、")}${selectedNodeTitles.length > 3 ? ` 等 ${selectedNodeTitles.length} 个节点` : ""}`
+                : "单击节点直接选中，⌘ / Ctrl / Shift 点击可追加成组批量运行。"}
+            </div>
+          </div>
+        ) : null}
         <Link
           className="rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-muted"
           href={`/tasks?workspaceId=${workspaceId}`}
@@ -572,6 +624,12 @@ export function InfiniteCanvasBoardCreatePanel({
           <>
             <span>·</span>
             <span>Delete 删除已选</span>
+          </>
+        ) : null}
+        {selectedNodeCount > 1 ? (
+          <>
+            <span>·</span>
+            <span>分组 {selectedNodeCount}</span>
           </>
         ) : null}
         <span>·</span>

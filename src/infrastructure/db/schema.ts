@@ -317,6 +317,78 @@ export const nodeTemplates = pgTable(
   ],
 );
 
+export const nodeRunBatches = pgTable(
+  "node_run_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => users.id),
+    mode: varchar("mode", { length: 20 }).notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("processing"),
+    requestedRunCount: integer("requested_run_count").notNull().default(1),
+    totalNodeRunCount: integer("total_node_run_count").notNull().default(0),
+    completedNodeRunCount: integer("completed_node_run_count").notNull().default(0),
+    succeededNodeRunCount: integer("succeeded_node_run_count").notNull().default(0),
+    failedNodeRunCount: integer("failed_node_run_count").notNull().default(0),
+    selectedNodesJson: jsonb("selected_nodes_json")
+      .$type<Array<{ id: string; title: string; type: string }>>()
+      .notNull()
+      .default([]),
+    ...timestamps,
+  },
+  (table) => [
+    index("node_run_batches_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
+    index("node_run_batches_canvas_created_at_idx").on(table.canvasId, table.createdAt),
+    index("node_run_batches_status_idx").on(table.status),
+  ],
+);
+
+export const nodeRuns = pgTable(
+  "node_runs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    taskId: uuid("task_id"),
+    requestId: varchar("request_id", { length: 100 }).notNull(),
+    runIndex: integer("run_index"),
+    nodeType: varchar("node_type", { length: 20 }).notNull(),
+    nodeTitle: varchar("node_title", { length: 255 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("queued"),
+    resultType: varchar("result_type", { length: 20 }),
+    contentText: text("content_text"),
+    assetId: uuid("asset_id").references(() => assets.id),
+    resultMeta: jsonb("result_meta").$type<Record<string, unknown>>().notNull().default({}),
+    errorCode: varchar("error_code", { length: 100 }),
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("node_runs_request_id_unique").on(table.requestId),
+    index("node_runs_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
+    index("node_runs_batch_run_idx").on(table.batchRunId, table.runIndex),
+    index("node_runs_node_created_at_idx").on(table.nodeId, table.createdAt),
+    index("node_runs_status_idx").on(table.status),
+  ],
+);
+
 export const generationTasks = pgTable(
   "generation_tasks",
   {
@@ -326,6 +398,9 @@ export const generationTasks = pgTable(
       .references(() => workspaces.id),
     canvasId: uuid("canvas_id").references(() => canvases.id),
     nodeId: uuid("node_id").references(() => canvasNodes.id),
+    nodeRunId: uuid("node_run_id").references(() => nodeRuns.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    batchRunIndex: integer("batch_run_index"),
     requestId: varchar("request_id", { length: 100 }).notNull(),
     taskType: varchar("task_type", { length: 20 }).notNull(),
     provider: varchar("provider", { length: 50 }).notNull(),
@@ -419,6 +494,8 @@ export const schema = {
   canvasNodes,
   canvasEdges,
   nodeTemplates,
+  nodeRunBatches,
+  nodeRuns,
   generationTasks,
   taskResults,
   providerConfigs,

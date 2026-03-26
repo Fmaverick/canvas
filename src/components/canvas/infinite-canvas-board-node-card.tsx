@@ -42,6 +42,7 @@ type InfiniteCanvasBoardNodeCardProps = {
   node: CanvasNode;
   latestTask?: CanvasTask | null;
   effectiveSelectedNodeId: string | null;
+  isSelected: boolean;
   screenPoint: { x: number; y: number };
   zoom: number;
   imagePreviewDimensions?: { width: number; height: number } | null;
@@ -57,7 +58,7 @@ type InfiniteCanvasBoardNodeCardProps = {
   canAcceptPendingConnection: boolean;
   isPendingConnectionTarget: boolean;
   onRegisterVideoElement: (nodeId: string, element: HTMLVideoElement | null) => void;
-  onSelectNode: (nodeId: string) => void;
+  onSelectNode: (nodeId: string, options?: { additive: boolean }) => void;
   onOpenTextEditor: () => void;
   onStartDrag: (nodeId: string, clientX: number, clientY: number) => void;
   onDeleteNode: (nodeId: string) => void;
@@ -201,6 +202,7 @@ export function InfiniteCanvasBoardNodeCard({
   node,
   latestTask,
   effectiveSelectedNodeId,
+  isSelected,
   screenPoint,
   zoom,
   imagePreviewDimensions,
@@ -269,10 +271,12 @@ export function InfiniteCanvasBoardNodeCard({
   return (
     <div
       aria-label={node.title}
+      data-canvas-node-id={node.id}
       className={cn(
         "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
         isTextNode || isStoryboardNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
-        effectiveSelectedNodeId === node.id ? "ring-2 ring-primary/50" : undefined,
+        isSelected ? "ring-2 ring-primary/50" : undefined,
+        effectiveSelectedNodeId === node.id ? "shadow-[0_0_0_6px_rgba(59,130,246,0.12)]" : undefined,
         isPendingSource ? "ring-2 ring-primary/60" : undefined,
         isPendingConnectionTarget ? "ring-2 ring-emerald-500/60 shadow-[0_0_0_10px_rgba(16,185,129,0.08)]" : undefined,
         isConnectionMode && !isPendingSource && !isPendingConnectionTarget ? "opacity-70" : undefined,
@@ -289,15 +293,15 @@ export function InfiniteCanvasBoardNodeCard({
         transformOrigin: "center center",
       }}
       tabIndex={0}
-      onDoubleClick={() => {
-        onSelectNode(node.id);
+      onDoubleClick={(event) => {
+        onSelectNode(node.id, { additive: event.metaKey || event.ctrlKey || event.shiftKey });
 
         if (isTextNode || isStoryboardNode) {
           onOpenTextEditor();
         }
       }}
-      onClick={() => {
-        onSelectNode(node.id);
+      onClick={(event) => {
+        onSelectNode(node.id, { additive: event.metaKey || event.ctrlKey || event.shiftKey });
 
         if (canAcceptPendingConnection) {
           onCompleteConnection(node.id);

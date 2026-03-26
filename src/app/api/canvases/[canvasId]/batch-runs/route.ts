@@ -1,11 +1,10 @@
 import { resolveWorkspaceContextFromRequest } from "@/application/services/auth-service";
-import { runNode, runNodeInputSchema } from "@/application/services/task-service";
+import { runNodeBatch, runNodeBatchInputSchema } from "@/application/services/task-service";
 import { getRequestId, jsonError, jsonSuccess } from "@/lib/api";
 
 type RouteContext = {
   params: Promise<{
     canvasId: string;
-    nodeId: string;
   }>;
 };
 
@@ -14,23 +13,27 @@ export async function POST(request: Request, context: RouteContext) {
 
   try {
     const { workspaceId, currentUser } = await resolveWorkspaceContextFromRequest(request, null, "generate");
-    const { canvasId, nodeId } = await context.params;
+    const { canvasId } = await context.params;
     const body = await request.json();
-    const payload = runNodeInputSchema.parse({
-      ...body,
-      actorUserId: currentUser.user.id,
-      workspaceId,
-      canvasId,
-      nodeId,
-      requestId: body.requestId ?? body.request_id ?? requestId,
-    });
-    const task = await runNode(payload);
+    const batchRun = await runNodeBatch(
+      runNodeBatchInputSchema.parse({
+        ...body,
+        actorUserId: currentUser.user.id,
+        workspaceId,
+        canvasId,
+        nodeIds: body.nodeIds ?? body.node_ids,
+        runCount: body.runCount ?? body.run_count,
+      }),
+    );
 
     return jsonSuccess(
       {
-        task_id: task.taskId,
-        status: task.status,
-        batch_run_id: task.batchRunId ?? null,
+        batch_run_id: batchRun.id,
+        status: batchRun.status,
+        run_count: batchRun.runCount,
+        node_count: batchRun.nodeCount,
+        total_node_run_count: batchRun.totalNodeRunCount,
+        items: batchRun.items,
       },
       requestId,
       201,

@@ -120,6 +120,26 @@ export async function runCanvasNode(
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
 
+export async function runCanvasNodeBatch(
+  context: CanvasBoardApiContext,
+  payload: {
+    nodeIds: string[];
+    runCount: number;
+  },
+  fallbackMessage: string,
+) {
+  const response = await fetch(`/api/canvases/${context.canvasId}/batch-runs`, {
+    method: "POST",
+    headers: getWorkspaceHeaders(context.workspaceId),
+    body: JSON.stringify({
+      node_ids: payload.nodeIds,
+      run_count: payload.runCount,
+    }),
+  });
+
+  return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
+}
+
 export async function createUploadPresign(
   workspaceId: string,
   payload: Record<string, unknown>,

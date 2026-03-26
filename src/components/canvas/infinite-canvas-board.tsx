@@ -23,6 +23,7 @@ import {
   deleteCanvasNode,
   patchCanvasNode,
   runCanvasNode,
+  runCanvasNodeBatch,
 } from "@/components/canvas/infinite-canvas-board.api";
 import {
   DEFAULT_STORYBOARD_NODE_SETTINGS,
@@ -31,9 +32,17 @@ import {
   GRID_MINOR_SIZE,
   MAX_ZOOM,
   MIN_ZOOM,
+  NODE_HEIGHT,
+  NODE_WIDTH,
   TEXT_GENERATE_COOLDOWN_MS,
+  TEXT_NODE_SIZE,
+  STORYBOARD_NODE_HEIGHT,
+  STORYBOARD_NODE_WIDTH,
+  VIDEO_NODE_HEIGHT,
+  VIDEO_NODE_WIDTH,
   getCanvasConnectionLabel,
   getCanvasConnectionSemantic,
+  getImageNodeSize,
   getImageNodeOutputSource,
   getManagedVideoAssetIds,
   getPersistedVideoNodeSettings,
@@ -86,6 +95,7 @@ export function InfiniteCanvasBoard({
   const videoPreviewRefs = useRef<Record<string, HTMLVideoElement | null>>({});
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(nodes[0]?.id ?? null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(nodes[0]?.id ? [nodes[0].id] : []);
   const [isCreateOpen, setIsCreateOpen] = useState(nodes.length === 0);
   const [quickType, setQuickType] = useState<CanvasNodeType>("text");
   const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
@@ -129,6 +139,14 @@ export function InfiniteCanvasBoard({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [pendingConnectionSourceId, setPendingConnectionSourceId] = useState<string | null>(null);
   const [pendingConnectionPointer, setPendingConnectionPointer] = useState<{ x: number; y: number } | null>(null);
+  const [batchRunCount, setBatchRunCount] = useState(1);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [selectionRect, setSelectionRect] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
@@ -165,10 +183,47 @@ export function InfiniteCanvasBoard({
     );
   }, [nodePositions, nodes]);
   const pendingConnectionSourceNode = pendingConnectionSourceId ? nodeById.get(pendingConnectionSourceId) ?? null : null;
-
-  const effectiveSelectedNodeId = nodes.some((node) => node.id === selectedNodeId) ? selectedNodeId : (nodes[0]?.id ?? null);
+  const effectiveSelectedNodeIds = useMemo(
+    () =>
+      Array.from(new Set(selectedNodeIds)).filter((nodeId) =>
+        nodes.some((node) => node.id === nodeId),
+      ),
+    [nodes, selectedNodeIds],
+  );
+  const effectiveSelectedNodeId =
+    (selectedNodeId && nodes.some((node) => node.id === selectedNodeId) ? selectedNodeId : null) ??
+    effectiveSelectedNodeIds[0] ??
+    null;
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
+  const selectedNodes = effectiveSelectedNodeIds
+    .map((nodeId) => nodeById.get(nodeId))
+    .filter((node): node is CanvasNode => Boolean(node));
+  const selectedNodeTitles = selectedNodes.map((node) => node.title);
+  const hasRunningSelectedNode = selectedNodes.some((node) => {
+    const latestTask = latestTaskByNode.get(node.id);
+
+    return latestTask?.status === "queued" || latestTask?.status === "processing";
+  });
   const selectedTask = selectedNode ? latestTaskByNode.get(selectedNode.id) ?? null : null;
+  const normalizedSelectionRect = useMemo(() => {
+    if (!selectionRect) {
+      return null;
+    }
+
+    const left = Math.min(selectionRect.startX, selectionRect.currentX);
+    const right = Math.max(selectionRect.startX, selectionRect.currentX);
+    const top = Math.min(selectionRect.startY, selectionRect.currentY);
+    const bottom = Math.max(selectionRect.startY, selectionRect.currentY);
+
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top,
+    };
+  }, [selectionRect]);
   const isTextNodeSelected = selectedNode?.type === "text";
   const isStoryboardNodeSelected = selectedNode?.type === "storyboard";
   const isImageNodeSelected = selectedNode?.type === "image";
@@ -237,6 +292,16 @@ export function InfiniteCanvasBoard({
       setSelectedEdgeId(null);
     }
   }, [edges, selectedEdgeId]);
+
+  useEffect(() => {
+    const validNodeIds = new Set(nodes.map((node) => node.id));
+
+    setSelectedNodeIds((current) => current.filter((nodeId) => validNodeIds.has(nodeId)));
+
+    if (selectedNodeId && !validNodeIds.has(selectedNodeId)) {
+      setSelectedNodeId(null);
+    }
+  }, [nodes, selectedNodeId]);
 
   useEffect(() => {
     if (selectedNode?.type === "text") {
@@ -413,6 +478,57 @@ export function InfiniteCanvasBoard({
     [camera.x, camera.y, viewportSize.height, viewportSize.width, zoom],
   );
 
+  const nodeScreenBounds = useMemo(() => {
+    return new Map(
+      nodes.map((node) => {
+        const position = nodePositionMap.get(node.id) ?? {
+          x: Number.parseFloat(node.positionX || "0"),
+          y: Number.parseFloat(node.positionY || "0"),
+        };
+        const screenPoint = getScreenPoint(position.x, position.y);
+        const imagePreviewDimensions =
+          imagePreviewSizes[node.id] ??
+          (node.referenceAssets?.[0]?.width && node.referenceAssets?.[0]?.height
+            ? {
+                width: node.referenceAssets[0].width,
+                height: node.referenceAssets[0].height,
+              }
+            : null);
+        const imageNodeSize = getImageNodeSize(imagePreviewDimensions);
+        const width =
+          node.type === "text"
+            ? TEXT_NODE_SIZE
+            : node.type === "storyboard"
+              ? STORYBOARD_NODE_WIDTH
+              : node.type === "image"
+                ? imageNodeSize.width
+                : node.type === "video"
+                  ? VIDEO_NODE_WIDTH
+                  : NODE_WIDTH;
+        const height =
+          node.type === "text"
+            ? TEXT_NODE_SIZE
+            : node.type === "storyboard"
+              ? STORYBOARD_NODE_HEIGHT
+              : node.type === "image"
+                ? imageNodeSize.height
+                : node.type === "video"
+                  ? VIDEO_NODE_HEIGHT
+                  : NODE_HEIGHT;
+
+        return [
+          node.id,
+          {
+            left: screenPoint.x - (width * zoom) / 2,
+            right: screenPoint.x + (width * zoom) / 2,
+            top: screenPoint.y - (height * zoom) / 2,
+            bottom: screenPoint.y + (height * zoom) / 2,
+          },
+        ];
+      }),
+    );
+  }, [getScreenPoint, imagePreviewSizes, nodePositionMap, nodes, zoom]);
+
   const getLocalScreenPoint = useCallback((clientX: number, clientY: number) => {
     if (!containerRef.current) {
       return null;
@@ -501,6 +617,158 @@ export function InfiniteCanvasBoard({
     setPendingConnectionPointer(null);
   }, []);
 
+  const isCanvasInteractiveTarget = useCallback((target: EventTarget | null) => {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+
+    return Boolean(target.closest("[data-canvas-node-id], [data-canvas-edge='true']"));
+  }, []);
+
+  const handleSelectNode = useCallback(
+    (nodeId: string, options?: { additive: boolean }) => {
+      setSelectedEdgeId(null);
+
+      if (options?.additive) {
+        const isSelected = effectiveSelectedNodeIds.includes(nodeId);
+        const nextSelectedNodeIds = isSelected
+          ? effectiveSelectedNodeIds.filter((currentNodeId) => currentNodeId !== nodeId)
+          : [...effectiveSelectedNodeIds, nodeId];
+
+        setSelectedNodeIds(nextSelectedNodeIds);
+        setSelectedNodeId(isSelected ? nextSelectedNodeIds[nextSelectedNodeIds.length - 1] ?? null : nodeId);
+
+        return;
+      }
+
+      setSelectedNodeIds([nodeId]);
+      setSelectedNodeId(nodeId);
+    },
+    [effectiveSelectedNodeIds],
+  );
+
+  const handleRunSelectedNodes = useCallback(async () => {
+    if (!canGenerate) {
+      return;
+    }
+
+    if (effectiveSelectedNodeIds.length === 0) {
+      toast.error("请先选中至少一个节点。");
+
+      return;
+    }
+
+    if (hasRunningSelectedNode) {
+      toast.error("所选节点中仍有运行中的任务，请稍后再试。");
+
+      return;
+    }
+
+    setIsBatchRunning(true);
+
+    try {
+      const result = await runCanvasNodeBatch(
+        apiContext,
+        {
+          nodeIds: effectiveSelectedNodeIds,
+          runCount: batchRunCount,
+        },
+        "批量运行失败。",
+      );
+
+      toast.success(
+        `已触发 ${result.node_count ?? effectiveSelectedNodeIds.length} 个节点，共 ${result.run_count ?? batchRunCount} 轮批量运行。`,
+      );
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "批量运行失败。");
+    } finally {
+      setIsBatchRunning(false);
+    }
+  }, [apiContext, batchRunCount, canGenerate, effectiveSelectedNodeIds, hasRunningSelectedNode, router]);
+
+  const startMarqueeSelection = useCallback(
+    (clientX: number, clientY: number, additive: boolean) => {
+      const origin = getLocalScreenPoint(clientX, clientY);
+
+      if (!origin) {
+        return;
+      }
+
+      setSelectionRect({
+        startX: origin.x,
+        startY: origin.y,
+        currentX: origin.x,
+        currentY: origin.y,
+      });
+
+      const handlePointerMove = (event: PointerEvent) => {
+        const nextPoint = getLocalScreenPoint(event.clientX, event.clientY);
+
+        if (!nextPoint) {
+          return;
+        }
+
+        setSelectionRect({
+          startX: origin.x,
+          startY: origin.y,
+          currentX: nextPoint.x,
+          currentY: nextPoint.y,
+        });
+      };
+
+      const handlePointerUp = (event: PointerEvent) => {
+        const nextPoint = getLocalScreenPoint(event.clientX, event.clientY) ?? origin;
+        const left = Math.min(origin.x, nextPoint.x);
+        const right = Math.max(origin.x, nextPoint.x);
+        const top = Math.min(origin.y, nextPoint.y);
+        const bottom = Math.max(origin.y, nextPoint.y);
+        const width = right - left;
+        const height = bottom - top;
+
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+        setSelectionRect(null);
+
+        if (width < 4 && height < 4) {
+          if (!additive) {
+            setSelectedNodeIds([]);
+            setSelectedNodeId(null);
+          }
+
+          return;
+        }
+
+        const matchedNodeIds = nodes
+          .filter((node) => {
+            const bounds = nodeScreenBounds.get(node.id);
+
+            if (!bounds) {
+              return false;
+            }
+
+            return !(bounds.right < left || bounds.left > right || bounds.bottom < top || bounds.top > bottom);
+          })
+          .map((node) => node.id);
+
+        if (additive) {
+          const nextSelectedNodeIds = Array.from(new Set([...effectiveSelectedNodeIds, ...matchedNodeIds]));
+          setSelectedNodeIds(nextSelectedNodeIds);
+          setSelectedNodeId(matchedNodeIds[matchedNodeIds.length - 1] ?? effectiveSelectedNodeId);
+
+          return;
+        }
+
+        setSelectedNodeIds(matchedNodeIds);
+        setSelectedNodeId(matchedNodeIds[matchedNodeIds.length - 1] ?? null);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [effectiveSelectedNodeId, effectiveSelectedNodeIds, getLocalScreenPoint, nodeScreenBounds, nodes],
+  );
+
   const handleDeleteNode = useCallback(
     async (nodeId: string) => {
       const deletingNode = nodes.find((node) => node.id === nodeId);
@@ -517,6 +785,13 @@ export function InfiniteCanvasBoard({
       try {
         await deleteCanvasNode(apiContext, nodeId, "节点删除失败。");
         setSelectedNodeId(nextSelectedNodeId);
+        setSelectedNodeIds((current) => {
+          const nextNodeIds = current.filter((currentNodeId) => currentNodeId !== nodeId);
+
+          return nextSelectedNodeId && !nextNodeIds.includes(nextSelectedNodeId)
+            ? [...nextNodeIds, nextSelectedNodeId]
+            : nextNodeIds;
+        });
 
         if (effectiveSelectedNodeId === nodeId) {
           setIsExpandedEditorOpen(false);
@@ -573,6 +848,7 @@ export function InfiniteCanvasBoard({
         return;
       }
 
+      setSelectedNodeIds([nodeId]);
       setSelectedNodeId(nodeId);
       setPendingConnectionSourceId(nodeId);
       setPendingConnectionPointer(getScreenPoint(nodePosition.x, nodePosition.y));
@@ -713,6 +989,7 @@ export function InfiniteCanvasBoard({
 
       toast.success("节点已拖入画布。");
       if (typeof createdNode.id === "string") {
+        setSelectedNodeIds([createdNode.id]);
         setSelectedNodeId(createdNode.id);
       }
       setQuickType(type);
@@ -895,6 +1172,7 @@ export function InfiniteCanvasBoard({
         await runCanvasNode(apiContext, createdNodeId, `storyboard-shot-video-run-${crypto.randomUUID()}`, "当前 Shot 视频生成失败。");
       }
 
+      setSelectedNodeIds([createdNodeId]);
       setSelectedNodeId(createdNodeId);
       toast.success(autoRun ? `Shot ${draftStoryboardShot.sequence} 视频已提交生成。` : `Shot ${draftStoryboardShot.sequence} 视频节点已创建。`);
       router.refresh();
@@ -961,6 +1239,7 @@ export function InfiniteCanvasBoard({
         await runCanvasNode(apiContext, createdNodeId, `storyboard-video-run-${crypto.randomUUID()}`, "分镜视频生成失败。");
       }
 
+      setSelectedNodeIds([createdNodeId]);
       setSelectedNodeId(createdNodeId);
       toast.success(autoRun ? "已创建视频节点并提交分镜视频生成。" : "已从分镜创建视频节点。");
       router.refresh();
@@ -1031,6 +1310,7 @@ export function InfiniteCanvasBoard({
 
       toast.success("资源已作为节点加入画布。");
       if (typeof createdNode.id === "string") {
+        setSelectedNodeIds([createdNode.id]);
         setSelectedNodeId(createdNode.id);
       }
       setIsCreateOpen(false);
@@ -1697,6 +1977,7 @@ export function InfiniteCanvasBoard({
 
   function startNodeDrag(nodeId: string, clientX: number, clientY: number) {
     if (!canEdit) {
+      setSelectedNodeIds([nodeId]);
       setSelectedNodeId(nodeId);
 
       return;
@@ -1709,6 +1990,7 @@ export function InfiniteCanvasBoard({
       return;
     }
 
+    setSelectedNodeIds([nodeId]);
     setSelectedNodeId(nodeId);
     const offsetX = boardPoint.x - position.x;
     const offsetY = boardPoint.y - position.y;
@@ -1786,11 +2068,19 @@ export function InfiniteCanvasBoard({
 
       <InfiniteCanvasBoardCreatePanel
         canEdit={canEdit}
+        canGenerate={canGenerate}
+        batchRunCount={batchRunCount}
         edgeCount={edges.length}
         hasSelectedNode={Boolean(selectedNode)}
+        isBatchRunning={isBatchRunning}
         instructionPresets={instructionPresets}
         isCreateOpen={isCreateOpen}
         nodeCount={nodes.length}
+        onBatchRunCountChange={(value) => {
+          const nextValue = Number.isFinite(value) ? Math.max(1, Math.min(50, Math.round(value))) : 1;
+
+          setBatchRunCount(nextValue);
+        }}
         onCreateInstructionNode={(instructionPreset) => {
           void createNodeFromResource(instructionPreset, "instruction", "text");
         }}
@@ -1801,11 +2091,16 @@ export function InfiniteCanvasBoard({
           void createNodeFromResource(subject, "subject", "image", selectedAssetId);
         }}
         onSelectQuickType={setQuickType}
+        onRunSelectedNodes={() => {
+          void handleRunSelectedNodes();
+        }}
         onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
         onZoomIn={() => updateZoom(zoom + 0.1)}
         onZoomOut={() => updateZoom(zoom - 0.1)}
         quickType={quickType}
         scenes={scenes}
+        selectedNodeCount={effectiveSelectedNodeIds.length}
+        selectedNodeTitles={selectedNodeTitles}
         subjects={subjects}
         taskCount={tasks.length}
         workspaceId={workspaceId}
@@ -1814,7 +2109,10 @@ export function InfiniteCanvasBoard({
 
       <div
         ref={containerRef}
-        className={cn("relative h-full overflow-hidden overscroll-none", isPanning ? "cursor-grabbing" : "cursor-grab")}
+        className={cn(
+          "relative h-full overflow-hidden overscroll-none",
+          selectionRect ? "cursor-crosshair" : isPanning ? "cursor-grabbing" : "cursor-grab",
+        )}
         onDragLeave={() => setIsCanvasDragOver(false)}
         onDragOver={(event) => {
           if (!canEdit) {
@@ -1862,11 +2160,10 @@ export function InfiniteCanvasBoard({
           setPendingConnectionPointer(pointer);
         }}
         onPointerDown={(event) => {
-          if (event.target !== event.currentTarget) {
+          if (isCanvasInteractiveTarget(event.target)) {
             return;
           }
 
-          setSelectedNodeId(null);
           setSelectedEdgeId(null);
           setIsExpandedEditorOpen(false);
           setEditingTextNodeTitleId(null);
@@ -1876,7 +2173,15 @@ export function InfiniteCanvasBoard({
             clearPendingConnection();
           }
 
-          startCanvasPan(event.clientX, event.clientY);
+          if (event.altKey || event.button === 1) {
+            setSelectedNodeId(null);
+            setSelectedNodeIds([]);
+            startCanvasPan(event.clientX, event.clientY);
+
+            return;
+          }
+
+          startMarqueeSelection(event.clientX, event.clientY, event.metaKey || event.ctrlKey || event.shiftKey);
         }}
         onWheel={(event) => {
           event.preventDefault();
@@ -1943,25 +2248,30 @@ export function InfiniteCanvasBoard({
               return (
                 <g key={edge.id}>
                   <path
+                    data-canvas-edge="true"
                     d={edgePath}
                     fill="transparent"
                     stroke={isSelectedEdge ? "rgba(37,99,235,0.92)" : "url(#edgeGradient)"}
                     strokeWidth={isSelectedEdge ? "4" : "2.5"}
                   />
                   <path
+                    data-canvas-edge="true"
                     d={edgePath}
                     fill="transparent"
                     stroke="transparent"
                     strokeWidth="20"
                     onClick={() => {
                       setSelectedNodeId(null);
+                      setSelectedNodeIds([]);
                       setSelectedEdgeId(edge.id);
                     }}
                   />
                   <g
+                    data-canvas-edge="true"
                     className={cn(canEdit ? "cursor-pointer" : undefined)}
                     onClick={() => {
                       setSelectedNodeId(null);
+                      setSelectedNodeIds([]);
                       setSelectedEdgeId(edge.id);
                     }}
                   >
@@ -2037,6 +2347,18 @@ export function InfiniteCanvasBoard({
             </div>
           ) : null}
 
+          {normalizedSelectionRect ? (
+            <div
+              className="pointer-events-none absolute z-10 border border-primary/50 bg-primary/10"
+              style={{
+                left: normalizedSelectionRect.left,
+                top: normalizedSelectionRect.top,
+                width: normalizedSelectionRect.width,
+                height: normalizedSelectionRect.height,
+              }}
+            />
+          ) : null}
+
           {pendingConnectionSourceNode ? (
             <div className="pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
               <div className="rounded-full border border-primary/20 bg-background/96 px-4 py-2 text-xs text-foreground shadow-sm">
@@ -2093,6 +2415,7 @@ export function InfiniteCanvasBoard({
                 effectiveSelectedNodeId={effectiveSelectedNodeId}
                 imagePreviewDimensions={imagePreviewDimensions}
                 isCoolingDown={textGenerateCooldown.nodeId === node.id && Date.now() < textGenerateCooldown.expiresAt}
+                isSelected={effectiveSelectedNodeIds.includes(node.id)}
                 isSavingTextNodeTitle={isSavingTextNodeTitle}
                 latestTask={latestTask}
                 node={node}
@@ -2119,10 +2442,11 @@ export function InfiniteCanvasBoard({
                   void saveTextNodeTitle(nodeId);
                 }}
                 onSelectStoryboardShot={(nodeId, shotIndex) => {
+                  setSelectedNodeIds([nodeId]);
                   setSelectedNodeId(nodeId);
                   setSelectedStoryboardShotIndex(shotIndex);
                 }}
-                onSelectNode={setSelectedNodeId}
+                onSelectNode={handleSelectNode}
                 onStartDrag={startNodeDrag}
                 onStartEditingTitle={(nodeId, title) => {
                   setEditingTextNodeTitleId(nodeId);

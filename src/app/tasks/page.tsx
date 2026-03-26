@@ -2,7 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
-import { listTasks } from "@/application/services/task-service";
+import { listNodeRunBatches, listTasks } from "@/application/services/task-service";
 import { Badge } from "@/components/ui/badge";
 
 type TaskCenterPageProps = {
@@ -64,7 +64,7 @@ function surfaceClassName(compact = false) {
 }
 
 function statusTone(status: string) {
-  if (status === "failed") {
+  if (status === "failed" || status === "partial_failed") {
     return "bg-[#fff1f1] text-[#b42318]";
   }
 
@@ -217,6 +217,12 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
         status: activeStatus as "queued" | "processing" | "succeeded" | "failed" | "canceled" | undefined,
         taskType: activeTaskType as "text" | "image" | "video" | "audio" | "storyboard" | undefined,
         limit: 100,
+      })
+    : [];
+  const batchRuns = activeWorkspaceId
+    ? await listNodeRunBatches({
+        workspaceId: activeWorkspaceId,
+        limit: 30,
       })
     : [];
 
@@ -394,6 +400,91 @@ export default async function TaskCenterPage({ searchParams }: TaskCenterPagePro
               </div>
 
               <div className="px-5 py-5 sm:px-6">
+                <div className={surfaceClassName()}>
+                  <div className="flex flex-col gap-3 border-b border-black/5 pb-5 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">批量运行记录</p>
+                        <Badge variant="outline" className="border-black/8 bg-white text-foreground">
+                          {batchRuns.length}
+                        </Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">查看单节点批量运行和多节点成组运行，并直接下载每轮结果归档。</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 space-y-3">
+                    {batchRuns.length === 0 ? (
+                      <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-8 text-sm text-muted-foreground">
+                        当前空间还没有批量运行记录。
+                      </div>
+                    ) : (
+                      batchRuns.map((batchRun) => (
+                        <div key={batchRun.id} className="rounded-[20px] border border-black/5 bg-[#fcfcfd] p-4 sm:p-5">
+                          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="min-w-0 space-y-3">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`rounded-full px-2.5 py-1 text-xs ${statusTone(batchRun.status)}`}>
+                                  {batchRun.status === "partial_failed" ? "部分失败" : statusLabel[batchRun.status as keyof typeof statusLabel] ?? batchRun.status}
+                                </span>
+                                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-xs text-muted-foreground">
+                                  {batchRun.mode === "single_node" ? "单节点批量" : "多节点成组"}
+                                </span>
+                              </div>
+                              <div className="space-y-1">
+                                <h3 className="font-medium text-foreground">
+                                  {Array.isArray(batchRun.selectedNodesJson) && batchRun.selectedNodesJson.length > 0
+                                    ? batchRun.selectedNodesJson
+                                        .map((node) =>
+                                          node && typeof node === "object" && "title" in node && typeof node.title === "string" ? node.title : "",
+                                        )
+                                        .filter(Boolean)
+                                        .slice(0, 4)
+                                        .join("、")
+                                    : "未命名节点组"}
+                                </h3>
+                                <p className="text-sm text-muted-foreground">
+                                  运行次数 {batchRun.requestedRunCount} · 节点执行 {batchRun.completedNodeRunCount} / {batchRun.totalNodeRunCount}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Link
+                                className={actionLinkClass(true)}
+                                href={`/api/tasks/batch-runs/${batchRun.id}/download?workspaceId=${activeWorkspaceId}`}
+                              >
+                                批量下载
+                              </Link>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                              <p className="text-xs text-muted-foreground">批量 ID</p>
+                              <p className="mt-2 truncate font-medium text-foreground">{batchRun.id}</p>
+                            </div>
+                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                              <p className="text-xs text-muted-foreground">成功 / 失败</p>
+                              <p className="mt-2 font-medium text-foreground">
+                                {batchRun.succeededNodeRunCount} / {batchRun.failedNodeRunCount}
+                              </p>
+                            </div>
+                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                              <p className="text-xs text-muted-foreground">创建于</p>
+                              <p className="mt-2 font-medium text-foreground">{formatDateTime(batchRun.createdAt)}</p>
+                            </div>
+                            <div className="rounded-[18px] border border-black/5 bg-white px-3 py-3">
+                              <p className="text-xs text-muted-foreground">更新于</p>
+                              <p className="mt-2 font-medium text-foreground">{formatDateTime(batchRun.updatedAt)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
                 <div className={surfaceClassName()}>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-1">

@@ -6,7 +6,18 @@ import { z } from "zod";
 
 import { createGeneratedAsset, listAssetsByOwner } from "@/application/services/asset-service";
 import { db } from "@/infrastructure/db/client";
-import { assets, canvasEdges, canvasNodes, canvases, generationTasks, instructionPresets, libraryItems, taskResults } from "@/infrastructure/db/schema";
+import {
+  assets,
+  canvasEdges,
+  canvasNodes,
+  canvases,
+  generationTasks,
+  instructionPresets,
+  libraryItems,
+  nodeRunBatches,
+  nodeRuns,
+  taskResults,
+} from "@/infrastructure/db/schema";
 import {
   generateImageWithCloubic,
   generateTextWithCloubic,
@@ -22,11 +33,14 @@ export const runNodeInputSchema = z.object({
   workspaceId: z.uuid(),
   canvasId: z.uuid(),
   nodeId: z.uuid(),
-  requestId: z.string().min(1, "request_id is required."),
+  actorUserId: z.uuid(),
+  requestId: z.string().min(1, "request_id is required.").max(100, "request_id is too long."),
   useUpstreamOutputs: z.boolean().default(true),
   mergeStrategy: runNodeMergeStrategySchema.default("merge_all"),
   upstreamNodeIds: z.array(z.uuid()).optional(),
   overrideSettings: z.record(z.string(), z.unknown()).default({}),
+  batchRunId: z.uuid().optional(),
+  batchRunIndex: z.coerce.number().int().positive().optional(),
 });
 
 export const getTaskInputSchema = z.object({
@@ -57,6 +71,25 @@ export const listTasksInputSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).optional(),
 });
 
+export const runNodeBatchInputSchema = z.object({
+  workspaceId: z.uuid(),
+  canvasId: z.uuid(),
+  actorUserId: z.uuid(),
+  nodeIds: z.array(z.uuid()).min(1).max(30),
+  runCount: z.coerce.number().int().positive().max(50),
+});
+
+export const listNodeRunBatchesInputSchema = z.object({
+  workspaceId: z.uuid(),
+  canvasId: z.uuid().optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
+
+export const getNodeRunBatchInputSchema = z.object({
+  workspaceId: z.uuid(),
+  batchRunId: z.uuid(),
+});
+
 const DEFAULT_STORYBOARD_TEMPLATE_FILE = "shotOutFormat.md";
 const DEFAULT_STORYBOARD_SHOT_COUNT = 6;
 const STORYBOARD_SYSTEM_PROMPT =
@@ -74,7 +107,7 @@ export const runLibraryItemImageGenerationInputSchema = z.object({
   actorUserId: z.uuid(),
   itemId: z.uuid(),
   itemKind: z.enum(["subject", "scene"]).optional(),
-  requestId: z.string().min(1, "request_id is required."),
+  requestId: z.string().min(1, "request_id is required.").max(100, "request_id is too long."),
   mode: z.enum(["text_to_image", "image_to_image"]).default("text_to_image"),
   instructionPresetId: z.uuid().optional(),
   prompt: z.string().trim().optional(),
@@ -113,6 +146,10 @@ function normalizeOutputContent(outputSnapshot: Record<string, unknown> | null) 
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function createBatchRunRequestId(batchRunId: string, runIndex: number, nodeId: string) {
+  return `br-${batchRunId.slice(0, 8)}-${runIndex}-${nodeId.slice(0, 8)}-${crypto.randomUUID().slice(0, 12)}`;
 }
 
 function buildLibraryItemGenerationPrompt(params: {
@@ -496,6 +533,100 @@ async function getNodeReferenceAssetMap(
   );
 }
 
+async function getCanvasNodesByIds(workspaceId: string, canvasId: string, nodeIds: string[]) {
+  if (nodeIds.length === 0) {
+    return [];
+  }
+
+  const records = await db
+    .select()
+    .from(canvasNodes)
+    .where(
+      and(
+        eq(canvasNodes.workspaceId, workspaceId),
+        eq(canvasNodes.canvasId, canvasId),
+        inArray(canvasNodes.id, nodeIds),
+      ),
+    );
+  const recordMap = new Map(records.map((node) => [node.id, node]));
+
+  return nodeIds
+    .map((nodeId) => recordMap.get(nodeId))
+    .filter((node): node is NonNullable<typeof node> => Boolean(node));
+}
+
+async function getCanvasEdgesForNodes(workspaceId: string, canvasId: string, nodeIds: string[]) {
+  if (nodeIds.length === 0) {
+    return [];
+  }
+
+  return db
+    .select()
+    .from(canvasEdges)
+    .where(
+      and(
+        eq(canvasEdges.workspaceId, workspaceId),
+        eq(canvasEdges.canvasId, canvasId),
+        inArray(canvasEdges.sourceNodeId, nodeIds),
+        inArray(canvasEdges.targetNodeId, nodeIds),
+      ),
+    )
+    .orderBy(asc(canvasEdges.priority), asc(canvasEdges.createdAt));
+}
+
+function sortNodesForBatchRun(
+  nodes: Array<{ id: string; title: string; type: string }>,
+  edges: Array<{ sourceNodeId: string; targetNodeId: string; priority: number }>,
+) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const incomingCount = new Map<string, number>(nodes.map((node) => [node.id, 0]));
+  const outgoingMap = new Map<string, Array<{ sourceNodeId: string; targetNodeId: string; priority: number }>>();
+
+  for (const edge of edges) {
+    incomingCount.set(edge.targetNodeId, (incomingCount.get(edge.targetNodeId) ?? 0) + 1);
+    const current = outgoingMap.get(edge.sourceNodeId) ?? [];
+    current.push(edge);
+    outgoingMap.set(edge.sourceNodeId, current);
+  }
+
+  const queue = nodes
+    .filter((node) => (incomingCount.get(node.id) ?? 0) === 0)
+    .sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+  const ordered: typeof nodes = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+
+    if (!current) {
+      break;
+    }
+
+    ordered.push(current);
+
+    const outgoingEdges = (outgoingMap.get(current.id) ?? []).sort((left, right) => left.priority - right.priority);
+
+    for (const edge of outgoingEdges) {
+      const nextIncoming = (incomingCount.get(edge.targetNodeId) ?? 0) - 1;
+      incomingCount.set(edge.targetNodeId, nextIncoming);
+
+      if (nextIncoming === 0) {
+        const nextNode = nodeMap.get(edge.targetNodeId);
+
+        if (nextNode) {
+          queue.push(nextNode);
+          queue.sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+        }
+      }
+    }
+  }
+
+  if (ordered.length !== nodes.length) {
+    throw new ApiError(409, "NODE_GRAPH_INVALID", "当前选中节点之间存在非法依赖，无法执行批量运行。");
+  }
+
+  return ordered;
+}
+
 async function buildExecutionPayload(
   node: Awaited<ReturnType<typeof assertNodeForRun>>,
   upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodes>>,
@@ -622,8 +753,98 @@ function getNextPollAt(delaySeconds = 10) {
   return new Date(Date.now() + delaySeconds * 1000);
 }
 
+async function refreshNodeRunBatchSummary(batchRunId: string) {
+  const batchNodeRuns = await db
+    .select({
+      status: nodeRuns.status,
+    })
+    .from(nodeRuns)
+    .where(eq(nodeRuns.batchRunId, batchRunId));
+
+  const totalNodeRunCount = batchNodeRuns.length;
+  const completedNodeRunCount = batchNodeRuns.filter((item) => item.status === "succeeded" || item.status === "failed").length;
+  const succeededNodeRunCount = batchNodeRuns.filter((item) => item.status === "succeeded").length;
+  const failedNodeRunCount = batchNodeRuns.filter((item) => item.status === "failed").length;
+  const status =
+    totalNodeRunCount === 0 || completedNodeRunCount < totalNodeRunCount
+      ? "processing"
+      : failedNodeRunCount === 0
+        ? "succeeded"
+        : succeededNodeRunCount === 0
+          ? "failed"
+          : "partial_failed";
+
+  await db
+    .update(nodeRunBatches)
+    .set({
+      status,
+      totalNodeRunCount,
+      completedNodeRunCount,
+      succeededNodeRunCount,
+      failedNodeRunCount,
+      updatedAt: new Date(),
+    })
+    .where(eq(nodeRunBatches.id, batchRunId));
+}
+
+async function updateNodeRunRecord(
+  nodeRunId: string | null | undefined,
+  payload: Partial<{
+    taskId: string | null;
+    status: string;
+    resultType: string | null;
+    contentText: string | null;
+    assetId: string | null;
+    resultMeta: Record<string, unknown>;
+    errorCode: string | null;
+    errorMessage: string | null;
+    startedAt: Date | null;
+    finishedAt: Date | null;
+  }>,
+) {
+  if (!nodeRunId) {
+    return;
+  }
+
+  await db
+    .update(nodeRuns)
+    .set({
+      taskId: payload.taskId,
+      status: payload.status,
+      resultType: payload.resultType,
+      contentText: payload.contentText,
+      assetId: payload.assetId,
+      resultMeta: payload.resultMeta,
+      errorCode: payload.errorCode,
+      errorMessage: payload.errorMessage,
+      startedAt: payload.startedAt,
+      finishedAt: payload.finishedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(nodeRuns.id, nodeRunId));
+
+  const [record] = await db
+    .select({
+      batchRunId: nodeRuns.batchRunId,
+    })
+    .from(nodeRuns)
+    .where(eq(nodeRuns.id, nodeRunId))
+    .limit(1);
+
+  if (record?.batchRunId) {
+    await refreshNodeRunBatchSummary(record.batchRunId);
+  }
+}
+
 async function persistTaskFailure(taskId: string, nodeId: string, code: string, message: string) {
   const finishedAt = new Date();
+  const [task] = await db
+    .select({
+      nodeRunId: generationTasks.nodeRunId,
+    })
+    .from(generationTasks)
+    .where(eq(generationTasks.id, taskId))
+    .limit(1);
 
   await db.transaction(async (tx) => {
     await tx
@@ -644,6 +865,17 @@ async function persistTaskFailure(taskId: string, nodeId: string, code: string, 
         updatedAt: finishedAt,
       })
       .where(eq(canvasNodes.id, nodeId));
+  });
+
+  await updateNodeRunRecord(task?.nodeRunId, {
+    status: "failed",
+    resultType: null,
+    contentText: null,
+    assetId: null,
+    resultMeta: {},
+    errorCode: code,
+    errorMessage: message,
+    finishedAt,
   });
 }
 
@@ -684,13 +916,14 @@ function assertTaskBelongsToWorkspace(task: Awaited<ReturnType<typeof getTaskRec
 async function executeTask(taskId: string) {
   const task = await getTaskRecord(taskId);
   const node = await getTaskNode(taskId, task.nodeId as string);
+  const startedAt = new Date();
 
   await db
     .update(generationTasks)
     .set({
       status: "processing",
-      startedAt: new Date(),
-      updatedAt: new Date(),
+      startedAt,
+      updatedAt: startedAt,
     })
     .where(eq(generationTasks.id, taskId));
 
@@ -701,6 +934,14 @@ async function executeTask(taskId: string) {
       updatedAt: new Date(),
     })
     .where(eq(canvasNodes.id, node.id));
+
+  await updateNodeRunRecord(task.nodeRunId, {
+    taskId: task.id,
+    status: "processing",
+    startedAt,
+    errorCode: null,
+    errorMessage: null,
+  });
 
   try {
     const requestPayload = task.requestPayload as Record<string, unknown>;
@@ -778,6 +1019,24 @@ async function executeTask(taskId: string) {
             updatedAt: finishedAt,
           })
           .where(eq(canvasNodes.id, node.id));
+      });
+
+      await updateNodeRunRecord(task.nodeRunId, {
+        taskId: task.id,
+        status: "succeeded",
+        resultType: isStoryboardTask ? "json" : "text",
+        contentText: output.content,
+        assetId: null,
+        resultMeta: {
+          provider: output.provider,
+          model: output.model,
+          usage: output.usage,
+          structuredData,
+          outputType: isStoryboardTask ? "storyboard" : "text",
+        },
+        errorCode: null,
+        errorMessage: null,
+        finishedAt,
       });
 
       return;
@@ -926,6 +1185,27 @@ async function executeTask(taskId: string) {
           .where(eq(canvasNodes.id, node.id));
       });
 
+      await updateNodeRunRecord(task.nodeRunId, {
+        taskId: task.id,
+        status: "succeeded",
+        resultType: "image",
+        contentText: output.markdown,
+        assetId: generatedAsset.id,
+        resultMeta: {
+          provider: output.provider,
+          model: output.model,
+          usage: output.usage,
+          imageUrl: generatedAsset.fileUrl,
+          sourceImageUrl: output.imageUrl,
+          assetId: generatedAsset.id,
+          storageKey: generatedAsset.storageKey,
+          referenceImages,
+        },
+        errorCode: null,
+        errorMessage: null,
+        finishedAt,
+      });
+
       return;
     }
 
@@ -997,6 +1277,23 @@ async function executeTask(taskId: string) {
           .where(eq(canvasNodes.id, node.id));
       });
 
+      await updateNodeRunRecord(task.nodeRunId, {
+        taskId: task.id,
+        status: output.status === "failed" ? "failed" : "processing",
+        resultType: null,
+        contentText: null,
+        assetId: null,
+        resultMeta: {
+          provider: output.provider,
+          model: output.model,
+          providerTaskId: output.providerTaskId,
+          submission: output.rawResponse,
+        },
+        errorCode: output.status === "failed" ? "VIDEO_SUBMIT_FAILED" : null,
+        errorMessage: output.status === "failed" ? "Video submission failed." : null,
+        finishedAt: output.status === "failed" ? updatedAt : null,
+      });
+
       return;
     }
 
@@ -1037,6 +1334,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
       taskId: existingTask[0].id,
       status: existingTask[0].status,
       requestId: existingTask[0].requestId,
+      batchRunId: existingTask[0].batchRunId,
     };
   }
 
@@ -1048,12 +1346,29 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
   const requestPayload = await buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
 
   const createdTask = await db.transaction(async (tx) => {
+    const [nodeRun] = await tx
+      .insert(nodeRuns)
+      .values({
+        workspaceId: parsed.workspaceId,
+        canvasId: parsed.canvasId,
+        nodeId: parsed.nodeId,
+        batchRunId: parsed.batchRunId ?? null,
+        requestId: parsed.requestId,
+        runIndex: parsed.batchRunIndex ?? null,
+        nodeType: node.type,
+        nodeTitle: node.title,
+        status: "queued",
+      })
+      .returning();
     const [task] = await tx
       .insert(generationTasks)
       .values({
         workspaceId: parsed.workspaceId,
         canvasId: parsed.canvasId,
         nodeId: parsed.nodeId,
+        nodeRunId: nodeRun.id,
+        batchRunId: parsed.batchRunId ?? null,
+        batchRunIndex: parsed.batchRunIndex ?? null,
         requestId: parsed.requestId,
         taskType: node.type,
         provider: "internal",
@@ -1077,6 +1392,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
       taskId: task.id,
       status: task.status,
       requestId: task.requestId,
+      batchRunId: task.batchRunId,
     };
   });
 
@@ -1096,6 +1412,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
     taskId: latestTask.id,
     status: latestTask.status,
     requestId: latestTask.requestId,
+    batchRunId: latestTask.batchRunId,
   };
 }
 
@@ -1249,6 +1566,27 @@ export async function runLibraryItemImageGeneration(
           updatedAt: finishedAt,
         })
         .where(eq(libraryItems.id, item.id));
+    });
+
+    await updateNodeRunRecord(task.nodeRunId, {
+      taskId: task.id,
+      status: "succeeded",
+      resultType: "image",
+      contentText: output.markdown,
+      assetId: generatedAsset.id,
+      resultMeta: {
+        provider: output.provider,
+        model: output.model,
+        usage: output.usage,
+        imageUrl: generatedAsset.fileUrl,
+        sourceImageUrl: output.imageUrl,
+        assetId: generatedAsset.id,
+        storageKey: generatedAsset.storageKey,
+        referenceImages,
+      },
+      errorCode: null,
+      errorMessage: null,
+      finishedAt,
     });
 
     return {
@@ -1450,6 +1788,21 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
       .where(eq(canvasNodes.id, node.id));
   });
 
+  await updateNodeRunRecord(task.nodeRunId, {
+    taskId: task.id,
+    status: "processing",
+    resultType: null,
+    contentText: null,
+    assetId: null,
+    resultMeta: {
+      ...(task.responsePayload as Record<string, unknown> | null),
+      poll: providerStatus.rawResponse,
+      progress: providerStatus.progress,
+    },
+    errorCode: null,
+    errorMessage: null,
+  });
+
   return {
     taskId: task.id,
     status: "processing" as const,
@@ -1518,6 +1871,19 @@ export async function retryTask(input: z.infer<typeof retryTaskInputSchema>) {
       .where(eq(canvasNodes.id, nodeId));
   });
 
+  await updateNodeRunRecord(task.nodeRunId, {
+    taskId: task.id,
+    status: "queued",
+    resultType: null,
+    contentText: null,
+    assetId: null,
+    resultMeta: {},
+    errorCode: null,
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+  });
+
   await executeTask(task.id);
 
   const latestTask = await getTaskRecord(task.id);
@@ -1571,6 +1937,157 @@ export async function listTasks(input: z.infer<typeof listTasksInputSchema>) {
     )
     .orderBy(desc(generationTasks.createdAt))
     .limit(limit);
+}
+
+export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema>) {
+  const parsed = runNodeBatchInputSchema.parse(input);
+  const uniqueNodeIds = uniqueStrings(parsed.nodeIds);
+  const selectedNodes = await getCanvasNodesByIds(parsed.workspaceId, parsed.canvasId, uniqueNodeIds);
+
+  if (selectedNodes.length !== uniqueNodeIds.length) {
+    throw new ApiError(404, "NODE_NOT_FOUND", "部分选中节点不存在或不属于当前画布。");
+  }
+
+  const nodeSummaries = selectedNodes.map((node) => ({
+    id: node.id,
+    title: node.title,
+    type: node.type,
+  }));
+  const selectedEdges = await getCanvasEdgesForNodes(parsed.workspaceId, parsed.canvasId, uniqueNodeIds);
+  const sortedNodes = sortNodesForBatchRun(nodeSummaries, selectedEdges);
+  const totalNodeRunCount = sortedNodes.length * parsed.runCount;
+  const mode = sortedNodes.length === 1 ? "single_node" : "group";
+  const [batchRun] = await db
+    .insert(nodeRunBatches)
+    .values({
+      workspaceId: parsed.workspaceId,
+      canvasId: parsed.canvasId,
+      createdBy: parsed.actorUserId,
+      mode,
+      status: "processing",
+      requestedRunCount: parsed.runCount,
+      totalNodeRunCount,
+      selectedNodesJson: sortedNodes,
+    })
+    .returning();
+
+  const items = [];
+
+  for (let runIndex = 1; runIndex <= parsed.runCount; runIndex += 1) {
+    for (const node of sortedNodes) {
+      const task = await runNode({
+        workspaceId: parsed.workspaceId,
+        canvasId: parsed.canvasId,
+        nodeId: node.id,
+        actorUserId: parsed.actorUserId,
+        requestId: createBatchRunRequestId(batchRun.id, runIndex, node.id),
+        useUpstreamOutputs: true,
+        mergeStrategy: "merge_all",
+        overrideSettings: {},
+        batchRunId: batchRun.id,
+        batchRunIndex: runIndex,
+      });
+
+      items.push({
+        nodeId: node.id,
+        nodeTitle: node.title,
+        taskId: task.taskId,
+        status: task.status,
+        runIndex,
+      });
+    }
+  }
+
+  await refreshNodeRunBatchSummary(batchRun.id);
+
+  const [latestBatchRun] = await db
+    .select()
+    .from(nodeRunBatches)
+    .where(eq(nodeRunBatches.id, batchRun.id))
+    .limit(1);
+
+  return {
+    id: batchRun.id,
+    mode,
+    runCount: parsed.runCount,
+    nodeCount: sortedNodes.length,
+    status: latestBatchRun?.status ?? "processing",
+    totalNodeRunCount,
+    items,
+  };
+}
+
+export async function listNodeRunBatches(input: z.infer<typeof listNodeRunBatchesInputSchema>) {
+  const parsed = listNodeRunBatchesInputSchema.parse(input);
+  const limit = parsed.limit ?? 20;
+
+  return db
+    .select()
+    .from(nodeRunBatches)
+    .where(
+      and(
+        eq(nodeRunBatches.workspaceId, parsed.workspaceId),
+        parsed.canvasId ? eq(nodeRunBatches.canvasId, parsed.canvasId) : undefined,
+      ),
+    )
+    .orderBy(desc(nodeRunBatches.createdAt))
+    .limit(limit);
+}
+
+export async function getNodeRunBatch(input: z.infer<typeof getNodeRunBatchInputSchema>) {
+  const parsed = getNodeRunBatchInputSchema.parse(input);
+  const [batchRun] = await db
+    .select()
+    .from(nodeRunBatches)
+    .where(
+      and(
+        eq(nodeRunBatches.id, parsed.batchRunId),
+        eq(nodeRunBatches.workspaceId, parsed.workspaceId),
+      ),
+    )
+    .limit(1);
+
+  if (!batchRun) {
+    throw new ApiError(404, "BATCH_RUN_NOT_FOUND", "批量运行记录不存在。");
+  }
+
+  const runs = await db
+    .select({
+      id: nodeRuns.id,
+      nodeId: nodeRuns.nodeId,
+      taskId: nodeRuns.taskId,
+      requestId: nodeRuns.requestId,
+      runIndex: nodeRuns.runIndex,
+      nodeType: nodeRuns.nodeType,
+      nodeTitle: nodeRuns.nodeTitle,
+      status: nodeRuns.status,
+      resultType: nodeRuns.resultType,
+      contentText: nodeRuns.contentText,
+      assetId: nodeRuns.assetId,
+      resultMeta: nodeRuns.resultMeta,
+      errorCode: nodeRuns.errorCode,
+      errorMessage: nodeRuns.errorMessage,
+      startedAt: nodeRuns.startedAt,
+      finishedAt: nodeRuns.finishedAt,
+      createdAt: nodeRuns.createdAt,
+      assetFileName: assets.fileName,
+      assetFileUrl: assets.fileUrl,
+      assetMimeType: assets.mimeType,
+    })
+    .from(nodeRuns)
+    .leftJoin(assets, eq(assets.id, nodeRuns.assetId))
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, parsed.workspaceId),
+        eq(nodeRuns.batchRunId, parsed.batchRunId),
+      ),
+    )
+    .orderBy(asc(nodeRuns.runIndex), asc(nodeRuns.createdAt));
+
+  return {
+    ...batchRun,
+    runs,
+  };
 }
 
 export async function pollDueVideoTasks(input: z.infer<typeof pollDueTasksInputSchema> = {}) {
