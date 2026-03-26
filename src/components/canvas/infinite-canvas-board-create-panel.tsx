@@ -41,6 +41,7 @@ type InfiniteCanvasBoardCreatePanelProps = {
   hasSelectedNode: boolean;
   selectedNodeCount: number;
   selectedNodeTitles: string[];
+  hasGroupedSelection: boolean;
   batchRunCount: number;
   isBatchRunning: boolean;
   subjects: LibraryItemOption[];
@@ -54,7 +55,9 @@ type InfiniteCanvasBoardCreatePanelProps = {
   onZoomOut: () => void;
   onZoomIn: () => void;
   onBatchRunCountChange: (value: number) => void;
+  onGroupSelectedNodes: () => void;
   onRunSelectedNodes: () => void;
+  onUngroupSelectedNodes: () => void;
 };
 
 type ResourceLauncherCardProps = {
@@ -313,6 +316,7 @@ export function InfiniteCanvasBoardCreatePanel({
   hasSelectedNode,
   selectedNodeCount,
   selectedNodeTitles,
+  hasGroupedSelection,
   batchRunCount,
   isBatchRunning,
   subjects,
@@ -326,7 +330,9 @@ export function InfiniteCanvasBoardCreatePanel({
   onZoomOut,
   onZoomIn,
   onBatchRunCountChange,
+  onGroupSelectedNodes,
   onRunSelectedNodes,
+  onUngroupSelectedNodes,
 }: InfiniteCanvasBoardCreatePanelProps) {
   const [activeResourceModal, setActiveResourceModal] = useState<ResourceModalKind | null>(null);
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
@@ -447,6 +453,24 @@ export function InfiniteCanvasBoardCreatePanel({
                 : "单击节点直接选中，⌘ / Ctrl / Shift 点击可追加成组批量运行。"}
             </div>
           </div>
+        ) : null}
+        {canEdit && selectedNodeCount > 1 ? (
+          <button
+            className="rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-muted"
+            type="button"
+            onClick={onGroupSelectedNodes}
+          >
+            组合选中
+          </button>
+        ) : null}
+        {canEdit && hasGroupedSelection ? (
+          <button
+            className="rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-muted"
+            type="button"
+            onClick={onUngroupSelectedNodes}
+          >
+            解散组合
+          </button>
         ) : null}
         <Link
           className="rounded-full border bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-muted"
@@ -629,7 +653,13 @@ export function InfiniteCanvasBoardCreatePanel({
         {selectedNodeCount > 1 ? (
           <>
             <span>·</span>
-            <span>分组 {selectedNodeCount}</span>
+            <span>{hasGroupedSelection ? "可拖组合框整体移动" : `待组合 ${selectedNodeCount}`}</span>
+          </>
+        ) : null}
+        {hasGroupedSelection ? (
+          <>
+            <span>·</span>
+            <span>拖节点出框可移出组合</span>
           </>
         ) : null}
         <span>·</span>

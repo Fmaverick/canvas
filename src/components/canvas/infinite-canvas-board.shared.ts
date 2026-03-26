@@ -166,6 +166,7 @@ export const VIDEO_NODE_HEIGHT = 180;
 export const MIN_ZOOM = 0.6;
 export const MAX_ZOOM = 1.8;
 export const TEXT_GENERATE_COOLDOWN_MS = 4000;
+export const CANVAS_NODE_GROUP_SETTINGS_KEY = "groupId";
 
 export const DEFAULT_VIDEO_NODE_SETTINGS: VideoNodeSettings = {
   generationMode: "reference",
@@ -293,6 +294,59 @@ export function canCanvasNodeReceiveConnection(nodeType: string) {
 
 export function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+export function getCanvasNodeDimensions(
+  node: Pick<CanvasNode, "type" | "referenceAssets">,
+  imagePreviewDimensions?: { width: number; height: number } | null,
+) {
+  const imageNodeSize = getImageNodeSize(imagePreviewDimensions);
+
+  return {
+    width:
+      node.type === "text"
+        ? TEXT_NODE_SIZE
+        : node.type === "storyboard"
+          ? STORYBOARD_NODE_WIDTH
+          : node.type === "image"
+            ? imageNodeSize.width
+            : node.type === "video"
+              ? VIDEO_NODE_WIDTH
+              : NODE_WIDTH,
+    height:
+      node.type === "text"
+        ? TEXT_NODE_SIZE
+        : node.type === "storyboard"
+          ? STORYBOARD_NODE_HEIGHT
+          : node.type === "image"
+            ? imageNodeSize.height
+            : node.type === "video"
+              ? VIDEO_NODE_HEIGHT
+              : NODE_HEIGHT,
+  };
+}
+
+export function getCanvasNodeGroupId(settingsJson: Record<string, unknown> | null | undefined) {
+  const groupId = settingsJson?.[CANVAS_NODE_GROUP_SETTINGS_KEY];
+
+  return typeof groupId === "string" && groupId.trim().length > 0 ? groupId.trim() : null;
+}
+
+export function setCanvasNodeGroupId(
+  settingsJson: Record<string, unknown> | null | undefined,
+  groupId: string | null,
+) {
+  const nextSettings = settingsJson ? { ...settingsJson } : {};
+
+  if (groupId && groupId.trim().length > 0) {
+    nextSettings[CANVAS_NODE_GROUP_SETTINGS_KEY] = groupId.trim();
+
+    return nextSettings;
+  }
+
+  delete nextSettings[CANVAS_NODE_GROUP_SETTINGS_KEY];
+
+  return Object.keys(nextSettings).length > 0 ? nextSettings : null;
 }
 
 export function normalizeVideoNodeSettings(

@@ -32,17 +32,11 @@ import {
   GRID_MINOR_SIZE,
   MAX_ZOOM,
   MIN_ZOOM,
-  NODE_HEIGHT,
-  NODE_WIDTH,
   TEXT_GENERATE_COOLDOWN_MS,
-  TEXT_NODE_SIZE,
-  STORYBOARD_NODE_HEIGHT,
-  STORYBOARD_NODE_WIDTH,
-  VIDEO_NODE_HEIGHT,
-  VIDEO_NODE_WIDTH,
   getCanvasConnectionLabel,
   getCanvasConnectionSemantic,
-  getImageNodeSize,
+  getCanvasNodeDimensions,
+  getCanvasNodeGroupId,
   getImageNodeOutputSource,
   getManagedVideoAssetIds,
   getPersistedVideoNodeSettings,
@@ -61,6 +55,7 @@ import {
   quickCreateOptions,
   serializeStoryboardNodeSettings,
   serializeVideoNodeSettings,
+  setCanvasNodeGroupId,
   triggerDownload,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
@@ -150,6 +145,32 @@ export function InfiniteCanvasBoard({
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const buildNodeSettingsPayload = useCallback(
+    (node: CanvasNode, settingsJson: Record<string, unknown> | null) =>
+      setCanvasNodeGroupId(settingsJson, getCanvasNodeGroupId(node.settingsJson)),
+    [],
+  );
+  const nodeGroupIdByNode = useMemo(
+    () => new Map(nodes.map((node) => [node.id, getCanvasNodeGroupId(node.settingsJson)])),
+    [nodes],
+  );
+  const groupNodeIdsMap = useMemo(() => {
+    const nextGroups = new Map<string, string[]>();
+
+    for (const node of nodes) {
+      const groupId = getCanvasNodeGroupId(node.settingsJson);
+
+      if (!groupId) {
+        continue;
+      }
+
+      const memberIds = nextGroups.get(groupId) ?? [];
+      memberIds.push(node.id);
+      nextGroups.set(groupId, memberIds);
+    }
+
+    return nextGroups;
+  }, [nodes]);
 
   const latestTaskByNode = useMemo(() => {
     const taskMap = new Map<string, (typeof tasks)[number]>();
@@ -199,6 +220,17 @@ export function InfiniteCanvasBoard({
     .map((nodeId) => nodeById.get(nodeId))
     .filter((node): node is CanvasNode => Boolean(node));
   const selectedNodeTitles = selectedNodes.map((node) => node.title);
+  const selectedGroupIds = Array.from(
+    new Set(
+      effectiveSelectedNodeIds
+        .map((nodeId) => nodeGroupIdByNode.get(nodeId))
+        .filter((groupId): groupId is string => typeof groupId === "string"),
+    ),
+  );
+  const groupedSelectionId = selectedGroupIds.length === 1 ? selectedGroupIds[0] : null;
+  const groupedSelectionNodeIds = groupedSelectionId ? groupNodeIdsMap.get(groupedSelectionId) ?? [] : [];
+  const hasGroupedSelection =
+    Boolean(groupedSelectionId) && groupedSelectionNodeIds.every((nodeId) => effectiveSelectedNodeIds.includes(nodeId));
   const hasRunningSelectedNode = selectedNodes.some((node) => {
     const latestTask = latestTaskByNode.get(node.id);
 
@@ -478,14 +510,13 @@ export function InfiniteCanvasBoard({
     [camera.x, camera.y, viewportSize.height, viewportSize.width, zoom],
   );
 
-  const nodeScreenBounds = useMemo(() => {
+  const nodeWorldBounds = useMemo(() => {
     return new Map(
       nodes.map((node) => {
         const position = nodePositionMap.get(node.id) ?? {
           x: Number.parseFloat(node.positionX || "0"),
           y: Number.parseFloat(node.positionY || "0"),
         };
-        const screenPoint = getScreenPoint(position.x, position.y);
         const imagePreviewDimensions =
           imagePreviewSizes[node.id] ??
           (node.referenceAssets?.[0]?.width && node.referenceAssets?.[0]?.height
@@ -494,40 +525,97 @@ export function InfiniteCanvasBoard({
                 height: node.referenceAssets[0].height,
               }
             : null);
-        const imageNodeSize = getImageNodeSize(imagePreviewDimensions);
-        const width =
-          node.type === "text"
-            ? TEXT_NODE_SIZE
-            : node.type === "storyboard"
-              ? STORYBOARD_NODE_WIDTH
-              : node.type === "image"
-                ? imageNodeSize.width
-                : node.type === "video"
-                  ? VIDEO_NODE_WIDTH
-                  : NODE_WIDTH;
-        const height =
-          node.type === "text"
-            ? TEXT_NODE_SIZE
-            : node.type === "storyboard"
-              ? STORYBOARD_NODE_HEIGHT
-              : node.type === "image"
-                ? imageNodeSize.height
-                : node.type === "video"
-                  ? VIDEO_NODE_HEIGHT
-                  : NODE_HEIGHT;
+        const dimensions = getCanvasNodeDimensions(node, imagePreviewDimensions);
 
         return [
           node.id,
           {
-            left: screenPoint.x - (width * zoom) / 2,
-            right: screenPoint.x + (width * zoom) / 2,
-            top: screenPoint.y - (height * zoom) / 2,
-            bottom: screenPoint.y + (height * zoom) / 2,
+            left: position.x - dimensions.width / 2,
+            right: position.x + dimensions.width / 2,
+            top: position.y - dimensions.height / 2,
+            bottom: position.y + dimensions.height / 2,
           },
         ];
       }),
     );
-  }, [getScreenPoint, imagePreviewSizes, nodePositionMap, nodes, zoom]);
+  }, [imagePreviewSizes, nodePositionMap, nodes]);
+
+  const nodeScreenBounds = useMemo(() => {
+    return new Map(
+      Array.from(nodeWorldBounds.entries()).map(([nodeId, bounds]) => {
+        const topLeft = getScreenPoint(bounds.left, bounds.top);
+        const bottomRight = getScreenPoint(bounds.right, bounds.bottom);
+
+        return [
+          nodeId,
+          {
+            left: topLeft.x,
+            right: bottomRight.x,
+            top: topLeft.y,
+            bottom: bottomRight.y,
+          },
+        ];
+      }),
+    );
+  }, [getScreenPoint, nodeWorldBounds]);
+  const getGroupedWorldBounds = useCallback(
+    (nodeIds: string[]) => {
+      const groupedBounds = nodeIds
+        .map((nodeId) => nodeWorldBounds.get(nodeId))
+        .filter((bounds): bounds is NonNullable<typeof nodeWorldBounds extends Map<string, infer TValue> ? TValue : never> =>
+          Boolean(bounds),
+        );
+
+      if (groupedBounds.length === 0) {
+        return null;
+      }
+
+      return groupedBounds.reduce(
+        (accumulator, bounds) => ({
+          left: Math.min(accumulator.left, bounds.left),
+          right: Math.max(accumulator.right, bounds.right),
+          top: Math.min(accumulator.top, bounds.top),
+          bottom: Math.max(accumulator.bottom, bounds.bottom),
+        }),
+        {
+          left: groupedBounds[0].left,
+          right: groupedBounds[0].right,
+          top: groupedBounds[0].top,
+          bottom: groupedBounds[0].bottom,
+        },
+      );
+    },
+    [nodeWorldBounds],
+  );
+  const groupLayouts = useMemo(() => {
+    return Array.from(groupNodeIdsMap.entries())
+      .map(([groupId, nodeIds]) => {
+        if (nodeIds.length < 2) {
+          return null;
+        }
+
+        const worldBounds = getGroupedWorldBounds(nodeIds);
+
+        if (!worldBounds) {
+          return null;
+        }
+
+        const padding = 36;
+        const topLeft = getScreenPoint(worldBounds.left - padding, worldBounds.top - padding);
+        const bottomRight = getScreenPoint(worldBounds.right + padding, worldBounds.bottom + padding);
+
+        return {
+          id: groupId,
+          nodeIds,
+          left: topLeft.x,
+          top: topLeft.y,
+          width: bottomRight.x - topLeft.x,
+          height: bottomRight.y - topLeft.y,
+          isFullySelected: nodeIds.every((nodeId) => effectiveSelectedNodeIds.includes(nodeId)),
+        };
+      })
+      .filter((group): group is NonNullable<typeof group> => Boolean(group));
+  }, [effectiveSelectedNodeIds, getGroupedWorldBounds, getScreenPoint, groupNodeIdsMap]);
 
   const getLocalScreenPoint = useCallback((clientX: number, clientY: number) => {
     if (!containerRef.current) {
@@ -589,19 +677,27 @@ export function InfiniteCanvasBoard({
     });
   }, []);
 
-  const persistNodePosition = useCallback(
-    async (nodeId: string, x: number, y: number) => {
-      setSavingNodeId(nodeId);
+  const persistNodePositions = useCallback(
+    async (updates: Array<{ nodeId: string; x: number; y: number }>) => {
+      if (updates.length === 0) {
+        return;
+      }
+
+      setSavingNodeId(updates.length === 1 ? updates[0].nodeId : "group");
 
       try {
-        await patchCanvasNode(
-          apiContext,
-          nodeId,
-          {
-            positionX: Math.round(x),
-            positionY: Math.round(y),
-          },
-          "节点位置保存失败。",
+        await Promise.all(
+          updates.map(({ nodeId, x, y }) =>
+            patchCanvasNode(
+              apiContext,
+              nodeId,
+              {
+                positionX: Math.round(x),
+                positionY: Math.round(y),
+              },
+              "节点位置保存失败。",
+            ),
+          ),
         );
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "节点位置保存失败。");
@@ -610,6 +706,55 @@ export function InfiniteCanvasBoard({
       }
     },
     [apiContext],
+  );
+  const persistNodePosition = useCallback(
+    async (nodeId: string, x: number, y: number) => {
+      await persistNodePositions([{ nodeId, x, y }]);
+    },
+    [persistNodePositions],
+  );
+  const updateNodeGroupAssignments = useCallback(
+    async (
+      updates: Array<{ nodeId: string; groupId: string | null }>,
+      successMessage: string,
+      fallbackMessage = "节点组合保存失败。",
+    ) => {
+      const dedupedUpdates = Array.from(new Map(updates.map((update) => [update.nodeId, update.groupId])).entries())
+        .map(([nodeId, groupId]) => {
+          const targetNode = nodeById.get(nodeId);
+
+          return targetNode ? { node: targetNode, groupId } : null;
+        })
+        .filter((item): item is { node: CanvasNode; groupId: string | null } => Boolean(item));
+
+      if (dedupedUpdates.length === 0) {
+        return false;
+      }
+
+      try {
+        await Promise.all(
+          dedupedUpdates.map(({ node, groupId }) =>
+            patchCanvasNode(
+              apiContext,
+              node.id,
+              {
+                settingsJson: setCanvasNodeGroupId(node.settingsJson, groupId),
+              },
+              fallbackMessage,
+            ),
+          ),
+        );
+        toast.success(successMessage);
+        router.refresh();
+
+        return true;
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : fallbackMessage);
+
+        return false;
+      }
+    },
+    [apiContext, nodeById, router],
   );
 
   const clearPendingConnection = useCallback(() => {
@@ -645,6 +790,195 @@ export function InfiniteCanvasBoard({
       setSelectedNodeId(nodeId);
     },
     [effectiveSelectedNodeIds],
+  );
+  const handleSelectGroup = useCallback(
+    (groupId: string) => {
+      const memberIds = groupNodeIdsMap.get(groupId) ?? [];
+
+      if (memberIds.length === 0) {
+        return;
+      }
+
+      setSelectedEdgeId(null);
+      setSelectedNodeIds(memberIds);
+      setSelectedNodeId(memberIds[memberIds.length - 1] ?? null);
+    },
+    [groupNodeIdsMap],
+  );
+  const handleGroupSelectedNodes = useCallback(async () => {
+    if (!canEdit || effectiveSelectedNodeIds.length < 2) {
+      return;
+    }
+
+    const nextGroupId = `group-${crypto.randomUUID()}`;
+    const nextUpdates: Array<{ nodeId: string; groupId: string | null }> = effectiveSelectedNodeIds.map((nodeId) => ({
+      nodeId,
+      groupId: nextGroupId,
+    }));
+
+    for (const groupId of selectedGroupIds) {
+      const remainingMemberIds = (groupNodeIdsMap.get(groupId) ?? []).filter(
+        (nodeId) => !effectiveSelectedNodeIds.includes(nodeId),
+      );
+
+      if (remainingMemberIds.length < 2) {
+        nextUpdates.push(...remainingMemberIds.map((nodeId) => ({ nodeId, groupId: null })));
+      }
+    }
+
+    const applied = await updateNodeGroupAssignments(nextUpdates, "已创建组合，拖动组合标签即可整体移动。");
+
+    if (applied) {
+      setSelectedNodeIds(effectiveSelectedNodeIds);
+      setSelectedNodeId(effectiveSelectedNodeIds[effectiveSelectedNodeIds.length - 1] ?? null);
+    }
+  }, [canEdit, effectiveSelectedNodeIds, groupNodeIdsMap, selectedGroupIds, updateNodeGroupAssignments]);
+  const handleUngroupSelectedNodes = useCallback(async () => {
+    const groupedNodeIds = effectiveSelectedNodeIds.filter((nodeId) => nodeGroupIdByNode.get(nodeId));
+
+    if (groupedNodeIds.length === 0) {
+      return;
+    }
+
+    const nextUpdates: Array<{ nodeId: string; groupId: string | null }> = groupedNodeIds.map((nodeId) => ({
+      nodeId,
+      groupId: null,
+    }));
+    const affectedGroupIds = Array.from(
+      new Set(groupedNodeIds.map((nodeId) => nodeGroupIdByNode.get(nodeId)).filter((groupId): groupId is string => Boolean(groupId))),
+    );
+
+    for (const groupId of affectedGroupIds) {
+      const remainingMemberIds = (groupNodeIdsMap.get(groupId) ?? []).filter((nodeId) => !groupedNodeIds.includes(nodeId));
+
+      if (remainingMemberIds.length < 2) {
+        nextUpdates.push(...remainingMemberIds.map((nodeId) => ({ nodeId, groupId: null })));
+      }
+    }
+
+    await updateNodeGroupAssignments(
+      nextUpdates,
+      groupedNodeIds.length === 1 ? "节点已移出组合。" : "组合已解散。",
+    );
+  }, [effectiveSelectedNodeIds, groupNodeIdsMap, nodeGroupIdByNode, updateNodeGroupAssignments]);
+  const maybeRemoveNodeFromGroup = useCallback(
+    async (nodeId: string, groupId: string, finalPosition: { x: number; y: number }) => {
+      const remainingMemberIds = (groupNodeIdsMap.get(groupId) ?? []).filter((memberId) => memberId !== nodeId);
+
+      if (remainingMemberIds.length === 0) {
+        await updateNodeGroupAssignments([{ nodeId, groupId: null }], "节点已移出组合。");
+
+        return;
+      }
+
+      const remainingBounds = getGroupedWorldBounds(remainingMemberIds);
+
+      if (!remainingBounds) {
+        return;
+      }
+
+      const detachPadding = 24;
+      const isOutsideGroup =
+        finalPosition.x < remainingBounds.left - detachPadding ||
+        finalPosition.x > remainingBounds.right + detachPadding ||
+        finalPosition.y < remainingBounds.top - detachPadding ||
+        finalPosition.y > remainingBounds.bottom + detachPadding;
+
+      if (!isOutsideGroup) {
+        return;
+      }
+
+      const nextUpdates: Array<{ nodeId: string; groupId: string | null }> = [{ nodeId, groupId: null }];
+
+      if (remainingMemberIds.length === 1) {
+        nextUpdates.push({ nodeId: remainingMemberIds[0], groupId: null });
+      }
+
+      await updateNodeGroupAssignments(
+        nextUpdates,
+        remainingMemberIds.length === 1 ? "组合已自动解散。" : "节点已移出组合。",
+      );
+    },
+    [getGroupedWorldBounds, groupNodeIdsMap, updateNodeGroupAssignments],
+  );
+  const startGroupDrag = useCallback(
+    (groupId: string, clientX: number, clientY: number) => {
+      if (!canEdit) {
+        return;
+      }
+
+      const origin = getWorldPoint(clientX, clientY);
+      const memberIds = (groupNodeIdsMap.get(groupId) ?? []).filter((nodeId) => nodePositionMap.has(nodeId));
+
+      if (!origin || memberIds.length < 2) {
+        return;
+      }
+
+      const initialPositions = Object.fromEntries(
+        memberIds.map((nodeId) => {
+          const position = nodePositionMap.get(nodeId) ?? { x: 0, y: 0 };
+
+          return [nodeId, position];
+        }),
+      ) as Record<string, { x: number; y: number }>;
+
+      handleSelectGroup(groupId);
+      let moved = false;
+
+      const handlePointerMove = (event: PointerEvent) => {
+        const nextPoint = getWorldPoint(event.clientX, event.clientY);
+
+        if (!nextPoint) {
+          return;
+        }
+
+        moved = true;
+        const deltaX = nextPoint.x - origin.x;
+        const deltaY = nextPoint.y - origin.y;
+
+        setNodePositions((current) => {
+          const nextPositions = { ...current };
+
+          for (const nodeId of memberIds) {
+            const initialPosition = initialPositions[nodeId];
+            nextPositions[nodeId] = {
+              x: initialPosition.x + deltaX,
+              y: initialPosition.y + deltaY,
+            };
+          }
+
+          return nextPositions;
+        });
+      };
+
+      const handlePointerUp = async (event: PointerEvent) => {
+        const nextPoint = getWorldPoint(event.clientX, event.clientY);
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+
+        if (!nextPoint || !moved) {
+          return;
+        }
+
+        const deltaX = nextPoint.x - origin.x;
+        const deltaY = nextPoint.y - origin.y;
+        const updates = memberIds.map((nodeId) => ({
+          nodeId,
+          x: initialPositions[nodeId].x + deltaX,
+          y: initialPositions[nodeId].y + deltaY,
+        }));
+
+        setNodePositions((current) => ({
+          ...current,
+          ...Object.fromEntries(updates.map(({ nodeId, x, y }) => [nodeId, { x, y }])),
+        }));
+        await persistNodePositions(updates);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [canEdit, getWorldPoint, groupNodeIdsMap, handleSelectGroup, nodePositionMap, persistNodePositions],
   );
 
   const handleRunSelectedNodes = useCallback(async () => {
@@ -784,6 +1118,27 @@ export function InfiniteCanvasBoard({
 
       try {
         await deleteCanvasNode(apiContext, nodeId, "节点删除失败。");
+        const deletedGroupId = getCanvasNodeGroupId(deletingNode.settingsJson);
+
+        if (deletedGroupId) {
+          const remainingGroupNodeIds = (groupNodeIdsMap.get(deletedGroupId) ?? []).filter((memberId) => memberId !== nodeId);
+
+          if (remainingGroupNodeIds.length === 1) {
+            const remainingNode = nodeById.get(remainingGroupNodeIds[0]);
+
+            if (remainingNode) {
+              await patchCanvasNode(
+                apiContext,
+                remainingNode.id,
+                {
+                  settingsJson: setCanvasNodeGroupId(remainingNode.settingsJson, null),
+                },
+                "节点组合保存失败。",
+              );
+            }
+          }
+        }
+
         setSelectedNodeId(nextSelectedNodeId);
         setSelectedNodeIds((current) => {
           const nextNodeIds = current.filter((currentNodeId) => currentNodeId !== nodeId);
@@ -827,7 +1182,7 @@ export function InfiniteCanvasBoard({
         setDeletingNodeId(null);
       }
     },
-    [apiContext, editingTextNodeTitleId, effectiveSelectedNodeId, nodes, router],
+    [apiContext, editingTextNodeTitleId, effectiveSelectedNodeId, groupNodeIdsMap, nodeById, nodes, router],
   );
 
   const handleStartConnection = useCallback(
@@ -1518,7 +1873,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           resourceRefs: nextResourceRefs,
-          settingsJson: {
+          settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
             durationSec: persistedSettings.durationSec,
@@ -1529,7 +1884,7 @@ export function InfiniteCanvasBoard({
             lastFrameAssetId: persistedSettings.lastFrameAssetId,
             referenceAssetIds: persistedSettings.referenceAssetIds,
             shotPrompts: persistedSettings.shotPrompts,
-          },
+          }),
         },
         "视频节点参考图保存失败。",
       );
@@ -1591,7 +1946,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           resourceRefs: nextResourceRefs,
-          settingsJson: {
+          settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
             durationSec: persistedSettings.durationSec,
@@ -1602,7 +1957,7 @@ export function InfiniteCanvasBoard({
             lastFrameAssetId: persistedSettings.lastFrameAssetId,
             referenceAssetIds: persistedSettings.referenceAssetIds,
             shotPrompts: persistedSettings.shotPrompts,
-          },
+          }),
         },
         "移除视频参考图失败。",
       );
@@ -1648,7 +2003,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftPrompt,
-          settingsJson: serializeStoryboardNodeSettings(draftStoryboardSettings),
+          settingsJson: buildNodeSettingsPayload(selectedNode, serializeStoryboardNodeSettings(draftStoryboardSettings)),
         },
         "分镜节点配置保存失败。",
       );
@@ -1706,7 +2061,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftPrompt,
-          settingsJson: serializeStoryboardNodeSettings(draftStoryboardSettings),
+          settingsJson: buildNodeSettingsPayload(selectedNode, serializeStoryboardNodeSettings(draftStoryboardSettings)),
         },
         "分镜节点配置保存失败。",
       );
@@ -1795,7 +2150,7 @@ export function InfiniteCanvasBoard({
             instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
           },
-          settingsJson: {
+          settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
             durationSec: persistedSettings.durationSec,
@@ -1806,7 +2161,7 @@ export function InfiniteCanvasBoard({
             lastFrameAssetId: persistedSettings.lastFrameAssetId,
             referenceAssetIds: persistedSettings.referenceAssetIds,
             shotPrompts: persistedSettings.shotPrompts,
-          },
+          }),
         },
         "视频节点提示词保存失败。",
       );
@@ -1846,7 +2201,7 @@ export function InfiniteCanvasBoard({
             instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
           },
-          settingsJson: {
+          settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
             durationSec: persistedSettings.durationSec,
@@ -1857,7 +2212,7 @@ export function InfiniteCanvasBoard({
             lastFrameAssetId: persistedSettings.lastFrameAssetId,
             referenceAssetIds: persistedSettings.referenceAssetIds,
             shotPrompts: persistedSettings.shotPrompts,
-          },
+          }),
         },
         "视频提示词保存失败。",
       );
@@ -1992,6 +2347,7 @@ export function InfiniteCanvasBoard({
 
     setSelectedNodeIds([nodeId]);
     setSelectedNodeId(nodeId);
+    const sourceGroupId = nodeGroupIdByNode.get(nodeId) ?? null;
     const offsetX = boardPoint.x - position.x;
     const offsetY = boardPoint.y - position.y;
     let moved = false;
@@ -2034,6 +2390,13 @@ export function InfiniteCanvasBoard({
       }));
 
       await persistNodePosition(nodeId, finalX, finalY);
+
+      if (sourceGroupId) {
+        await maybeRemoveNodeFromGroup(nodeId, sourceGroupId, {
+          x: finalX,
+          y: finalY,
+        });
+      }
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -2071,6 +2434,7 @@ export function InfiniteCanvasBoard({
         canGenerate={canGenerate}
         batchRunCount={batchRunCount}
         edgeCount={edges.length}
+        hasGroupedSelection={hasGroupedSelection}
         hasSelectedNode={Boolean(selectedNode)}
         isBatchRunning={isBatchRunning}
         instructionPresets={instructionPresets}
@@ -2090,11 +2454,17 @@ export function InfiniteCanvasBoard({
         onCreateSubjectNode={(subject, selectedAssetId) => {
           void createNodeFromResource(subject, "subject", "image", selectedAssetId);
         }}
+        onGroupSelectedNodes={() => {
+          void handleGroupSelectedNodes();
+        }}
         onSelectQuickType={setQuickType}
         onRunSelectedNodes={() => {
           void handleRunSelectedNodes();
         }}
         onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
+        onUngroupSelectedNodes={() => {
+          void handleUngroupSelectedNodes();
+        }}
         onZoomIn={() => updateZoom(zoom + 0.1)}
         onZoomOut={() => updateZoom(zoom - 0.1)}
         quickType={quickType}
@@ -2358,6 +2728,56 @@ export function InfiniteCanvasBoard({
               }}
             />
           ) : null}
+
+          {groupLayouts.map((group) => (
+            <div
+              key={group.id}
+              className={cn(
+                "pointer-events-none absolute rounded-[32px] border-2 bg-sky-100/20",
+                group.isFullySelected ? "border-sky-500/70 shadow-[0_0_0_8px_rgba(14,165,233,0.08)]" : "border-sky-300/70",
+              )}
+              style={{
+                left: group.left,
+                top: group.top,
+                width: group.width,
+                height: group.height,
+              }}
+            >
+              <div className="pointer-events-auto absolute left-4 top-4 flex items-center gap-2">
+                <button
+                  className={cn(
+                    "rounded-full border bg-background/96 px-3 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-background",
+                    canEdit ? "cursor-grab active:cursor-grabbing" : undefined,
+                  )}
+                  type="button"
+                  onClick={() => handleSelectGroup(group.id)}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    startGroupDrag(group.id, event.clientX, event.clientY);
+                  }}
+                >
+                  {`组合 · ${group.nodeIds.length} 个节点`}
+                </button>
+                {canEdit ? (
+                  <button
+                    className="rounded-full border bg-background/96 px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm transition hover:bg-background"
+                    type="button"
+                    onClick={() => {
+                      setSelectedNodeIds(group.nodeIds);
+                      setSelectedNodeId(group.nodeIds[group.nodeIds.length - 1] ?? null);
+                      void updateNodeGroupAssignments(
+                        group.nodeIds.map((nodeId) => ({ nodeId, groupId: null })),
+                        "组合已解散。",
+                      );
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    解散
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ))}
 
           {pendingConnectionSourceNode ? (
             <div className="pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
