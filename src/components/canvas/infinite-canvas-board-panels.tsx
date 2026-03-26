@@ -11,6 +11,7 @@ import {
   DEFAULT_VIDEO_NODE_SETTINGS,
   clampNumber,
   inferImageExtension,
+  getStoryboardShotAssetNames,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
   type StoryboardShot,
@@ -107,6 +108,7 @@ type StoryboardNodePanelProps = {
   draftSettings: StoryboardNodeSettings;
   storyboardShots: StoryboardShot[];
   storyboardTotalDurationSec: number;
+  linkedImageCount: number;
   activeShotIndex: number;
   activeShotDraft: StoryboardShot | null;
   isSavingPrompt: boolean;
@@ -123,6 +125,7 @@ type StoryboardNodePanelProps = {
   onGenerate: () => void;
   onCreateVideoNode: () => void;
   onGenerateVideo: () => void;
+  onCreateAllShotVideoNodes: () => void;
   onCreateCurrentShotVideoNode: () => void;
   onGenerateCurrentShotVideo: () => void;
 };
@@ -135,6 +138,7 @@ export function StoryboardNodePanel({
   draftSettings,
   storyboardShots,
   storyboardTotalDurationSec,
+  linkedImageCount,
   activeShotIndex,
   activeShotDraft,
   isSavingPrompt,
@@ -151,10 +155,12 @@ export function StoryboardNodePanel({
   onGenerate,
   onCreateVideoNode,
   onGenerateVideo,
+  onCreateAllShotVideoNodes,
   onCreateCurrentShotVideoNode,
   onGenerateCurrentShotVideo,
 }: StoryboardNodePanelProps) {
   const hasShots = storyboardShots.length > 0;
+  const activeShotAssetNames = activeShotDraft ? getStoryboardShotAssetNames(activeShotDraft) : [];
 
   return (
     <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
@@ -163,7 +169,7 @@ export function StoryboardNodePanel({
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{selectedNode.title}</p>
             <p className="text-xs text-muted-foreground">
-              这里会按 shotOutFormat 模板输出结构化分镜 JSON，上游文本与分镜连线会自动拼进当前节点 prompt。
+              这里会按 shotOutFormat 模板输出结构化分镜 JSON，上游文本会自动拼进 prompt，连入图片时会优先使用图片节点里的文本描述来提炼资产。
             </p>
           </div>
           <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
@@ -210,7 +216,7 @@ export function StoryboardNodePanel({
                 </div>
               </div>
 
-              <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-3 md:grid-cols-4">
                 <div className="rounded-2xl border bg-background/70 px-3 py-3">
                   <div className="text-[11px] text-muted-foreground">目标镜头</div>
                   <div className="mt-1 text-lg font-semibold">{draftSettings.shotCount}</div>
@@ -223,10 +229,14 @@ export function StoryboardNodePanel({
                   <div className="text-[11px] text-muted-foreground">预估总时长</div>
                   <div className="mt-1 text-lg font-semibold">{storyboardTotalDurationSec > 0 ? `${storyboardTotalDurationSec}s` : "待生成"}</div>
                 </div>
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">已连图片</div>
+                  <div className="mt-1 text-lg font-semibold">{linkedImageCount}</div>
+                </div>
               </div>
 
               <div className="rounded-2xl border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。生成完成后可以直接创建分镜视频节点。
+                输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。生成完成后可以直接创建分镜视频节点，并自动继承已连接的图片节点。
               </div>
             </div>
           </div>
@@ -410,6 +420,18 @@ export function StoryboardNodePanel({
                       }
                     />
                   </label>
+                  {activeShotAssetNames.length > 0 ? (
+                    <div className="rounded-2xl border bg-background/80 px-3 py-3">
+                      <p className="text-xs text-muted-foreground">当前 Shot 提取资产</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {activeShotAssetNames.map((assetName) => (
+                          <span key={assetName} className="rounded-full border bg-muted/40 px-2.5 py-1 text-xs text-foreground">
+                            {assetName}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -472,7 +494,17 @@ export function StoryboardNodePanel({
                 onClick={onCreateVideoNode}
               >
                 <Clapperboard className="mr-1 size-4" />
-                {isCreatingVideoNode ? "创建中..." : "创建视频节点"}
+                {isCreatingVideoNode ? "创建中..." : "创建整段视频节点"}
+              </Button>
+              <Button
+                disabled={!hasShots || isCreatingVideoNode || !canEdit}
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={onCreateAllShotVideoNodes}
+              >
+                <Clapperboard className="mr-1 size-4" />
+                {isCreatingVideoNode ? "创建中..." : "一键创建所有 Shot"}
               </Button>
               <Button
                 disabled={!hasShots || isCreatingVideoNode || !canGenerate || !canEdit}

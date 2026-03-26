@@ -42,6 +42,7 @@ import {
   getPersistedVideoNodeSettings,
   getReferenceAssetById,
   getStoryboardRawShots,
+  getStoryboardShotAssetNames,
   getStoryboardShots,
   getStoryboardTotalDuration,
   getTextNodeContent,
@@ -283,6 +284,19 @@ export function InfiniteCanvasBoard({
   const selectedStoryboardTotalDurationSec = useMemo(
     () => (isStoryboardNodeSelected ? getStoryboardTotalDuration(selectedNode.outputSnapshot) : 0),
     [isStoryboardNodeSelected, selectedNode],
+  );
+  const getIncomingImageNodes = useCallback(
+    (targetNodeId: string) =>
+      edges
+        .filter((edge) => edge.targetNodeId === targetNodeId)
+        .sort((left, right) => left.priority - right.priority)
+        .map((edge) => nodeById.get(edge.sourceNodeId))
+        .filter((node): node is CanvasNode => Boolean(node && node.type === "image")),
+    [edges, nodeById],
+  );
+  const selectedStoryboardImageNodes = useMemo(
+    () => (selectedNode && selectedNode.type === "storyboard" ? getIncomingImageNodes(selectedNode.id) : []),
+    [getIncomingImageNodes, selectedNode],
   );
   const activeStoryboardShotIndex =
     selectedStoryboardShots.length > 0
@@ -1231,7 +1245,7 @@ export function InfiniteCanvasBoard({
       const semantic = getCanvasConnectionSemantic(sourceNode.type, targetNode.type);
 
       if (!semantic) {
-        toast.error("当前仅支持 文本/分镜→文本/分镜/图片/视频，图片→图片/视频。");
+        toast.error("当前仅支持 文本/分镜→文本/分镜/图片/视频，图片→分镜/图片/视频。");
         clearPendingConnection();
 
         return;
@@ -1369,7 +1383,12 @@ export function InfiniteCanvasBoard({
 
   function buildStoryboardVideoPrompt(sourceNode: CanvasNode, storyboardShots: StoryboardShot[]) {
     const shotDescriptions = storyboardShots.map((shot) =>
-      [`Shot ${shot.sequence}`, shot.sceneLabel, shot.description || shot.videoPrompt]
+      [
+        `Shot ${shot.sequence}`,
+        shot.sceneLabel,
+        shot.description || shot.videoPrompt,
+        getStoryboardShotAssetNames(shot).length > 0 ? `Assets: ${getStoryboardShotAssetNames(shot).join(", ")}` : null,
+      ]
         .filter((value): value is string => Boolean(value && value.trim()))
         .join(" · "),
     );
@@ -1400,6 +1419,7 @@ export function InfiniteCanvasBoard({
       shot.sceneLabel,
       shot.description,
       shot.videoPrompt,
+      getStoryboardShotAssetNames(shot).length > 0 ? `Assets: ${getStoryboardShotAssetNames(shot).join(", ")}` : null,
       shot.dialogue ? `Dialogue: ${shot.dialogue}` : null,
     ]
       .filter((value): value is string => Boolean(value && value.trim()))
@@ -1413,6 +1433,37 @@ export function InfiniteCanvasBoard({
       durationSec: Math.min(30, Math.max(1, shot.duration ?? 5)),
       shotPrompts: [shot.videoPrompt || shot.description].filter((value): value is string => Boolean(value && value.trim())),
     };
+  }
+
+  async function connectStoryboardSourceNodesToVideoNode(
+    storyboardNode: CanvasNode,
+    targetNodeId: string,
+    imageNodes: CanvasNode[],
+    errorMessage: string,
+  ) {
+    await createCanvasEdge(
+      apiContext,
+      {
+        sourceNodeId: storyboardNode.id,
+        targetNodeId,
+        mergeMode: "merge_all",
+        priority: 0,
+      },
+      errorMessage,
+    );
+
+    for (const [index, imageNode] of imageNodes.entries()) {
+      await createCanvasEdge(
+        apiContext,
+        {
+          sourceNodeId: imageNode.id,
+          targetNodeId,
+          mergeMode: "merge_all",
+          priority: index + 1,
+        },
+        errorMessage,
+      );
+    }
   }
 
   async function saveCurrentStoryboardShot() {
@@ -1492,6 +1543,7 @@ export function InfiniteCanvasBoard({
     try {
       const baseX = Number.parseFloat(selectedNode.positionX || "0");
       const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
       const createdNode = await createCanvasNode(
         apiContext,
         {
@@ -1512,16 +1564,7 @@ export function InfiniteCanvasBoard({
         throw new Error("Shot 视频节点创建成功，但未返回节点 ID。");
       }
 
-      await createCanvasEdge(
-        apiContext,
-        {
-          sourceNodeId: selectedNode.id,
-          targetNodeId: createdNodeId,
-          mergeMode: "merge_all",
-          priority: 0,
-        },
-        "当前 Shot 视频连线创建失败。",
-      );
+      await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNodeId, connectedImageNodes, "当前 Shot 视频连线创建失败。");
 
       if (autoRun) {
         await runCanvasNode(apiContext, createdNodeId, `storyboard-shot-video-run-${crypto.randomUUID()}`, "当前 Shot 视频生成失败。");
@@ -1529,7 +1572,11 @@ export function InfiniteCanvasBoard({
 
       setSelectedNodeIds([createdNodeId]);
       setSelectedNodeId(createdNodeId);
-      toast.success(autoRun ? `Shot ${draftStoryboardShot.sequence} 视频已提交生成。` : `Shot ${draftStoryboardShot.sequence} 视频节点已创建。`);
+      toast.success(
+        autoRun
+          ? `Shot ${draftStoryboardShot.sequence} 视频已提交生成${connectedImageNodes.length > 0 ? `，并自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
+          : `Shot ${draftStoryboardShot.sequence} 视频节点已创建${connectedImageNodes.length > 0 ? `，并自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
+      );
       router.refresh();
     } catch (error) {
       toast.error(
@@ -1558,6 +1605,7 @@ export function InfiniteCanvasBoard({
     try {
       const baseX = Number.parseFloat(selectedNode.positionX || "0");
       const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
       const videoSettings = buildStoryboardVideoSettings(storyboardShots);
       const createdNode = await createCanvasNode(
         apiContext,
@@ -1579,16 +1627,7 @@ export function InfiniteCanvasBoard({
         throw new Error("视频节点创建成功，但未返回节点 ID。");
       }
 
-      await createCanvasEdge(
-        apiContext,
-        {
-          sourceNodeId: selectedNode.id,
-          targetNodeId: createdNodeId,
-          mergeMode: "merge_all",
-          priority: 0,
-        },
-        "分镜视频连线创建失败。",
-      );
+      await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNodeId, connectedImageNodes, "分镜视频连线创建失败。");
 
       if (autoRun) {
         await runCanvasNode(apiContext, createdNodeId, `storyboard-video-run-${crypto.randomUUID()}`, "分镜视频生成失败。");
@@ -1596,10 +1635,71 @@ export function InfiniteCanvasBoard({
 
       setSelectedNodeIds([createdNodeId]);
       setSelectedNodeId(createdNodeId);
-      toast.success(autoRun ? "已创建视频节点并提交分镜视频生成。" : "已从分镜创建视频节点。");
+      toast.success(
+        autoRun
+          ? `已创建视频节点并提交分镜视频生成${connectedImageNodes.length > 0 ? `，自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
+          : `已从分镜创建视频节点${connectedImageNodes.length > 0 ? `，自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
+      );
       router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : autoRun ? "分镜视频生成失败。" : "视频节点创建失败。");
+    } finally {
+      setIsCreatingStoryboardVideoNode(false);
+    }
+  }
+
+  async function createAllStoryboardShotVideoNodes() {
+    if (!selectedNode || selectedNode.type !== "storyboard") {
+      return;
+    }
+
+    const storyboardShots = getStoryboardShots(selectedNode.outputSnapshot);
+
+    if (storyboardShots.length === 0) {
+      toast.error("请先生成分镜结果，再创建视频节点。");
+
+      return;
+    }
+
+    setIsCreatingStoryboardVideoNode(true);
+
+    try {
+      const baseX = Number.parseFloat(selectedNode.positionX || "0");
+      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
+      const createdNodeIds: string[] = [];
+
+      for (const [index, shot] of storyboardShots.entries()) {
+        const createdNode = await createCanvasNode(
+          apiContext,
+          {
+            type: "video",
+            title: `${selectedNode.title} · Shot ${shot.sequence}`,
+            promptInput: buildSingleShotVideoPrompt(selectedNode, shot),
+            settingsJson: serializeVideoNodeSettings(buildSingleShotVideoSettings(shot)),
+            resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
+            positionX: Math.round(baseX + 360),
+            positionY: Math.round(baseY + index * 220),
+          },
+          `Shot ${shot.sequence} 视频节点创建失败。`,
+        );
+
+        if (typeof createdNode.id !== "string") {
+          throw new Error(`Shot ${shot.sequence} 视频节点创建成功，但未返回节点 ID。`);
+        }
+
+        await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNode.id, connectedImageNodes, `Shot ${shot.sequence} 视频连线创建失败。`);
+        createdNodeIds.push(createdNode.id);
+      }
+
+      setSelectedNodeIds(createdNodeIds);
+      setSelectedNodeId(createdNodeIds[0] ?? null);
+      toast.success(
+        `已创建 ${createdNodeIds.length} 个 Shot 视频节点${connectedImageNodes.length > 0 ? `，每个节点都自动接入了 ${connectedImageNodes.length} 个图片节点。` : "。"}`
+      );
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "一键创建 Shot 视频节点失败。");
     } finally {
       setIsCreatingStoryboardVideoNode(false);
     }
@@ -2925,8 +3025,12 @@ export function InfiniteCanvasBoard({
           isSavingPrompt={isSavingPrompt}
           isSavingShot={isSavingStoryboardShot}
           isTaskActive={isStoryboardNodeTaskActive}
+          linkedImageCount={selectedStoryboardImageNodes.length}
           onActiveShotChange={setSelectedStoryboardShotIndex}
           onActiveShotDraftChange={(updater) => setDraftStoryboardShot((current) => updater(current))}
+          onCreateAllShotVideoNodes={() => {
+            void createAllStoryboardShotVideoNodes();
+          }}
           onCreateCurrentShotVideoNode={() => {
             void createStoryboardShotVideoNode(false);
           }}

@@ -120,6 +120,11 @@ export type StoryboardShotCharacter = {
   description: string;
 };
 
+export type StoryboardShotSuggestedAssets = {
+  characters: string[];
+  locations: string[];
+};
+
 export type StoryboardShot = {
   sequence: number;
   sceneLabel: string;
@@ -131,6 +136,8 @@ export type StoryboardShot = {
   size: string;
   dialogue: string;
   characters: StoryboardShotCharacter[];
+  suggestedAssetNames: string[];
+  suggestedAssets: StoryboardShotSuggestedAssets;
 };
 
 export type QuickCreateOption = {
@@ -256,6 +263,10 @@ export function getCanvasConnectionSemantic(
   sourceType: string,
   targetType: string,
 ): CanvasConnectionSemantic | null {
+  if (sourceType === "image" && targetType === "storyboard") {
+    return "prompt";
+  }
+
   if (
     (sourceType === "text" || sourceType === "storyboard") &&
     (targetType === "text" || targetType === "storyboard" || targetType === "image" || targetType === "video")
@@ -520,6 +531,10 @@ export function getStoryboardShots(outputSnapshot: Record<string, unknown> | nul
             })
             .filter((character): character is StoryboardShotCharacter => Boolean(character))
         : [];
+      const suggestedAssetsRecord =
+        shotRecord.suggestedAssets && typeof shotRecord.suggestedAssets === "object"
+          ? (shotRecord.suggestedAssets as Record<string, unknown>)
+          : null;
       const durationValue = shotRecord.duration;
       const duration =
         typeof durationValue === "number" && Number.isFinite(durationValue) ? Math.max(1, Math.round(durationValue)) : null;
@@ -538,9 +553,20 @@ export function getStoryboardShots(outputSnapshot: Record<string, unknown> | nul
         size: typeof shotRecord.size === "string" ? shotRecord.size.trim() : "",
         dialogue: typeof shotRecord.dialogue === "string" ? shotRecord.dialogue.trim() : "",
         characters,
+        suggestedAssetNames: normalizeStringList(shotRecord.suggestedAssetNames),
+        suggestedAssets: {
+          characters: normalizeStringList(suggestedAssetsRecord?.characters),
+          locations: normalizeStringList(suggestedAssetsRecord?.locations),
+        },
       };
     })
     .filter((shot): shot is StoryboardShot => Boolean(shot));
+}
+
+export function getStoryboardShotAssetNames(shot: StoryboardShot) {
+  return Array.from(
+    new Set([...shot.suggestedAssetNames, ...shot.suggestedAssets.characters, ...shot.suggestedAssets.locations]),
+  );
 }
 
 export function getStoryboardTotalDuration(outputSnapshot: Record<string, unknown> | null) {

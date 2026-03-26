@@ -177,6 +177,10 @@ function buildLibraryItemGenerationPrompt(params: {
 }
 
 function resolveUpstreamSemantic(sourceType: string, targetType: string) {
+  if (sourceType === "image" && targetType === "storyboard") {
+    return "prompt" as const;
+  }
+
   if (
     (sourceType === "text" || sourceType === "storyboard") &&
     (targetType === "text" || targetType === "storyboard" || targetType === "image" || targetType === "video")
@@ -240,12 +244,127 @@ function buildStoryboardGenerationPrompt(prompt: string, settings: Record<string
     "模板中的注释、说明文字、示例值、占位符和省略号都不要原样出现在最终 JSON 中。",
     "每个 shot 都必须补全 characters、transition、suggestedAssets、videoPrompt 等字段。",
     "videoPrompt 必须为英文，其他字段可根据内容自然表达，但整体必须保持 JSON 可解析。",
+    "如果上游存在图片节点，请优先使用这些图片节点中的文本描述来提炼稳定人物、场景和关键资产，并写入 suggestedAssetNames 与 suggestedAssets，命名保持一致。",
     `模板文件：${templateFile}`,
     "模板内容：",
     template,
     "创意简报：",
     brief,
   ].join("\n\n");
+}
+
+function normalizeNodeResourceRefIds(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(new Set(value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())))
+    : [];
+}
+
+function normalizeNodeResourceRefs(
+  resourceRefs: unknown,
+): {
+  subjectIds: string[];
+  sceneIds: string[];
+  instructionPresetIds: string[];
+  assetIds: string[];
+} {
+  const record = resourceRefs && typeof resourceRefs === "object" ? (resourceRefs as Record<string, unknown>) : {};
+
+  return {
+    subjectIds: normalizeNodeResourceRefIds(record.subjectIds),
+    sceneIds: normalizeNodeResourceRefIds(record.sceneIds),
+    instructionPresetIds: normalizeNodeResourceRefIds(record.instructionPresetIds),
+    assetIds: normalizeNodeResourceRefIds(record.assetIds),
+  };
+}
+
+async function getUpstreamImagePromptContextMap(
+  workspaceId: string,
+  nodes: Array<{
+    id: string;
+    type: string;
+    title: string;
+    promptInput: string | null;
+    resourceRefs: unknown;
+  }>,
+) {
+  const imageNodes = nodes.filter((node) => node.type === "image");
+
+  if (imageNodes.length === 0) {
+    return new Map<string, string>();
+  }
+
+  const normalizedRefsByNode = new Map(
+    imageNodes.map((node) => [node.id, normalizeNodeResourceRefs(node.resourceRefs)]),
+  );
+  const libraryItemIds = Array.from(
+    new Set(
+      imageNodes.flatMap((node) => {
+        const refs = normalizedRefsByNode.get(node.id);
+
+        return refs ? [...refs.subjectIds, ...refs.sceneIds] : [];
+      }),
+    ),
+  );
+  const libraryItemNameMap = new Map<string, string>();
+
+  if (libraryItemIds.length > 0) {
+    const libraryItemRecords = await db
+      .select({
+        id: libraryItems.id,
+        name: libraryItems.name,
+      })
+      .from(libraryItems)
+      .where(and(eq(libraryItems.workspaceId, workspaceId), inArray(libraryItems.id, libraryItemIds)));
+
+    for (const record of libraryItemRecords) {
+      libraryItemNameMap.set(record.id, record.name);
+    }
+  }
+
+  return new Map(
+    imageNodes.map((node) => {
+      const refs = normalizedRefsByNode.get(node.id) ?? {
+        subjectIds: [],
+        sceneIds: [],
+        instructionPresetIds: [],
+        assetIds: [],
+      };
+      const subjectNames = refs.subjectIds
+        .map((id) => libraryItemNameMap.get(id))
+        .filter((value): value is string => Boolean(value));
+      const sceneNames = refs.sceneIds
+        .map((id) => libraryItemNameMap.get(id))
+        .filter((value): value is string => Boolean(value));
+      const summary = [
+        node.title.trim().length > 0 ? `图片节点：${node.title.trim()}` : null,
+        node.promptInput?.trim() ? `图片描述：${node.promptInput.trim()}` : null,
+        subjectNames.length > 0 ? `关联主体：${subjectNames.join("、")}` : null,
+        sceneNames.length > 0 ? `关联场景：${sceneNames.join("、")}` : null,
+        refs.assetIds.length > 0 ? `关联图片资产数：${refs.assetIds.length}` : null,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join("\n");
+
+      return [node.id, summary];
+    }),
+  );
+}
+
+function resolveUpstreamPromptContent(
+  upstreamNode: {
+    type: string;
+    title: string;
+    promptInput: string | null;
+    outputSnapshot: unknown;
+  },
+  targetType: string,
+  imagePromptContext?: string | null,
+) {
+  if (upstreamNode.type === "image" && targetType === "storyboard") {
+    return imagePromptContext?.trim() || upstreamNode.promptInput?.trim() || upstreamNode.title.trim() || null;
+  }
+
+  return normalizeOutputContent(upstreamNode.outputSnapshot as Record<string, unknown> | null);
 }
 
 function extractImageSourceFromString(value: string) {
@@ -640,6 +759,8 @@ async function buildExecutionPayload(
   }
 
   const upstreamReferenceAssetMap = await getNodeReferenceAssetMap(input.workspaceId, upstreamNodes);
+  const upstreamImagePromptContextMap =
+    node.type === "storyboard" ? await getUpstreamImagePromptContextMap(input.workspaceId, upstreamNodes) : new Map<string, string>();
   const upstreamOutputs = upstreamNodes
     .map((upstreamNode) => {
       const fallbackReferenceImageUrl = upstreamReferenceAssetMap.get(upstreamNode.id)?.[0]?.fileUrl;
@@ -648,7 +769,7 @@ async function buildExecutionPayload(
         nodeId: upstreamNode.id,
         type: upstreamNode.type,
         title: upstreamNode.title,
-        content: normalizeOutputContent(upstreamNode.outputSnapshot as Record<string, unknown> | null),
+        content: resolveUpstreamPromptContent(upstreamNode, node.type, upstreamImagePromptContextMap.get(upstreamNode.id)),
         outputSnapshot: upstreamNode.outputSnapshot,
         status: upstreamNode.status,
         imageUrl:

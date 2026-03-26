@@ -4,6 +4,7 @@ type GenerateTextInput = {
   prompt: string;
   model?: string;
   settings?: Record<string, unknown>;
+  referenceImages?: string[];
 };
 
 type GenerateTextOutput = {
@@ -211,6 +212,7 @@ function buildMockTextResponse(input: GenerateTextInput): GenerateTextOutput {
     rawResponse: {
       mocked: true,
       content,
+      referenceImages: input.referenceImages ?? [],
     },
   };
 }
@@ -355,6 +357,7 @@ export async function generateTextWithCloubic(input: GenerateTextInput): Promise
   const systemPrompt =
     toString(input.settings?.systemPrompt) ?? toString(input.settings?.system) ?? "你是一个专业的内容创作助手。";
   const responseFormat = toString(input.settings?.responseFormat);
+  const referenceImages = (input.referenceImages ?? []).filter((imageUrl) => typeof imageUrl === "string" && imageUrl.trim().length > 0);
 
   const rawResponse = await postChatCompletion({
     model: input.model ?? env.cloubicTextModel,
@@ -365,7 +368,21 @@ export async function generateTextWithCloubic(input: GenerateTextInput): Promise
       },
       {
         role: "user",
-        content: input.prompt,
+        content:
+          referenceImages.length > 0
+            ? [
+                {
+                  type: "text",
+                  text: input.prompt.trim() || "请结合参考图完成本次文本生成。",
+                },
+                ...referenceImages.map((imageUrl) => ({
+                  type: "image_url",
+                  image_url: {
+                    url: imageUrl,
+                  },
+                })),
+              ]
+            : input.prompt,
       },
     ],
     temperature,
