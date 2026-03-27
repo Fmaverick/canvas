@@ -187,6 +187,263 @@ function normalizeVideoReferenceImageEntries(input: {
   return entries;
 }
 
+type CloubicVideoGenerationMode = "reference" | "first_last" | "multi_shot";
+
+type CloubicVideoMultiPromptEntry = {
+  prompt: string;
+  duration: number;
+};
+
+type CloubicVideoRequestContext = {
+  resolvedModel: string;
+  isOmniVideoModel: boolean;
+  duration: number;
+  imageUrl?: string;
+  lastFrameImageUrl?: string;
+  size: string;
+  generationMode: CloubicVideoGenerationMode;
+  motionStrength?: number;
+  sound: "on" | "off";
+  imageEntries: Array<{ imageUrl: string; label?: string }>;
+  primaryImageUrl?: string;
+  encodedLastFrameImageUrl?: string;
+  referenceImageUrls: string[];
+  multiPrompt: CloubicVideoMultiPromptEntry[];
+  metadataSettings: Record<string, unknown>;
+  prompt: string;
+};
+
+function resolveCloubicVideoGenerationMode(input: {
+  candidate?: string;
+  shotPrompts: string[];
+  metadataMultiShot: boolean;
+  lastFrameImageUrl?: string;
+}): CloubicVideoGenerationMode {
+  if (input.candidate === "first_last" || input.candidate === "multi_shot") {
+    return input.candidate;
+  }
+
+  if (input.shotPrompts.length > 0 || input.metadataMultiShot) {
+    return "multi_shot";
+  }
+
+  if (input.lastFrameImageUrl) {
+    return "first_last";
+  }
+
+  return "reference";
+}
+
+function buildCloubicVideoPrompt(input: {
+  basePrompt: string;
+  generationMode: CloubicVideoGenerationMode;
+  shotPrompts: string[];
+  imageEntries: Array<{ imageUrl: string; label?: string }>;
+  lastFrameImageUrl?: string;
+}) {
+  const promptSegments = [input.basePrompt.trim()];
+  const hasImagePlaceholders = /<<<image_\d+>>>/.test(input.basePrompt);
+
+  if (input.generationMode === "first_last") {
+    promptSegments.push("生成模式：首尾帧视频。");
+  }
+
+  if (input.generationMode === "multi_shot" && input.shotPrompts.length > 0) {
+    promptSegments.push(`多镜头脚本：\n${input.shotPrompts.map((shotPrompt, index) => `${index + 1}. ${shotPrompt}`).join("\n")}`);
+  }
+
+  if (!hasImagePlaceholders && input.imageEntries.length > 0) {
+    promptSegments.push(
+      `图像锚点：${input.imageEntries
+        .map((entry, index) => `${normalizeImagePromptLabel(entry.label, index)}<<<image_${index + 1}>>>`)
+        .join("，")}`,
+    );
+  }
+
+  if (input.lastFrameImageUrl) {
+    promptSegments.push("已提供末帧参考，请确保镜头收束到目标末帧。");
+  }
+
+  return promptSegments.filter(Boolean).join("\n\n");
+}
+
+function buildCloubicVideoRequestContext(input: GenerateVideoInput, resolvedModel: string): CloubicVideoRequestContext {
+  const isOmniVideoModel = isCloubicOmniVideoModel(resolvedModel);
+  const metadataSettings = toRecord(input.settings?.metadata);
+  const duration =
+    toNumber(input.settings?.duration) ??
+    toNumber(input.settings?.durationSec) ??
+    toNumber(metadataSettings?.duration) ??
+    5;
+  const imageUrl =
+    toString(input.settings?.firstFrameImageUrl) ??
+    toString(input.settings?.imageUrl) ??
+    toString(input.settings?.image_url) ??
+    toString(metadataSettings?.image_url);
+  const lastFrameImageUrl = toString(input.settings?.lastFrameImageUrl) ?? toString(metadataSettings?.last_frame_image_url);
+  const size = toString(input.settings?.size) ?? toString(input.settings?.aspectRatio) ?? toString(metadataSettings?.aspect_ratio) ?? "9:16";
+  const metadataGenerationMode = toString(metadataSettings?.generation_mode);
+  const metadataMultiShot = toBoolean(metadataSettings?.multi_shot) ?? false;
+  const directShotPrompts = Array.isArray(input.settings?.shotPrompts)
+    ? input.settings.shotPrompts.filter(
+        (shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.trim().length > 0,
+      )
+    : [];
+  const metadataShotPrompts = Array.isArray(metadataSettings?.multi_prompt)
+    ? metadataSettings.multi_prompt
+        .map((entry) => {
+          const record = toRecord(entry);
+
+          return toString(record?.prompt);
+        })
+        .filter((shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.length > 0)
+    : [];
+  const shotPrompts = directShotPrompts.length > 0 ? directShotPrompts : metadataShotPrompts;
+  const generationMode = resolveCloubicVideoGenerationMode({
+    candidate: toString(input.settings?.generationMode) ?? metadataGenerationMode,
+    shotPrompts,
+    metadataMultiShot,
+    lastFrameImageUrl,
+  });
+  const motionStrength = toNumber(input.settings?.motionStrength) ?? toNumber(metadataSettings?.motion_strength);
+  const withAudio =
+    toBoolean(input.settings?.withAudio) ??
+    (toString(input.settings?.sound) === "on" ? true : toString(input.settings?.sound) === "off" ? false : undefined) ??
+    (toString(metadataSettings?.sound) === "on" ? true : toString(metadataSettings?.sound) === "off" ? false : undefined) ??
+    false;
+  const sound = withAudio ? "on" : "off";
+  const referenceImages = [
+    ...(Array.isArray(input.settings?.referenceImages)
+      ? input.settings.referenceImages.filter(
+          (referenceImage): referenceImage is string =>
+            typeof referenceImage === "string" && referenceImage.trim().length > 0,
+        )
+      : []),
+    ...toStringList(metadataSettings?.images),
+  ];
+  const imageEntries = normalizeVideoReferenceImageEntries({
+    imageUrl,
+    referenceImages,
+    lastFrameImageUrl,
+    referenceImageEntries: input.settings?.referenceImageEntries ?? metadataSettings?.image_list,
+  });
+  const primaryImageUrl = imageUrl ? encodeImageUrl(imageUrl) : undefined;
+  const encodedLastFrameImageUrl = lastFrameImageUrl ? encodeImageUrl(lastFrameImageUrl) : undefined;
+  const referenceImageUrls = imageEntries
+    .map((entry) => entry.imageUrl)
+    .filter((candidateImageUrl) => candidateImageUrl !== primaryImageUrl && candidateImageUrl !== encodedLastFrameImageUrl);
+  const multiPromptDurations = distributeShotDurations(duration, shotPrompts.length);
+  const multiPrompt =
+    generationMode === "multi_shot"
+      ? shotPrompts.map((shotPrompt, index) => ({
+          prompt: shotPrompt,
+          duration: multiPromptDurations[index] ?? 1,
+        }))
+      : [];
+  const prompt = buildCloubicVideoPrompt({
+    basePrompt: input.prompt,
+    generationMode,
+    shotPrompts,
+    imageEntries,
+    lastFrameImageUrl,
+  });
+
+  return {
+    resolvedModel,
+    isOmniVideoModel,
+    duration,
+    imageUrl,
+    lastFrameImageUrl,
+    size,
+    generationMode,
+    motionStrength,
+    sound,
+    imageEntries,
+    primaryImageUrl,
+    encodedLastFrameImageUrl,
+    referenceImageUrls,
+    multiPrompt,
+    metadataSettings: metadataSettings ?? {},
+    prompt,
+  };
+}
+
+function buildCloubicVideoRequestBody(context: CloubicVideoRequestContext) {
+  if (context.isOmniVideoModel) {
+    const metadata: Record<string, unknown> = {
+      ...(context.metadataSettings ?? {}),
+      multi_shot: context.generationMode === "multi_shot",
+      aspect_ratio: context.size,
+      sound: context.sound,
+      ...(context.referenceImageUrls.length > 0
+        ? {
+            image_list: context.referenceImageUrls.map((imageUrl) => ({
+              image_url: imageUrl,
+            })),
+          }
+        : {}),
+    };
+
+    if (context.generationMode === "multi_shot") {
+      metadata.shot_type = "customize";
+      metadata.multi_prompt = context.multiPrompt;
+    }
+
+    const requestBody: Record<string, unknown> = {
+      model: context.resolvedModel,
+      duration: context.duration,
+      ...(context.primaryImageUrl ? { image_url: context.primaryImageUrl } : {}),
+      ...(context.encodedLastFrameImageUrl ? { end_image_url: context.encodedLastFrameImageUrl } : {}),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    };
+
+    if (context.prompt) {
+      requestBody.prompt = context.prompt;
+    }
+
+    return requestBody;
+  }
+
+  const metadata: Record<string, unknown> = {
+    ...(context.metadataSettings ?? {}),
+    multi_shot: context.generationMode === "multi_shot",
+    aspect_ratio: context.size,
+    sound: context.sound,
+    generation_mode: context.generationMode,
+    ...(context.imageEntries.length > 0
+      ? {
+          image_list: context.imageEntries.map((entry) => ({
+            image_url: entry.imageUrl,
+          })),
+          images: context.imageEntries.map((entry) => entry.imageUrl),
+        }
+      : {}),
+    ...(typeof context.motionStrength === "number" ? { motion_strength: context.motionStrength } : {}),
+  };
+
+  if (context.generationMode === "multi_shot") {
+    metadata.shot_type = "customize";
+    metadata.multi_prompt = context.multiPrompt;
+  }
+
+  if (context.generationMode === "first_last" && context.encodedLastFrameImageUrl) {
+    metadata.last_frame_image_url = context.encodedLastFrameImageUrl;
+  }
+
+  const requestBody: Record<string, unknown> = {
+    model: context.resolvedModel,
+    duration: context.duration,
+    ...(isCloubicV3VideoModel(context.resolvedModel) && context.primaryImageUrl ? { image_url: context.primaryImageUrl } : {}),
+    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+  };
+
+  if (context.prompt) {
+    requestBody.prompt = context.prompt;
+  }
+
+  return requestBody;
+}
+
 function extractImageSourceFromString(value: string): string | undefined {
   const trimmed = value.trim();
 
@@ -424,6 +681,10 @@ function isCloubicV3VideoModel(model: string) {
   return /\bkling[-_/ ]?v?3(?:\.0)?(?:\b|[-_/ ])/i.test(model);
 }
 
+function isCloubicOmniVideoModel(model: string) {
+  return /\bkling[-_/ ]?v?3(?:\.0)?[-_/ ]omni(?:\b|[-_/ ])/i.test(model);
+}
+
 async function postChatCompletion(payload: Record<string, unknown>) {
   if (!env.cloubicApiKey) {
     throw new Error("Missing CLOUBIC_API_KEY or AI_API_KEY.");
@@ -600,142 +861,21 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
   }
 
   const resolvedModel = resolveVideoModel(input);
-  const metadataSettings = toRecord(input.settings?.metadata);
-  const duration =
-    toNumber(input.settings?.duration) ??
-    toNumber(input.settings?.durationSec) ??
-    toNumber(metadataSettings?.duration) ??
-    5;
-  const imageUrl =
-    toString(input.settings?.firstFrameImageUrl) ??
-    toString(input.settings?.imageUrl) ??
-    toString(input.settings?.image_url) ??
-    toString(metadataSettings?.image_url);
-  const lastFrameImageUrl = toString(input.settings?.lastFrameImageUrl) ?? toString(metadataSettings?.last_frame_image_url);
-  const size = toString(input.settings?.size) ?? toString(input.settings?.aspectRatio) ?? toString(metadataSettings?.aspect_ratio) ?? "9:16";
-  const metadataGenerationMode = toString(metadataSettings?.generation_mode);
-  const metadataMultiShot = toBoolean(metadataSettings?.multi_shot);
-  const directShotPrompts = Array.isArray(input.settings?.shotPrompts)
-    ? input.settings.shotPrompts.filter(
-        (shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.trim().length > 0,
-      )
-    : [];
-  const metadataShotPrompts = Array.isArray(metadataSettings?.multi_prompt)
-    ? metadataSettings.multi_prompt
-        .map((entry) => {
-          const record = toRecord(entry);
+  const requestContext = buildCloubicVideoRequestContext(input, resolvedModel);
+  const requestBody = buildCloubicVideoRequestBody(requestContext);
 
-          return toString(record?.prompt);
-        })
-        .filter((shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.length > 0)
-    : [];
-  const shotPrompts = directShotPrompts.length > 0 ? directShotPrompts : metadataShotPrompts;
-  const generationModeCandidate = toString(input.settings?.generationMode) ?? metadataGenerationMode;
-  const generationMode =
-    generationModeCandidate === "first_last" || generationModeCandidate === "multi_shot"
-      ? generationModeCandidate
-      : shotPrompts.length > 0 || metadataMultiShot
-        ? "multi_shot"
-        : lastFrameImageUrl
-          ? "first_last"
-          : "reference";
-  const motionStrength = toNumber(input.settings?.motionStrength) ?? toNumber(metadataSettings?.motion_strength);
-  const withAudio =
-    toBoolean(input.settings?.withAudio) ??
-    (toString(input.settings?.sound) === "on" ? true : toString(input.settings?.sound) === "off" ? false : undefined) ??
-    (toString(metadataSettings?.sound) === "on" ? true : toString(metadataSettings?.sound) === "off" ? false : undefined) ??
-    false;
-  const sound = withAudio ? "on" : "off";
-  const referenceImages = [
-    ...(Array.isArray(input.settings?.referenceImages)
-      ? input.settings.referenceImages.filter(
-          (referenceImage): referenceImage is string =>
-            typeof referenceImage === "string" && referenceImage.trim().length > 0,
-        )
-      : []),
-    ...toStringList(metadataSettings?.images),
-  ];
-  const imageEntries = normalizeVideoReferenceImageEntries({
-    imageUrl,
-    referenceImages,
-    lastFrameImageUrl,
-    referenceImageEntries: input.settings?.referenceImageEntries ?? metadataSettings?.image_list,
-  });
-  const primaryImageUrl = imageEntries[0]?.imageUrl;
-  const promptSegments = [input.prompt.trim()];
-  const hasImagePlaceholders = /<<<image_\d+>>>/.test(input.prompt);
-
-  if (generationMode === "first_last") {
-    promptSegments.push("生成模式：首尾帧视频。");
-  }
-
-  if (generationMode === "multi_shot" && shotPrompts.length > 0) {
-    promptSegments.push(`多镜头脚本：\n${shotPrompts.map((shotPrompt, index) => `${index + 1}. ${shotPrompt}`).join("\n")}`);
-  }
-
-  if (!hasImagePlaceholders && imageEntries.length > 0) {
-    promptSegments.push(
-      `图像锚点：${imageEntries
-        .map((entry, index) => `${normalizeImagePromptLabel(entry.label, index)}<<<image_${index + 1}>>>`)
-        .join("，")}`,
-    );
-  }
-
-  if (lastFrameImageUrl) {
-    promptSegments.push("已提供末帧参考，请确保镜头收束到目标末帧。");
-  }
-
-  const prompt = promptSegments.filter(Boolean).join("\n\n");
-  const multiPromptDurations = distributeShotDurations(duration, shotPrompts.length);
-  const multiPrompt =
-    generationMode === "multi_shot"
-      ? shotPrompts.map((shotPrompt, index) => ({
-          index: index + 1,
-          prompt: shotPrompt,
-          duration: multiPromptDurations[index] ?? 1,
-        }))
-      : [];
-  const metadata: Record<string, unknown> = {
-    ...(metadataSettings ?? {}),
-    multi_shot: generationMode === "multi_shot",
-    aspect_ratio: size,
-    sound,
-    generation_mode: generationMode,
-    ...(imageEntries.length > 0
-      ? {
-          image_list: imageEntries.map((entry) => ({
-            image_url: entry.imageUrl,
-          })),
-          images: imageEntries.map((entry) => entry.imageUrl),
-        }
-      : {}),
-    ...(typeof motionStrength === "number" ? { motion_strength: motionStrength } : {}),
-  };
-
-  if (generationMode === "multi_shot") {
-    metadata.shot_type = "customize";
-    metadata.multi_prompt = multiPrompt;
-  }
-
-  if (generationMode === "first_last" && lastFrameImageUrl) {
-    metadata.last_frame_image_url = encodeImageUrl(lastFrameImageUrl);
-  }
-
-  const requestBody: Record<string, unknown> = {
-    model: resolvedModel,
-    duration,
-    ...(isCloubicV3VideoModel(resolvedModel) && primaryImageUrl ? { image_url: primaryImageUrl } : {}),
-    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-  };
-
-  if (prompt) {
-    requestBody.prompt = prompt;
-  }
-
-  console.info("[cloubic-video] request payload", {
-    model: resolvedModel,
-    requestBody,
-  });
+  console.info(
+    "[cloubic-video] request payload",
+    JSON.stringify(
+      {
+        model: requestContext.resolvedModel,
+        generationMode: requestContext.generationMode,
+        requestBody,
+      },
+      null,
+      2,
+    ),
+  );
 
   const rawResponse = await requestCloubic("/video/generations", {
     method: "POST",

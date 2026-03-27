@@ -434,6 +434,12 @@ function buildVideoReferenceImageEntries(input: {
   return entries;
 }
 
+function resolveVideoGenerationMode(settings: Record<string, unknown>) {
+  return settings.generationMode === "first_last" || settings.generationMode === "multi_shot"
+    ? settings.generationMode
+    : "reference";
+}
+
 async function getUpstreamImagePromptContextMap(
   workspaceId: string,
   nodes: Array<{
@@ -1183,6 +1189,9 @@ async function buildExecutionPayload(
     ...normalizedNodeRefs.subjectIds.map((id) => libraryItemNameMap.get(id)).filter((value): value is string => Boolean(value)),
     ...normalizedNodeRefs.sceneIds.map((id) => libraryItemNameMap.get(id)).filter((value): value is string => Boolean(value)),
   ]);
+  const videoGenerationMode = node.type === "video" ? resolveVideoGenerationMode(mergedSettings) : null;
+  const isFirstLastVideoMode = videoGenerationMode === "first_last";
+  const isMultiShotVideoMode = videoGenerationMode === "multi_shot";
   const referenceOrderMaps = createVideoReferenceOrderMaps({
     subjectIds: normalizedNodeRefs.subjectIds,
     sceneIds: normalizedNodeRefs.sceneIds,
@@ -1190,17 +1199,17 @@ async function buildExecutionPayload(
   });
   const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset]));
   const firstFrameAssetId =
-    typeof mergedSettings.firstFrameAssetId === "string" && mergedSettings.firstFrameAssetId.trim().length > 0
+    isFirstLastVideoMode && typeof mergedSettings.firstFrameAssetId === "string" && mergedSettings.firstFrameAssetId.trim().length > 0
       ? mergedSettings.firstFrameAssetId
       : undefined;
   const lastFrameAssetId =
-    typeof mergedSettings.lastFrameAssetId === "string" && mergedSettings.lastFrameAssetId.trim().length > 0
+    isFirstLastVideoMode && typeof mergedSettings.lastFrameAssetId === "string" && mergedSettings.lastFrameAssetId.trim().length > 0
       ? mergedSettings.lastFrameAssetId
       : undefined;
   const explicitReferenceAssetIds = uniqueStrings(
-    ((mergedSettings.referenceAssetIds as unknown[]) ?? []).filter(
+    ((node.type === "video" && videoGenerationMode !== "reference" ? [] : (mergedSettings.referenceAssetIds as unknown[]) ?? []).filter(
       (assetId): assetId is string => typeof assetId === "string",
-    ),
+    )),
   );
   const managedVideoAssetIds = uniqueStrings([
     ...(firstFrameAssetId ? [firstFrameAssetId] : []),
@@ -1225,12 +1234,22 @@ async function buildExecutionPayload(
   ]);
   const firstFrameAsset = firstFrameAssetId ? referenceAssetMap.get(firstFrameAssetId) : undefined;
   const lastFrameAsset = lastFrameAssetId ? referenceAssetMap.get(lastFrameAssetId) : undefined;
-  const firstFrameImageUrl =
-    firstFrameAsset?.fileUrl ??
-    (node.type === "video" ? referenceImages[0] : undefined);
-  const lastFrameImageUrl = lastFrameAsset?.fileUrl;
+  const configuredFirstFrameImageUrl =
+    typeof mergedSettings.firstFrameImageUrl === "string" && mergedSettings.firstFrameImageUrl.trim().length > 0
+      ? mergedSettings.firstFrameImageUrl.trim()
+      : typeof mergedSettings.imageUrl === "string" && mergedSettings.imageUrl.trim().length > 0
+        ? mergedSettings.imageUrl.trim()
+        : undefined;
+  const configuredLastFrameImageUrl =
+    typeof mergedSettings.lastFrameImageUrl === "string" && mergedSettings.lastFrameImageUrl.trim().length > 0
+      ? mergedSettings.lastFrameImageUrl.trim()
+      : undefined;
+  const firstFrameImageUrl = isFirstLastVideoMode ? firstFrameAsset?.fileUrl ?? configuredFirstFrameImageUrl : undefined;
+  const lastFrameImageUrl = isFirstLastVideoMode ? lastFrameAsset?.fileUrl ?? configuredLastFrameImageUrl : undefined;
   const shotPrompts = uniqueStrings(
-    ((mergedSettings.shotPrompts as unknown[]) ?? []).filter((item): item is string => typeof item === "string"),
+    ((isMultiShotVideoMode ? ((mergedSettings.shotPrompts as unknown[]) ?? []) : []).filter(
+      (item): item is string => typeof item === "string",
+    )),
   );
   const labeledFirstFrameAsset = firstFrameAsset
     ? {
@@ -1264,8 +1283,8 @@ async function buildExecutionPayload(
   const referenceImageEntries =
     node.type === "video"
       ? buildVideoReferenceImageEntries({
-          firstFrameAsset: labeledFirstFrameAsset,
-          lastFrameAsset: labeledLastFrameAsset,
+          firstFrameAsset: isFirstLastVideoMode ? labeledFirstFrameAsset : undefined,
+          lastFrameAsset: isFirstLastVideoMode ? labeledLastFrameAsset : undefined,
           explicitReferenceAssets: orderedExplicitReferenceAssets,
           unassignedReferenceAssets: orderedUnassignedReferenceAssets,
           upstreamReferenceImages: orderedUpstreamReferenceImages,
@@ -1287,6 +1306,7 @@ async function buildExecutionPayload(
       referenceImages,
       ...(node.type === "video"
         ? {
+            generationMode: videoGenerationMode,
             firstFrameImageUrl,
             lastFrameImageUrl,
             imageUrl: firstFrameImageUrl,
