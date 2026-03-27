@@ -35,12 +35,12 @@ const VIDEO_MODEL_PRESET_OPTIONS = [
     label: "Kling V3 Omni Pro",
   },
   {
-    value: "kling-v3-omni-standard",
+    value: "kling-v3-omni-std",
     label: "Kling V3 Omni Standard",
   },
   {
-    value: "kling-3.0",
-    label: "Kling 3.0",
+    value: "kling-v3-std",
+    label: "Kling V3 Standard",
   },
 ] as const;
 

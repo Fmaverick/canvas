@@ -1090,15 +1090,11 @@ async function buildExecutionPayload(
   referenceAssets: Awaited<ReturnType<typeof getNodeReferenceAssets>>,
   input: z.infer<typeof runNodeInputSchema>,
 ) {
-  for (const upstreamNode of upstreamNodes) {
-    if (upstreamNode.status === "failed") {
-      throw new ApiError(409, "UPSTREAM_NODE_FAILED", "An upstream node has failed and blocks execution.");
-    }
-  }
-
   const upstreamReferenceAssetMap = await getNodeReferenceAssetMap(input.workspaceId, upstreamNodes);
   const upstreamImagePromptContextMap =
-    node.type === "storyboard" ? await getUpstreamImagePromptContextMap(input.workspaceId, upstreamNodes) : new Map<string, string>();
+    node.type === "storyboard"
+      ? await getUpstreamImagePromptContextMap(input.workspaceId, upstreamNodes)
+      : new Map<string, string>();
   const upstreamOutputs = upstreamNodes
     .map((upstreamNode) => {
       const fallbackReferenceImageUrl = upstreamReferenceAssetMap.get(upstreamNode.id)?.[0]?.fileUrl;

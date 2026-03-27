@@ -732,6 +732,11 @@ export async function generateVideoWithCloubic(input: GenerateVideoInput): Promi
     requestBody.prompt = prompt;
   }
 
+  console.info("[cloubic-video] request payload", {
+    model: resolvedModel,
+    requestBody,
+  });
+
   const rawResponse = await requestCloubic("/video/generations", {
     method: "POST",
     headers: {
