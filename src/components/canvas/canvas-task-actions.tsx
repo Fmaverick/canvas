@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -13,6 +12,7 @@ type CanvasTaskActionsProps = {
   taskId?: string | null;
   taskStatus?: string | null;
   taskType: string;
+  onRuntimeChanged?: () => Promise<void> | void;
 };
 
 function createRequestId(prefix: string) {
@@ -26,8 +26,8 @@ export function CanvasTaskActions({
   taskId,
   taskStatus,
   taskType,
+  onRuntimeChanged,
 }: CanvasTaskActionsProps) {
-  const router = useRouter();
   const [isRunning, setIsRunning] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
@@ -54,7 +54,7 @@ export function CanvasTaskActions({
       }
 
       toast.success("节点运行已触发。");
-      router.refresh();
+      await onRuntimeChanged?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "节点运行失败。");
     } finally {
@@ -83,7 +83,7 @@ export function CanvasTaskActions({
       }
 
       toast.success("任务已重新提交。");
-      router.refresh();
+      await onRuntimeChanged?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "任务重试失败。");
     } finally {
@@ -112,7 +112,7 @@ export function CanvasTaskActions({
       }
 
       toast.success("任务状态已刷新。");
-      router.refresh();
+      await onRuntimeChanged?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "任务轮询失败。");
     } finally {

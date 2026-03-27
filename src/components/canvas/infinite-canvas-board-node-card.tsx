@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Clapperboard, ImageIcon, Play, Square, Trash2, Video } from "lucide-react";
 
 import { CanvasTaskActions } from "@/components/canvas/canvas-task-actions";
@@ -72,6 +72,7 @@ type InfiniteCanvasBoardNodeCardProps = {
   onClearPlayingVideoNode: (nodeId: string) => void;
   onStartConnection: (nodeId: string) => void;
   onCompleteConnection: (nodeId: string) => void;
+  onRuntimeChanged?: () => Promise<void> | void;
   activeStoryboardShotIndex?: number;
   onSelectStoryboardShot?: (nodeId: string, shotIndex: number) => void;
 };
@@ -194,7 +195,7 @@ function ConnectionHandle({ direction, isActive, isAvailable, label, onClick }: 
   );
 }
 
-export function InfiniteCanvasBoardNodeCard({
+function InfiniteCanvasBoardNodeCardComponent({
   canvasId,
   workspaceId,
   canEdit,
@@ -232,6 +233,7 @@ export function InfiniteCanvasBoardNodeCard({
   onClearPlayingVideoNode,
   onStartConnection,
   onCompleteConnection,
+  onRuntimeChanged,
   activeStoryboardShotIndex = 0,
   onSelectStoryboardShot,
 }: InfiniteCanvasBoardNodeCardProps) {
@@ -752,6 +754,7 @@ export function InfiniteCanvasBoardNodeCard({
                   <CanvasTaskActions
                     canvasId={canvasId}
                     nodeId={node.id}
+                    onRuntimeChanged={onRuntimeChanged}
                     taskId={latestTask?.id}
                     taskStatus={latestTask?.status}
                     taskType={node.type}
@@ -766,3 +769,42 @@ export function InfiniteCanvasBoardNodeCard({
     </div>
   );
 }
+
+function areNodeCardPropsEqual(
+  previousProps: InfiniteCanvasBoardNodeCardProps,
+  nextProps: InfiniteCanvasBoardNodeCardProps,
+) {
+  const previousImagePreviewDimensions = previousProps.imagePreviewDimensions;
+  const nextImagePreviewDimensions = nextProps.imagePreviewDimensions;
+
+  return (
+    previousProps.canvasId === nextProps.canvasId &&
+    previousProps.workspaceId === nextProps.workspaceId &&
+    previousProps.canEdit === nextProps.canEdit &&
+    previousProps.canGenerate === nextProps.canGenerate &&
+    previousProps.node === nextProps.node &&
+    previousProps.latestTask === nextProps.latestTask &&
+    previousProps.effectiveSelectedNodeId === nextProps.effectiveSelectedNodeId &&
+    previousProps.isSelected === nextProps.isSelected &&
+    previousProps.screenPoint.x === nextProps.screenPoint.x &&
+    previousProps.screenPoint.y === nextProps.screenPoint.y &&
+    previousProps.zoom === nextProps.zoom &&
+    (previousImagePreviewDimensions === nextImagePreviewDimensions ||
+      (previousImagePreviewDimensions?.width === nextImagePreviewDimensions?.width &&
+        previousImagePreviewDimensions?.height === nextImagePreviewDimensions?.height)) &&
+    previousProps.savingNodeId === nextProps.savingNodeId &&
+    previousProps.deletingNodeId === nextProps.deletingNodeId &&
+    previousProps.editingTextNodeTitleId === nextProps.editingTextNodeTitleId &&
+    previousProps.editingTextNodeTitle === nextProps.editingTextNodeTitle &&
+    previousProps.isSavingTextNodeTitle === nextProps.isSavingTextNodeTitle &&
+    previousProps.playingVideoNodeId === nextProps.playingVideoNodeId &&
+    previousProps.isCoolingDown === nextProps.isCoolingDown &&
+    previousProps.pendingConnectionSourceId === nextProps.pendingConnectionSourceId &&
+    previousProps.pendingConnectionLabel === nextProps.pendingConnectionLabel &&
+    previousProps.canAcceptPendingConnection === nextProps.canAcceptPendingConnection &&
+    previousProps.isPendingConnectionTarget === nextProps.isPendingConnectionTarget &&
+    previousProps.activeStoryboardShotIndex === nextProps.activeStoryboardShotIndex
+  );
+}
+
+export const InfiniteCanvasBoardNodeCard = memo(InfiniteCanvasBoardNodeCardComponent, areNodeCardPropsEqual);

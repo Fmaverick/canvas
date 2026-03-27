@@ -1,4 +1,11 @@
-import type { CanvasEdge, CanvasNode, CanvasNodeResourceRefs, CanvasNodeType } from "@/components/canvas/infinite-canvas-board.shared";
+import type {
+  CanvasBatchRunDetail,
+  CanvasEdge,
+  CanvasNode,
+  CanvasNodeResourceRefs,
+  CanvasNodeType,
+  CanvasTask,
+} from "@/components/canvas/infinite-canvas-board.shared";
 
 type CanvasBoardApiContext = {
   canvasId: string;
@@ -148,6 +155,13 @@ export type CanvasGraphMutationResult = {
   }>;
 };
 
+export type CanvasRuntimeSnapshot = {
+  canvasVersion: number;
+  nodes: CanvasNode[];
+  tasks: CanvasTask[];
+  batchRuns: CanvasBatchRunDetail[];
+};
+
 export async function patchCanvasGraph(
   context: CanvasBoardApiContext,
   payload: {
@@ -166,6 +180,18 @@ export async function patchCanvasGraph(
   });
 
   return parseApiEnvelope<CanvasGraphMutationResult>(response, fallbackMessage);
+}
+
+export async function fetchCanvasRuntime(
+  context: CanvasBoardApiContext,
+  fallbackMessage = "画布运行态刷新失败。",
+) {
+  const response = await fetch(`/api/canvases/${context.canvasId}/runtime`, {
+    method: "GET",
+    headers: getWorkspaceHeaders(context.workspaceId, false),
+  });
+
+  return parseApiEnvelope<CanvasRuntimeSnapshot>(response, fallbackMessage);
 }
 
 export async function createCanvasNode(
