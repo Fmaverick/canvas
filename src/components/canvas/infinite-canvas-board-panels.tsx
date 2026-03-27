@@ -25,6 +25,25 @@ import {
   type VideoNodeSettings,
 } from "@/components/canvas/infinite-canvas-board.shared";
 
+const VIDEO_MODEL_PRESET_OPTIONS = [
+  {
+    value: "",
+    label: "默认模型",
+  },
+  {
+    value: "kling-v3-omni-pro",
+    label: "Kling V3 Omni Pro",
+  },
+  {
+    value: "kling-v3-omni-standard",
+    label: "Kling V3 Omni Standard",
+  },
+  {
+    value: "kling-3.0",
+    label: "Kling 3.0",
+  },
+] as const;
+
 type TextNodePanelProps = {
   selectedNode: CanvasNode;
   canGenerate: boolean;
@@ -683,6 +702,7 @@ type VideoNodePanelProps = {
   videoReferenceInputRef: React.RefObject<HTMLInputElement | null>;
   draftVideoPrompt: string;
   draftVideoSettings: VideoNodeSettings;
+  draftVideoModelKey: string;
   selectedVideoOutputSource: string | null;
   selectedVideoFirstFrameAsset: CanvasNodeReferenceAsset | null;
   selectedVideoLastFrameAsset: CanvasNodeReferenceAsset | null;
@@ -692,6 +712,7 @@ type VideoNodePanelProps = {
   isGenerating: boolean;
   isTaskActive: boolean;
   onPromptChange: (value: string) => void;
+  onModelKeyChange: (value: string) => void;
   onSettingsChange: (updater: (current: VideoNodeSettings) => VideoNodeSettings) => void;
   onUploadVideoImages: (role: "first_frame" | "last_frame" | "reference", files: FileList | null) => void;
   onDownloadVideo: () => void;
@@ -709,6 +730,7 @@ export function VideoNodePanel({
   videoReferenceInputRef,
   draftVideoPrompt,
   draftVideoSettings,
+  draftVideoModelKey,
   selectedVideoOutputSource,
   selectedVideoFirstFrameAsset,
   selectedVideoLastFrameAsset,
@@ -718,6 +740,7 @@ export function VideoNodePanel({
   isGenerating,
   isTaskActive,
   onPromptChange,
+  onModelKeyChange,
   onSettingsChange,
   onUploadVideoImages,
   onDownloadVideo,
@@ -728,6 +751,8 @@ export function VideoNodePanel({
   const isReferenceVideoMode = draftVideoSettings.generationMode === "reference";
   const isFirstLastVideoMode = draftVideoSettings.generationMode === "first_last";
   const isMultiShotVideoMode = draftVideoSettings.generationMode === "multi_shot";
+  const hasPresetVideoModel = VIDEO_MODEL_PRESET_OPTIONS.some((option) => option.value === draftVideoModelKey);
+  const selectedVideoModelPreset = draftVideoModelKey.length === 0 || hasPresetVideoModel ? draftVideoModelKey : "__custom__";
 
   return (
     <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
@@ -810,6 +835,21 @@ export function VideoNodePanel({
             />
 
             <div className="grid gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2">
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>视频模型</span>
+                <select
+                  className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                  value={selectedVideoModelPreset}
+                  onChange={(event) => onModelKeyChange(event.target.value === "__custom__" ? draftVideoModelKey : event.target.value)}
+                >
+                  {VIDEO_MODEL_PRESET_OPTIONS.map((option) => (
+                    <option key={option.value || "default"} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                  <option value="__custom__">自定义模型</option>
+                </select>
+              </label>
               <label className="space-y-1 text-xs text-muted-foreground">
                 <span>生成模式</span>
                 <select
@@ -894,6 +934,17 @@ export function VideoNodePanel({
             </div>
           </div>
 
+          {selectedVideoModelPreset === "__custom__" ? (
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              <span>自定义模型 Key</span>
+              <Input
+                placeholder="例如：kling-3.0-master"
+                value={draftVideoModelKey}
+                onChange={(event) => onModelKeyChange(event.target.value)}
+              />
+            </label>
+          ) : null}
+
           {isMultiShotVideoMode ? (
             <Textarea
               className="min-h-24 resize-none rounded-2xl border-0 bg-muted/30 shadow-none focus-visible:ring-2"
@@ -918,6 +969,7 @@ export function VideoNodePanel({
                 : isMultiShotVideoMode
                   ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
                   : `已关联 ${selectedVideoReferenceAssets.length} 张参考图`}
+              {draftVideoModelKey.trim() ? ` · 当前模型 ${draftVideoModelKey.trim()}` : " · 当前使用默认视频模型"}
               {draftVideoSettings.withAudio ? " · 将请求带声音视频" : " · 当前请求静音视频"}
               {selectedVideoOutputSource ? " · 结果会直接显示在视频节点上。" : "。"}
             </p>

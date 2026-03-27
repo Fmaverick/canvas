@@ -147,6 +147,7 @@ export function InfiniteCanvasBoard({
   const [draftImagePrompt, setDraftImagePrompt] = useState("");
   const [draftVideoPrompt, setDraftVideoPrompt] = useState("");
   const [draftVideoSettings, setDraftVideoSettings] = useState(DEFAULT_VIDEO_NODE_SETTINGS);
+  const [draftVideoModelKey, setDraftVideoModelKey] = useState("");
   const [draftResourceRefs, setDraftResourceRefs] = useState<CanvasNodeResourceRefs>(() => normalizeResourceRefs(initialNodes[0]?.resourceRefs));
   const [expandedTextContent, setExpandedTextContent] = useState("");
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
@@ -474,6 +475,10 @@ export function InfiniteCanvasBoard({
         nextPatch.promptInput = draftVideoPrompt;
       }
 
+      if ((selectedNode.modelKey ?? "") !== draftVideoModelKey.trim()) {
+        nextPatch.modelKey = draftVideoModelKey.trim() || null;
+      }
+
       if (!isStructuredValueEqual(normalizeResourceRefs(selectedNode.resourceRefs), nextResourceRefs)) {
         nextPatch.resourceRefs = nextResourceRefs;
       }
@@ -492,6 +497,7 @@ export function InfiniteCanvasBoard({
     draftPrompt,
     draftResourceRefs,
     draftStoryboardSettings,
+    draftVideoModelKey,
     draftVideoPrompt,
     draftVideoSettings,
     isStructuredValueEqual,
@@ -750,6 +756,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftVideoModelKey("");
       setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent(getTextNodeContent(selectedNode.outputSnapshot));
 
@@ -763,6 +770,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftVideoModelKey("");
       setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent(getTextNodeContent(selectedNode.outputSnapshot));
       setIsExpandedEditorOpen(false);
@@ -778,6 +786,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt(selectedNode.promptInput ?? "");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+      setDraftVideoModelKey("");
       setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent("");
       setIsExpandedEditorOpen(false);
@@ -793,6 +802,7 @@ export function InfiniteCanvasBoard({
       setDraftImagePrompt("");
       setDraftVideoPrompt(selectedNode.promptInput ?? "");
       setDraftVideoSettings(normalizeVideoNodeSettings(selectedNode.settingsJson));
+      setDraftVideoModelKey(selectedNode.modelKey ?? "");
       setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent("");
       setIsExpandedEditorOpen(false);
@@ -807,6 +817,7 @@ export function InfiniteCanvasBoard({
     setDraftImagePrompt("");
     setDraftVideoPrompt("");
     setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
+    setDraftVideoModelKey("");
     setDraftResourceRefs(normalizeResourceRefs(selectedNode?.resourceRefs));
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
@@ -2825,6 +2836,7 @@ export function InfiniteCanvasBoard({
       await saveNodePatch(
         selectedNode.id,
         {
+          modelKey: draftVideoModelKey.trim() || null,
           promptInput: draftVideoPrompt,
           resourceRefs: {
             subjectIds: draftResourceRefs.subjectIds,
@@ -2874,6 +2886,7 @@ export function InfiniteCanvasBoard({
       await saveNodePatch(
         selectedNode.id,
         {
+          modelKey: draftVideoModelKey.trim() || null,
           promptInput: draftVideoPrompt,
           resourceRefs: {
             subjectIds: draftResourceRefs.subjectIds,
@@ -3766,6 +3779,7 @@ export function InfiniteCanvasBoard({
         <VideoNodePanel
           canEdit={canEdit}
           canGenerate={canGenerate}
+          draftVideoModelKey={draftVideoModelKey}
           draftVideoPrompt={draftVideoPrompt}
           draftVideoSettings={draftVideoSettings}
           isGenerating={isSelectedVideoNodeGenerating}
@@ -3776,6 +3790,7 @@ export function InfiniteCanvasBoard({
           onGenerate={() => {
             void triggerVideoNodeGeneration();
           }}
+          onModelKeyChange={setDraftVideoModelKey}
           onPromptChange={setDraftVideoPrompt}
           onRemoveVideoAsset={(assetId) => {
             void removeVideoAsset(assetId);
