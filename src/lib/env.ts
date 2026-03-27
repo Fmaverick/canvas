@@ -22,6 +22,7 @@ const serverEnvSchema = z.object({
   CLOUBIC_VIDEO_MODEL: z.string().min(1).optional(),
   MEDIA_POLL_BATCH_SIZE: z.coerce.number().int().positive().optional(),
   INTERNAL_API_TOKEN: z.string().min(1).optional(),
+  CRON_SECRET: z.string().min(1).optional(),
 });
 
 const parsedServerEnv = serverEnvSchema.parse({
@@ -46,6 +47,7 @@ const parsedServerEnv = serverEnvSchema.parse({
   CLOUBIC_VIDEO_MODEL: process.env.CLOUBIC_VIDEO_MODEL,
   MEDIA_POLL_BATCH_SIZE: process.env.MEDIA_POLL_BATCH_SIZE,
   INTERNAL_API_TOKEN: process.env.INTERNAL_API_TOKEN,
+  CRON_SECRET: process.env.CRON_SECRET,
 });
 
 function requireValue(value: string | undefined, message: string) {
@@ -106,4 +108,5 @@ export const env = {
   cloubicVideoModel: parsedServerEnv.CLOUBIC_VIDEO_MODEL ?? "kling-v3-omni-pro",
   mediaPollBatchSize: parsedServerEnv.MEDIA_POLL_BATCH_SIZE ?? 10,
   internalApiToken: parsedServerEnv.INTERNAL_API_TOKEN,
+  cronSecret: parsedServerEnv.CRON_SECRET,
 };

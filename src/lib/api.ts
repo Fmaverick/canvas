@@ -48,6 +48,24 @@ export function requireInternalAccess(request: Request) {
   return true;
 }
 
+export function requireCronAccess(request: Request) {
+  if (!env.cronSecret) {
+    if (env.nodeEnv !== "production") {
+      return true;
+    }
+
+    throw new ApiError(500, "CRON_SECRET_MISSING", "Missing CRON_SECRET for cron endpoint.");
+  }
+
+  const authorization = request.headers.get("authorization");
+
+  if (authorization !== `Bearer ${env.cronSecret}`) {
+    throw new ApiError(401, "UNAUTHORIZED", "Invalid cron access token.");
+  }
+
+  return true;
+}
+
 export function jsonSuccess(data: unknown, requestId: string, status = 200) {
   return NextResponse.json(
     {
