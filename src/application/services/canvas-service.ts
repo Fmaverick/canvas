@@ -2,13 +2,63 @@ import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
-import { assets, canvasEdges, canvasNodes, canvases } from "@/infrastructure/db/schema";
+import { assets, canvasEdges, canvasNodes, canvases, generationTasks, nodeRuns, taskResults } from "@/infrastructure/db/schema";
 import { ApiError } from "@/lib/api";
+import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
 
 type CanvasNodeRecord = typeof canvasNodes.$inferSelect;
 type CanvasEdgeRecord = typeof canvasEdges.$inferSelect;
 type DatabaseTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DatabaseExecutor = typeof db | DatabaseTransaction;
+
+async function deleteNodeRuntimeRecords(
+  executor: DatabaseTransaction,
+  input: {
+    workspaceId: string;
+    canvasId: string;
+    nodeId: string;
+  },
+) {
+  const relatedTasks = await executor
+    .select({
+      id: generationTasks.id,
+    })
+    .from(generationTasks)
+    .where(
+      and(
+        eq(generationTasks.workspaceId, input.workspaceId),
+        eq(generationTasks.canvasId, input.canvasId),
+        eq(generationTasks.nodeId, input.nodeId),
+      ),
+    );
+  const taskIds = relatedTasks.map((task) => task.id);
+
+  if (taskIds.length > 0) {
+    await executor
+      .delete(taskResults)
+      .where(and(eq(taskResults.workspaceId, input.workspaceId), inArray(taskResults.taskId, taskIds)));
+
+    await executor
+      .delete(generationTasks)
+      .where(
+        and(
+          eq(generationTasks.workspaceId, input.workspaceId),
+          eq(generationTasks.canvasId, input.canvasId),
+          eq(generationTasks.nodeId, input.nodeId),
+        ),
+      );
+  }
+
+  await executor
+    .delete(nodeRuns)
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, input.workspaceId),
+        eq(nodeRuns.canvasId, input.canvasId),
+        eq(nodeRuns.nodeId, input.nodeId),
+      ),
+    );
+}
 
 export const listCanvasesInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -451,6 +501,12 @@ export async function createNode(input: z.infer<typeof createNodeInputSchema>) {
     })
     .returning();
 
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "create_node",
+  });
+
   return node;
 }
 
@@ -483,6 +539,12 @@ export async function updateNode(input: z.infer<typeof updateNodeInputSchema>) {
     )
     .returning();
 
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "update_node",
+  });
+
   return node;
 }
 
@@ -490,7 +552,13 @@ export async function deleteNode(input: z.infer<typeof deleteNodeInputSchema>) {
   const parsed = deleteNodeInputSchema.parse(input);
   await assertNodeExists(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
 
-  return db.transaction(async (tx) => {
+  const deletedNode = await db.transaction(async (tx) => {
+    await deleteNodeRuntimeRecords(tx, {
+      workspaceId: parsed.workspaceId,
+      canvasId: parsed.canvasId,
+      nodeId: parsed.nodeId,
+    });
+
     await tx
       .delete(canvasEdges)
       .where(
@@ -517,6 +585,14 @@ export async function deleteNode(input: z.infer<typeof deleteNodeInputSchema>) {
 
     return deletedNode;
   });
+
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "delete_node",
+  });
+
+  return deletedNode;
 }
 
 export async function createEdge(input: z.infer<typeof createEdgeInputSchema>) {
@@ -571,6 +647,12 @@ export async function createEdge(input: z.infer<typeof createEdgeInputSchema>) {
     })
     .returning();
 
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "create_edge",
+  });
+
   return edge;
 }
 
@@ -589,13 +671,19 @@ export async function deleteEdge(input: z.infer<typeof deleteEdgeInputSchema>) {
     )
     .returning();
 
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "delete_edge",
+  });
+
   return edge;
 }
 
 export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInputSchema>) {
   const parsed = patchCanvasGraphInputSchema.parse(input);
 
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const canvas = await assertCanvasExistsWithExecutor(tx, parsed.workspaceId, parsed.canvasId);
 
     if (canvas.version !== parsed.baseVersion) {
@@ -768,6 +856,12 @@ export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInp
           }
         }
 
+        await deleteNodeRuntimeRecords(tx, {
+          workspaceId: parsed.workspaceId,
+          canvasId: parsed.canvasId,
+          nodeId: deletedNode.id,
+        });
+
         await tx
           .delete(canvasNodes)
           .where(
@@ -891,4 +985,12 @@ export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInp
       operationResults,
     };
   });
+
+  notifyCanvasRuntimeChanged({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    reason: "patch_graph",
+  });
+
+  return result;
 }

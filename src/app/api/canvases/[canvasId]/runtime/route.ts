@@ -16,52 +16,58 @@ type RouteContext = {
   }>;
 };
 
+export async function getCanvasRuntimeSnapshot(workspaceId: string, canvasId: string) {
+  const [canvas, tasks, batchRunSummaries] = await Promise.all([
+    getCanvasDetail(
+      getCanvasDetailInputSchema.parse({
+        workspaceId,
+        canvasId,
+      }),
+    ),
+    listTasks(
+      listTasksInputSchema.parse({
+        workspaceId,
+        canvasId,
+        limit: 50,
+      }),
+    ),
+    listNodeRunBatches(
+      listNodeRunBatchesInputSchema.parse({
+        workspaceId,
+        canvasId,
+        limit: 12,
+      }),
+    ),
+  ]);
+  const batchRuns = await Promise.all(
+    batchRunSummaries.map((batchRun) =>
+      getNodeRunBatch(
+        getNodeRunBatchInputSchema.parse({
+          workspaceId,
+          batchRunId: batchRun.id,
+        }),
+      ),
+    ),
+  );
+
+  return {
+    canvasVersion: canvas.version,
+    nodes: canvas.nodes,
+    tasks,
+    batchRuns,
+  };
+}
+
 export async function GET(request: Request, context: RouteContext) {
   const requestId = getRequestId(request);
 
   try {
     const { workspaceId } = await resolveWorkspaceContextFromRequest(request, null, "view");
     const { canvasId } = await context.params;
-    const [canvas, tasks, batchRunSummaries] = await Promise.all([
-      getCanvasDetail(
-        getCanvasDetailInputSchema.parse({
-          workspaceId,
-          canvasId,
-        }),
-      ),
-      listTasks(
-        listTasksInputSchema.parse({
-          workspaceId,
-          canvasId,
-          limit: 50,
-        }),
-      ),
-      listNodeRunBatches(
-        listNodeRunBatchesInputSchema.parse({
-          workspaceId,
-          canvasId,
-          limit: 12,
-        }),
-      ),
-    ]);
-    const batchRuns = await Promise.all(
-      batchRunSummaries.map((batchRun) =>
-        getNodeRunBatch(
-          getNodeRunBatchInputSchema.parse({
-            workspaceId,
-            batchRunId: batchRun.id,
-          }),
-        ),
-      ),
-    );
+    const snapshot = await getCanvasRuntimeSnapshot(workspaceId, canvasId);
 
     return jsonSuccess(
-      {
-        canvasVersion: canvas.version,
-        nodes: canvas.nodes,
-        tasks,
-        batchRuns,
-      },
+      snapshot,
       requestId,
     );
   } catch (error) {

@@ -25,9 +25,22 @@ import {
   getVideoStatusWithCloubic,
 } from "@/infrastructure/ai/cloubic-client";
 import { ApiError } from "@/lib/api";
+import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
 import { env } from "@/lib/env";
 
 const runNodeMergeStrategySchema = z.enum(["previous_only", "merge_all", "custom"]);
+
+function emitCanvasRuntimeEvent(workspaceId: string, canvasId: string | null | undefined, reason: string) {
+  if (!canvasId) {
+    return;
+  }
+
+  notifyCanvasRuntimeChanged({
+    workspaceId,
+    canvasId,
+    reason,
+  });
+}
 
 export const runNodeInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -1296,6 +1309,14 @@ function getNextPollAt(delaySeconds = 10) {
 }
 
 async function refreshNodeRunBatchSummary(batchRunId: string) {
+  const [batchRun] = await db
+    .select({
+      workspaceId: nodeRunBatches.workspaceId,
+      canvasId: nodeRunBatches.canvasId,
+    })
+    .from(nodeRunBatches)
+    .where(eq(nodeRunBatches.id, batchRunId))
+    .limit(1);
   const batchNodeRuns = await db
     .select({
       status: nodeRuns.status,
@@ -1327,6 +1348,10 @@ async function refreshNodeRunBatchSummary(batchRunId: string) {
       updatedAt: new Date(),
     })
     .where(eq(nodeRunBatches.id, batchRunId));
+
+  if (batchRun) {
+    emitCanvasRuntimeEvent(batchRun.workspaceId, batchRun.canvasId, "batch_summary_updated");
+  }
 }
 
 async function getNodeRunRecord(nodeRunId: string) {
@@ -1578,6 +1603,8 @@ async function persistTaskFailure(taskId: string, nodeId: string, code: string, 
   const finishedAt = new Date();
   const [task] = await db
     .select({
+      workspaceId: generationTasks.workspaceId,
+      canvasId: generationTasks.canvasId,
       nodeRunId: generationTasks.nodeRunId,
     })
     .from(generationTasks)
@@ -1615,6 +1642,10 @@ async function persistTaskFailure(taskId: string, nodeId: string, code: string, 
     errorMessage: message,
     finishedAt,
   });
+
+  if (task) {
+    emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_failed");
+  }
 }
 
 async function getTaskRecord(taskId: string) {
@@ -1680,6 +1711,8 @@ async function executeTask(taskId: string) {
     errorCode: null,
     errorMessage: null,
   });
+
+  emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_processing");
 
   try {
     const requestPayload = task.requestPayload as Record<string, unknown>;
@@ -1776,6 +1809,8 @@ async function executeTask(taskId: string) {
         errorMessage: null,
         finishedAt,
       });
+
+      emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_succeeded");
 
       return;
     }
@@ -1944,6 +1979,8 @@ async function executeTask(taskId: string) {
         finishedAt,
       });
 
+      emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_succeeded");
+
       return;
     }
 
@@ -2031,6 +2068,8 @@ async function executeTask(taskId: string) {
         errorMessage: output.status === "failed" ? "Video submission failed." : null,
         finishedAt: output.status === "failed" ? updatedAt : null,
       });
+
+      emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, output.status === "failed" ? "task_failed" : "task_processing");
 
       return;
     }
@@ -2158,6 +2197,8 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
       batchRunId: task.batchRunId,
     };
   });
+
+  emitCanvasRuntimeEvent(parsed.workspaceId, parsed.canvasId, "task_queued");
 
   await executeTask(createdTask.taskId);
 
@@ -2521,6 +2562,8 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
       finishedAt,
     });
 
+    emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_succeeded");
+
     return {
       taskId: task.id,
       status: "succeeded" as const,
@@ -2582,6 +2625,8 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
     errorCode: null,
     errorMessage: null,
   });
+
+  emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_processing");
 
   return {
     taskId: task.id,
@@ -2663,6 +2708,8 @@ export async function retryTask(input: z.infer<typeof retryTaskInputSchema>) {
     startedAt: null,
     finishedAt: null,
   });
+
+  emitCanvasRuntimeEvent(task.workspaceId, task.canvasId, "task_queued");
 
   await executeTask(task.id);
 
@@ -2767,6 +2814,8 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
   await db.insert(nodeRuns).values(plannedNodeRuns);
   await refreshNodeRunBatchSummary(batchRun.id);
   await Promise.all(Array.from({ length: parsed.runCount }, (_, index) => triggerBatchRunProgress(batchRun.id, index + 1)));
+
+  emitCanvasRuntimeEvent(parsed.workspaceId, parsed.canvasId, "batch_run_started");
 
   const [latestBatchRun] = await db
     .select()

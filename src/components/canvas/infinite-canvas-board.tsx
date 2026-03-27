@@ -22,6 +22,7 @@ import {
   patchCanvasGraph,
   runCanvasNode,
   runCanvasNodeBatch,
+  subscribeCanvasRuntime,
   type CanvasGraphMutationResult,
   type CanvasGraphNodePatch,
   type CanvasGraphOperation,
@@ -124,6 +125,9 @@ export function InfiniteCanvasBoard({
   const mutationQueueRef = useRef(Promise.resolve<CanvasGraphMutationResult | null>(null));
   const selectedNodeDraftPatchRef = useRef<CanvasGraphNodePatch | null>(null);
   const effectiveSelectedNodeIdRef = useRef<string | null>(null);
+  const previousBatchRunIdsRef = useRef(initialBatchRuns.map((batchRun) => batchRun.id));
+  const runtimeStreamRetryTimeoutRef = useRef<number | null>(null);
+  const runtimeStreamErrorCountRef = useRef(0);
 
   const [nodes, setNodes] = useState(initialNodes);
   const [edges, setEdges] = useState(initialEdges);
@@ -734,7 +738,13 @@ export function InfiniteCanvasBoard({
   }, [selectedBatchRunId, visibleBatchRuns]);
 
   useEffect(() => {
-    if (batchRuns.length > 0) {
+    const previousBatchRunIds = previousBatchRunIdsRef.current;
+    const nextBatchRunIds = batchRuns.map((batchRun) => batchRun.id);
+    const hasNewBatchRun = nextBatchRunIds.some((batchRunId) => !previousBatchRunIds.includes(batchRunId));
+
+    previousBatchRunIdsRef.current = nextBatchRunIds;
+
+    if (hasNewBatchRun) {
       setIsBatchResultsOpen(true);
     }
   }, [batchRuns]);
@@ -831,22 +841,67 @@ export function InfiniteCanvasBoard({
       batchRuns: initialBatchRuns,
     });
     setEdges(initialEdges);
+    previousBatchRunIdsRef.current = initialBatchRuns.map((batchRun) => batchRun.id);
   }, [applyRuntimeSnapshot, initialBatchRuns, initialCanvasVersion, initialEdges, initialNodes, initialTasks]);
 
   useEffect(() => {
-    if (!isHydrated || !hasActiveCanvasTasks) {
+    if (!isHydrated) {
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState === "hidden" || isPanning || selectionRect) {
-        return;
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+
+    const connect = () => {
+      unsubscribe?.();
+      unsubscribe = subscribeCanvasRuntime(apiContext, {
+        onSnapshot: (snapshot) => {
+          runtimeStreamErrorCountRef.current = 0;
+          applyRuntimeSnapshot(snapshot);
+        },
+        onError: (error) => {
+          if (disposed) {
+            return;
+          }
+
+          runtimeStreamErrorCountRef.current += 1;
+
+          if (runtimeStreamErrorCountRef.current === 1) {
+            toast.error(error.message);
+          }
+
+          if (runtimeStreamRetryTimeoutRef.current !== null) {
+            window.clearTimeout(runtimeStreamRetryTimeoutRef.current);
+          }
+
+          runtimeStreamRetryTimeoutRef.current = window.setTimeout(() => {
+            if (!disposed) {
+              connect();
+            }
+          }, Math.min(5000, runtimeStreamErrorCountRef.current * 1000));
+        },
+      });
+    };
+
+    connect();
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+
+      if (runtimeStreamRetryTimeoutRef.current !== null) {
+        window.clearTimeout(runtimeStreamRetryTimeoutRef.current);
+        runtimeStreamRetryTimeoutRef.current = null;
       }
+    };
+  }, [apiContext, applyRuntimeSnapshot, isHydrated]);
 
-      void refreshCanvasRuntime();
-    }, 10000);
+  useEffect(() => {
+    if (document.visibilityState !== "visible" || !hasActiveCanvasTasks || isPanning || selectionRect) {
+        return;
+    }
 
-    return () => window.clearInterval(intervalId);
+    void refreshCanvasRuntime();
   }, [hasActiveCanvasTasks, isHydrated, isPanning, refreshCanvasRuntime, selectionRect]);
 
   const flushCanvasChanges = useCallback(async () => {

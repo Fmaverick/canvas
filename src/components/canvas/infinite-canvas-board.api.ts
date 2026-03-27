@@ -194,6 +194,102 @@ export async function fetchCanvasRuntime(
   return parseApiEnvelope<CanvasRuntimeSnapshot>(response, fallbackMessage);
 }
 
+export function subscribeCanvasRuntime(
+  context: CanvasBoardApiContext,
+  handlers: {
+    onSnapshot: (snapshot: CanvasRuntimeSnapshot) => void;
+    onError?: (error: Error) => void;
+  },
+) {
+  const abortController = new AbortController();
+  const textDecoder = new TextDecoder();
+  let closed = false;
+
+  const processSseMessage = (message: string) => {
+    const lines = message
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const eventName = lines.find((line) => line.startsWith("event:"))?.slice(6).trim() ?? "message";
+    const dataLine = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+
+    if (!dataLine) {
+      return;
+    }
+
+    const payload = JSON.parse(dataLine) as CanvasRuntimeSnapshot | { message?: string };
+
+    if (eventName === "snapshot") {
+      handlers.onSnapshot(payload as CanvasRuntimeSnapshot);
+
+      return;
+    }
+
+    if (eventName === "error") {
+      handlers.onError?.(new Error((payload as { message?: string }).message ?? "画布运行态订阅失败。"));
+    }
+  };
+
+  const connect = async () => {
+    try {
+      const response = await fetch(`/api/canvases/${context.canvasId}/runtime/events`, {
+        method: "GET",
+        headers: getWorkspaceHeaders(context.workspaceId, false),
+        cache: "no-store",
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        await parseApiEnvelope(response, "画布运行态订阅失败。");
+
+        return;
+      }
+
+      if (!response.body) {
+        throw new Error("画布运行态事件流不可用。");
+      }
+
+      const reader = response.body.getReader();
+      let buffer = "";
+
+      while (!closed) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        buffer += textDecoder.decode(value, { stream: true });
+
+        while (buffer.includes("\n\n")) {
+          const separatorIndex = buffer.indexOf("\n\n");
+          const rawMessage = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+
+          if (rawMessage.trim()) {
+            processSseMessage(rawMessage);
+          }
+        }
+      }
+
+      if (!closed) {
+        handlers.onError?.(new Error("画布运行态连接已断开。"));
+      }
+    } catch (error) {
+      if (!closed && !(error instanceof DOMException && error.name === "AbortError")) {
+        handlers.onError?.(error instanceof Error ? error : new Error("画布运行态订阅失败。"));
+      }
+    }
+  };
+
+  void connect();
+
+  return () => {
+    closed = true;
+    abortController.abort();
+  };
+}
+
 export async function createCanvasNode(
   context: CanvasBoardApiContext,
   payload: Record<string, unknown>,
