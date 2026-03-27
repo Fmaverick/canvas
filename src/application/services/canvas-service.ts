@@ -5,6 +5,11 @@ import { db } from "@/infrastructure/db/client";
 import { assets, canvasEdges, canvasNodes, canvases } from "@/infrastructure/db/schema";
 import { ApiError } from "@/lib/api";
 
+type CanvasNodeRecord = typeof canvasNodes.$inferSelect;
+type CanvasEdgeRecord = typeof canvasEdges.$inferSelect;
+type DatabaseTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DatabaseExecutor = typeof db | DatabaseTransaction;
+
 export const listCanvasesInputSchema = z.object({
   workspaceId: z.uuid(),
 });
@@ -56,7 +61,7 @@ export const updateNodeInputSchema = z.object({
   promptInput: z.string().trim().nullable().optional(),
   outputSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),
   modelKey: z.string().trim().nullable().optional(),
-  settingsJson: z.record(z.string(), z.unknown()).optional(),
+  settingsJson: z.record(z.string(), z.unknown()).nullable().optional(),
   resourceRefs: resourceRefsSchema.optional(),
   positionX: z.coerce.number().optional(),
   positionY: z.coerce.number().optional(),
@@ -84,8 +89,75 @@ export const deleteEdgeInputSchema = z.object({
   edgeId: z.uuid(),
 });
 
-async function assertCanvasExists(workspaceId: string, canvasId: string) {
-  const [canvas] = await db
+const nodePatchSchema = updateNodeInputSchema.omit({
+  workspaceId: true,
+  canvasId: true,
+  nodeId: true,
+});
+
+const graphNodeCreateSchema = createNodeInputSchema.omit({
+  workspaceId: true,
+  canvasId: true,
+  createdBy: true,
+});
+
+const graphEdgeCreateSchema = createEdgeInputSchema
+  .omit({
+    workspaceId: true,
+    canvasId: true,
+    sourceNodeId: true,
+    targetNodeId: true,
+  })
+  .extend({
+    sourceNodeId: z.string().min(1),
+    targetNodeId: z.string().min(1),
+  });
+
+const patchCanvasGraphOperationSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("move_nodes"),
+    updates: z.array(
+      z.object({
+        nodeId: z.uuid(),
+        positionX: z.coerce.number(),
+        positionY: z.coerce.number(),
+      }),
+    ),
+  }),
+  z.object({
+    type: z.literal("update_node"),
+    nodeId: z.uuid(),
+    patch: nodePatchSchema,
+  }),
+  z.object({
+    type: z.literal("create_node"),
+    clientId: z.string().min(1).optional(),
+    node: graphNodeCreateSchema,
+  }),
+  z.object({
+    type: z.literal("delete_node"),
+    nodeId: z.uuid(),
+  }),
+  z.object({
+    type: z.literal("create_edge"),
+    edge: graphEdgeCreateSchema,
+  }),
+  z.object({
+    type: z.literal("delete_edge"),
+    edgeId: z.uuid(),
+  }),
+]);
+
+export const patchCanvasGraphInputSchema = z.object({
+  workspaceId: z.uuid(),
+  canvasId: z.uuid(),
+  actorId: z.uuid(),
+  baseVersion: z.coerce.number().int().min(1),
+  operations: z.array(patchCanvasGraphOperationSchema).min(1),
+});
+
+async function assertCanvasExistsWithExecutor(executor: DatabaseExecutor, workspaceId: string, canvasId: string) {
+  const [canvas] = await executor
     .select()
     .from(canvases)
     .where(and(eq(canvases.id, canvasId), eq(canvases.workspaceId, workspaceId)))
@@ -98,8 +170,17 @@ async function assertCanvasExists(workspaceId: string, canvasId: string) {
   return canvas;
 }
 
-async function assertNodeExists(workspaceId: string, canvasId: string, nodeId: string) {
-  const [node] = await db
+async function assertCanvasExists(workspaceId: string, canvasId: string) {
+  return assertCanvasExistsWithExecutor(db, workspaceId, canvasId);
+}
+
+async function assertNodeExistsWithExecutor(
+  executor: DatabaseExecutor,
+  workspaceId: string,
+  canvasId: string,
+  nodeId: string,
+) {
+  const [node] = await executor
     .select()
     .from(canvasNodes)
     .where(
@@ -118,8 +199,12 @@ async function assertNodeExists(workspaceId: string, canvasId: string, nodeId: s
   return node;
 }
 
-async function assertEdgeExists(workspaceId: string, canvasId: string, edgeId: string) {
-  const [edge] = await db
+async function assertNodeExists(workspaceId: string, canvasId: string, nodeId: string) {
+  return assertNodeExistsWithExecutor(db, workspaceId, canvasId, nodeId);
+}
+
+async function assertEdgeExistsWithExecutor(executor: DatabaseExecutor, workspaceId: string, canvasId: string, edgeId: string) {
+  const [edge] = await executor
     .select()
     .from(canvasEdges)
     .where(
@@ -136,6 +221,10 @@ async function assertEdgeExists(workspaceId: string, canvasId: string, edgeId: s
   }
 
   return edge;
+}
+
+async function assertEdgeExists(workspaceId: string, canvasId: string, edgeId: string) {
+  return assertEdgeExistsWithExecutor(db, workspaceId, canvasId, edgeId);
 }
 
 function normalizeVideoSettingsForClient(settingsJson: Record<string, unknown> | null | undefined) {
@@ -194,6 +283,89 @@ function assertNoCycle(
   }
 }
 
+async function hydrateCanvasNodes(workspaceId: string, nodes: CanvasNodeRecord[]) {
+  if (nodes.length === 0) {
+    return [];
+  }
+
+  const referencedAssetIds = Array.from(
+    new Set(
+      nodes.flatMap((node) => {
+        const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
+
+        return (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
+      }),
+    ),
+  );
+  const referenceAssets =
+    referencedAssetIds.length > 0
+      ? await db
+          .select({
+            id: assets.id,
+            fileName: assets.fileName,
+            fileUrl: assets.fileUrl,
+            mimeType: assets.mimeType,
+            width: assets.width,
+            height: assets.height,
+          })
+          .from(assets)
+          .where(and(eq(assets.workspaceId, workspaceId), inArray(assets.id, referencedAssetIds)))
+      : [];
+  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset]));
+
+  return nodes.map((node) => {
+    const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
+    const assetIds = (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
+
+    return {
+      ...node,
+      settingsJson:
+        node.type === "video"
+          ? normalizeVideoSettingsForClient(node.settingsJson as Record<string, unknown> | null | undefined)
+          : node.settingsJson,
+      referenceAssets: assetIds
+        .map((assetId) => referenceAssetMap.get(assetId))
+        .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
+    };
+  });
+}
+
+function buildNodeUpdateValues(patch: z.infer<typeof nodePatchSchema>) {
+  const normalizedSettingsJson =
+    patch.settingsJson === undefined ? undefined : patch.settingsJson === null ? {} : patch.settingsJson;
+
+  return {
+    title: patch.title,
+    promptInput: patch.promptInput === undefined ? undefined : patch.promptInput,
+    outputSnapshot: patch.outputSnapshot === undefined ? undefined : patch.outputSnapshot,
+    modelKey: patch.modelKey === undefined ? undefined : patch.modelKey,
+    settingsJson: normalizedSettingsJson,
+    resourceRefs: patch.resourceRefs,
+    positionX: patch.positionX === undefined ? undefined : String(patch.positionX),
+    positionY: patch.positionY === undefined ? undefined : String(patch.positionY),
+    status: patch.status,
+    updatedAt: new Date(),
+  };
+}
+
+function resolveNodeReference(
+  reference: string,
+  nodeById: Map<string, CanvasNodeRecord>,
+  createdNodeByClientId: Map<string, CanvasNodeRecord>,
+) {
+  const createdNode = createdNodeByClientId.get(reference);
+
+  if (createdNode) {
+    return createdNode.id;
+  }
+
+  if (nodeById.has(reference)) {
+    return reference;
+  }
+
+  throw new ApiError(404, "NODE_NOT_FOUND", "Canvas node not found.");
+}
+
 export async function listCanvases(input: z.infer<typeof listCanvasesInputSchema>) {
   const parsed = listCanvasesInputSchema.parse(input);
 
@@ -248,48 +420,10 @@ export async function getCanvasDetail(input: z.infer<typeof getCanvasDetailInput
       )
       .orderBy(desc(canvasEdges.createdAt)),
   ]);
-  const referencedAssetIds = Array.from(
-    new Set(
-      nodes.flatMap((node) => {
-        const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
-
-        return (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
-      }),
-    ),
-  );
-  const referenceAssets =
-    referencedAssetIds.length > 0
-      ? await db
-          .select({
-            id: assets.id,
-            fileName: assets.fileName,
-            fileUrl: assets.fileUrl,
-            mimeType: assets.mimeType,
-            width: assets.width,
-            height: assets.height,
-          })
-          .from(assets)
-          .where(and(eq(assets.workspaceId, parsed.workspaceId), inArray(assets.id, referencedAssetIds)))
-      : [];
-  const referenceAssetMap = new Map(referenceAssets.map((asset) => [asset.id, asset]));
 
   return {
     ...canvas,
-    nodes: nodes.map((node) => {
-      const resourceRefs = node.resourceRefs as { assetIds?: string[] } | null;
-      const assetIds = (resourceRefs?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string");
-
-      return {
-        ...node,
-        settingsJson:
-          node.type === "video"
-            ? normalizeVideoSettingsForClient(node.settingsJson as Record<string, unknown> | null | undefined)
-            : node.settingsJson,
-        referenceAssets: assetIds
-          .map((assetId) => referenceAssetMap.get(assetId))
-          .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
-      };
-    }),
+    nodes: await hydrateCanvasNodes(parsed.workspaceId, nodes),
     edges,
   };
 }
@@ -323,6 +457,8 @@ export async function createNode(input: z.infer<typeof createNodeInputSchema>) {
 export async function updateNode(input: z.infer<typeof updateNodeInputSchema>) {
   const parsed = updateNodeInputSchema.parse(input);
   await assertNodeExists(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
+  const normalizedSettingsJson =
+    parsed.settingsJson === undefined ? undefined : parsed.settingsJson === null ? {} : parsed.settingsJson;
 
   const [node] = await db
     .update(canvasNodes)
@@ -331,7 +467,7 @@ export async function updateNode(input: z.infer<typeof updateNodeInputSchema>) {
       promptInput: parsed.promptInput === undefined ? undefined : parsed.promptInput,
       outputSnapshot: parsed.outputSnapshot === undefined ? undefined : parsed.outputSnapshot,
       modelKey: parsed.modelKey === undefined ? undefined : parsed.modelKey,
-      settingsJson: parsed.settingsJson,
+      settingsJson: normalizedSettingsJson,
       resourceRefs: parsed.resourceRefs,
       positionX: parsed.positionX === undefined ? undefined : String(parsed.positionX),
       positionY: parsed.positionY === undefined ? undefined : String(parsed.positionY),
@@ -454,4 +590,305 @@ export async function deleteEdge(input: z.infer<typeof deleteEdgeInputSchema>) {
     .returning();
 
   return edge;
+}
+
+export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInputSchema>) {
+  const parsed = patchCanvasGraphInputSchema.parse(input);
+
+  return db.transaction(async (tx) => {
+    const canvas = await assertCanvasExistsWithExecutor(tx, parsed.workspaceId, parsed.canvasId);
+
+    if (canvas.version !== parsed.baseVersion) {
+      throw new ApiError(409, "CANVAS_VERSION_CONFLICT", "Canvas has been updated by another request.");
+    }
+
+    const [existingNodes, existingEdges] = await Promise.all([
+      tx
+        .select()
+        .from(canvasNodes)
+        .where(and(eq(canvasNodes.workspaceId, parsed.workspaceId), eq(canvasNodes.canvasId, parsed.canvasId))),
+      tx
+        .select()
+        .from(canvasEdges)
+        .where(and(eq(canvasEdges.workspaceId, parsed.workspaceId), eq(canvasEdges.canvasId, parsed.canvasId))),
+    ]);
+    const nodeById = new Map(existingNodes.map((node) => [node.id, node]));
+    const edgeById = new Map(existingEdges.map((edge) => [edge.id, edge]));
+    const touchedNodes = new Map<string, CanvasNodeRecord>();
+    const touchedEdges = new Map<string, CanvasEdgeRecord>();
+    const createdNodeByClientId = new Map<string, CanvasNodeRecord>();
+    const deletedNodeIds: string[] = [];
+    const deletedEdgeIds: string[] = [];
+    const operationResults: Array<{
+      type: string;
+      clientId: string | null;
+      nodeId: string | null;
+      edgeId: string | null;
+    }> = [];
+
+    for (const operation of parsed.operations) {
+      if (operation.type === "move_nodes") {
+        const dedupedUpdates = Array.from(new Map(operation.updates.map((update) => [update.nodeId, update])).values());
+
+        for (const update of dedupedUpdates) {
+          if (!nodeById.has(update.nodeId)) {
+            throw new ApiError(404, "NODE_NOT_FOUND", "Canvas node not found.");
+          }
+
+          const [updatedNode] = await tx
+            .update(canvasNodes)
+            .set({
+              positionX: String(update.positionX),
+              positionY: String(update.positionY),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(canvasNodes.id, update.nodeId),
+                eq(canvasNodes.canvasId, parsed.canvasId),
+                eq(canvasNodes.workspaceId, parsed.workspaceId),
+              ),
+            )
+            .returning();
+
+          nodeById.set(updatedNode.id, updatedNode);
+          touchedNodes.set(updatedNode.id, updatedNode);
+        }
+
+        operationResults.push({
+          type: operation.type,
+          clientId: null,
+          nodeId: null,
+          edgeId: null,
+        });
+
+        continue;
+      }
+
+      if (operation.type === "update_node") {
+        if (!nodeById.has(operation.nodeId)) {
+          throw new ApiError(404, "NODE_NOT_FOUND", "Canvas node not found.");
+        }
+
+        const [updatedNode] = await tx
+          .update(canvasNodes)
+          .set(buildNodeUpdateValues(operation.patch))
+          .where(
+            and(
+              eq(canvasNodes.id, operation.nodeId),
+              eq(canvasNodes.canvasId, parsed.canvasId),
+              eq(canvasNodes.workspaceId, parsed.workspaceId),
+            ),
+          )
+          .returning();
+
+        nodeById.set(updatedNode.id, updatedNode);
+        touchedNodes.set(updatedNode.id, updatedNode);
+        operationResults.push({
+          type: operation.type,
+          clientId: null,
+          nodeId: updatedNode.id,
+          edgeId: null,
+        });
+
+        continue;
+      }
+
+      if (operation.type === "create_node") {
+        const [createdNode] = await tx
+          .insert(canvasNodes)
+          .values({
+            canvasId: parsed.canvasId,
+            workspaceId: parsed.workspaceId,
+            type: operation.node.type,
+            title: operation.node.title,
+            createdBy: parsed.actorId,
+            promptInput: operation.node.promptInput,
+            outputSnapshot: operation.node.outputSnapshot,
+            modelKey: operation.node.modelKey,
+            settingsJson: operation.node.settingsJson ?? {},
+            resourceRefs: operation.node.resourceRefs ?? {
+              subjectIds: [],
+              sceneIds: [],
+              instructionPresetIds: [],
+              assetIds: [],
+            },
+            status: "idle",
+            positionX: String(operation.node.positionX ?? 0),
+            positionY: String(operation.node.positionY ?? 0),
+          })
+          .returning();
+
+        nodeById.set(createdNode.id, createdNode);
+        touchedNodes.set(createdNode.id, createdNode);
+
+        if (operation.clientId) {
+          createdNodeByClientId.set(operation.clientId, createdNode);
+        }
+
+        operationResults.push({
+          type: operation.type,
+          clientId: operation.clientId ?? null,
+          nodeId: createdNode.id,
+          edgeId: null,
+        });
+
+        continue;
+      }
+
+      if (operation.type === "delete_node") {
+        const deletedNode = nodeById.get(operation.nodeId);
+
+        if (!deletedNode) {
+          throw new ApiError(404, "NODE_NOT_FOUND", "Canvas node not found.");
+        }
+
+        const relatedEdges = Array.from(edgeById.values()).filter(
+          (edge) => edge.sourceNodeId === deletedNode.id || edge.targetNodeId === deletedNode.id,
+        );
+
+        if (relatedEdges.length > 0) {
+          await tx
+            .delete(canvasEdges)
+            .where(
+              and(
+                eq(canvasEdges.canvasId, parsed.canvasId),
+                eq(canvasEdges.workspaceId, parsed.workspaceId),
+                inArray(
+                  canvasEdges.id,
+                  relatedEdges.map((edge) => edge.id),
+                ),
+              ),
+            );
+
+          for (const relatedEdge of relatedEdges) {
+            edgeById.delete(relatedEdge.id);
+            touchedEdges.delete(relatedEdge.id);
+            deletedEdgeIds.push(relatedEdge.id);
+          }
+        }
+
+        await tx
+          .delete(canvasNodes)
+          .where(
+            and(
+              eq(canvasNodes.id, deletedNode.id),
+              eq(canvasNodes.canvasId, parsed.canvasId),
+              eq(canvasNodes.workspaceId, parsed.workspaceId),
+            ),
+          );
+
+        nodeById.delete(deletedNode.id);
+        touchedNodes.delete(deletedNode.id);
+        deletedNodeIds.push(deletedNode.id);
+        operationResults.push({
+          type: operation.type,
+          clientId: null,
+          nodeId: deletedNode.id,
+          edgeId: null,
+        });
+
+        continue;
+      }
+
+      if (operation.type === "create_edge") {
+        const sourceNodeId = resolveNodeReference(operation.edge.sourceNodeId, nodeById, createdNodeByClientId);
+        const targetNodeId = resolveNodeReference(operation.edge.targetNodeId, nodeById, createdNodeByClientId);
+
+        if (
+          Array.from(edgeById.values()).some(
+            (edge) => edge.sourceNodeId === sourceNodeId && edge.targetNodeId === targetNodeId,
+          )
+        ) {
+          throw new ApiError(409, "CONFLICT", "A canvas edge for this node pair already exists.");
+        }
+
+        assertNoCycle(
+          Array.from(edgeById.values()).map((edge) => ({
+            sourceNodeId: edge.sourceNodeId,
+            targetNodeId: edge.targetNodeId,
+          })),
+          sourceNodeId,
+          targetNodeId,
+        );
+
+        const [createdEdge] = await tx
+          .insert(canvasEdges)
+          .values({
+            canvasId: parsed.canvasId,
+            workspaceId: parsed.workspaceId,
+            sourceNodeId,
+            targetNodeId,
+            mergeMode: operation.edge.mergeMode,
+            priority: operation.edge.priority ?? 0,
+          })
+          .returning();
+
+        edgeById.set(createdEdge.id, createdEdge);
+        touchedEdges.set(createdEdge.id, createdEdge);
+        operationResults.push({
+          type: operation.type,
+          clientId: null,
+          nodeId: null,
+          edgeId: createdEdge.id,
+        });
+
+        continue;
+      }
+
+      const deletedEdge = edgeById.get(operation.edgeId);
+
+      if (!deletedEdge) {
+        throw new ApiError(404, "EDGE_NOT_FOUND", "Canvas edge not found.");
+      }
+
+      await tx
+        .delete(canvasEdges)
+        .where(
+          and(
+            eq(canvasEdges.id, deletedEdge.id),
+            eq(canvasEdges.canvasId, parsed.canvasId),
+            eq(canvasEdges.workspaceId, parsed.workspaceId),
+          ),
+        );
+
+      edgeById.delete(deletedEdge.id);
+      touchedEdges.delete(deletedEdge.id);
+      deletedEdgeIds.push(deletedEdge.id);
+      operationResults.push({
+        type: operation.type,
+        clientId: null,
+        nodeId: null,
+        edgeId: deletedEdge.id,
+      });
+    }
+
+    const [updatedCanvas] = await tx
+      .update(canvases)
+      .set({
+        version: canvas.version + 1,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(canvases.id, parsed.canvasId),
+          eq(canvases.workspaceId, parsed.workspaceId),
+          eq(canvases.version, parsed.baseVersion),
+        ),
+      )
+      .returning();
+
+    if (!updatedCanvas) {
+      throw new ApiError(409, "CANVAS_VERSION_CONFLICT", "Canvas has been updated by another request.");
+    }
+
+    return {
+      canvasVersion: updatedCanvas.version,
+      nodes: await hydrateCanvasNodes(parsed.workspaceId, Array.from(touchedNodes.values())),
+      edges: Array.from(touchedEdges.values()),
+      deletedNodeIds,
+      deletedEdgeIds,
+      operationResults,
+    };
+  });
 }

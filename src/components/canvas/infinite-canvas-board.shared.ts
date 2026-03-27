@@ -129,6 +129,7 @@ export type InfiniteCanvasBoardProps = {
   workspaceId: string;
   canEdit: boolean;
   canGenerate: boolean;
+  canvasVersion: number;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   tasks: CanvasTask[];

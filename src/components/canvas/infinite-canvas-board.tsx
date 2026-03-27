@@ -17,14 +17,13 @@ import { InfiniteCanvasBoardCreatePanel } from "@/components/canvas/infinite-can
 import { InfiniteCanvasBoardNodeCard } from "@/components/canvas/infinite-canvas-board-node-card";
 import {
   completeUpload,
-  createCanvasEdge,
-  createCanvasNode,
   createUploadPresign,
-  deleteCanvasEdge,
-  deleteCanvasNode,
-  patchCanvasNode,
+  patchCanvasGraph,
   runCanvasNode,
   runCanvasNodeBatch,
+  type CanvasGraphMutationResult,
+  type CanvasGraphNodePatch,
+  type CanvasGraphOperation,
 } from "@/components/canvas/infinite-canvas-board.api";
 import {
   DEFAULT_STORYBOARD_NODE_SETTINGS,
@@ -76,8 +75,9 @@ export function InfiniteCanvasBoard({
   workspaceId,
   canEdit,
   canGenerate,
-  nodes,
-  edges,
+  canvasVersion: initialCanvasVersion,
+  nodes: initialNodes,
+  edges: initialEdges,
   tasks,
   batchRuns,
   canvasId,
@@ -92,10 +92,14 @@ export function InfiniteCanvasBoard({
   const videoLastFrameInputRef = useRef<HTMLInputElement | null>(null);
   const videoReferenceInputRef = useRef<HTMLInputElement | null>(null);
   const videoPreviewRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+  const canvasVersionRef = useRef(initialCanvasVersion);
+  const mutationQueueRef = useRef(Promise.resolve<CanvasGraphMutationResult | null>(null));
 
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(nodes[0]?.id ?? null);
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(nodes[0]?.id ? [nodes[0].id] : []);
-  const [isCreateOpen, setIsCreateOpen] = useState(nodes.length === 0);
+  const [nodes, setNodes] = useState(initialNodes);
+  const [edges, setEdges] = useState(initialEdges);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialNodes[0]?.id ?? null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(initialNodes[0]?.id ? [initialNodes[0].id] : []);
+  const [isCreateOpen, setIsCreateOpen] = useState(initialNodes.length === 0);
   const [quickType, setQuickType] = useState<CanvasNodeType>("text");
   const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
   const [camera, setCamera] = useState({ x: 0, y: 0 });
@@ -111,7 +115,7 @@ export function InfiniteCanvasBoard({
   const [draftImagePrompt, setDraftImagePrompt] = useState("");
   const [draftVideoPrompt, setDraftVideoPrompt] = useState("");
   const [draftVideoSettings, setDraftVideoSettings] = useState(DEFAULT_VIDEO_NODE_SETTINGS);
-  const [draftResourceRefs, setDraftResourceRefs] = useState<CanvasNodeResourceRefs>(() => normalizeResourceRefs(nodes[0]?.resourceRefs));
+  const [draftResourceRefs, setDraftResourceRefs] = useState<CanvasNodeResourceRefs>(() => normalizeResourceRefs(initialNodes[0]?.resourceRefs));
   const [expandedTextContent, setExpandedTextContent] = useState("");
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [isSavingStoryboardShot, setIsSavingStoryboardShot] = useState(false);
@@ -143,14 +147,175 @@ export function InfiniteCanvasBoard({
   const [isBatchResultsOpen, setIsBatchResultsOpen] = useState(batchRuns.length > 0);
   const [selectedBatchRunId, setSelectedBatchRunId] = useState<string | null>(batchRuns[0]?.id ?? null);
   const [batchPreviewPage, setBatchPreviewPage] = useState(1);
+  const [isHydrated, setIsHydrated] = useState(false);
   const [selectionRect, setSelectionRect] = useState<{
     startX: number;
     startY: number;
     currentX: number;
     currentY: number;
   } | null>(null);
+  const [canvasSaveState, setCanvasSaveState] = useState<"saved" | "saving" | "unsaved" | "error">("saved");
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
+  const isStructuredValueEqual = useCallback((left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right), []);
+  const applyNodePatchToLocal = useCallback((node: CanvasNode, patch: CanvasGraphNodePatch): CanvasNode => {
+    const nextNode: CanvasNode = { ...node };
+
+    if (patch.title !== undefined) {
+      nextNode.title = patch.title;
+    }
+
+    if (patch.promptInput !== undefined) {
+      nextNode.promptInput = patch.promptInput;
+    }
+
+    if (patch.outputSnapshot !== undefined) {
+      nextNode.outputSnapshot = patch.outputSnapshot;
+    }
+
+    if (patch.modelKey !== undefined) {
+      nextNode.modelKey = patch.modelKey;
+    }
+
+    if (patch.settingsJson !== undefined) {
+      nextNode.settingsJson = patch.settingsJson;
+    }
+
+    if (patch.resourceRefs !== undefined) {
+      nextNode.resourceRefs = patch.resourceRefs;
+    }
+
+    if (patch.status !== undefined) {
+      nextNode.status = patch.status;
+    }
+
+    if (patch.positionX !== undefined) {
+      nextNode.positionX = String(patch.positionX);
+    }
+
+    if (patch.positionY !== undefined) {
+      nextNode.positionY = String(patch.positionY);
+    }
+
+    return nextNode;
+  }, []);
+  const applyGraphMutationResult = useCallback((result: CanvasGraphMutationResult) => {
+    canvasVersionRef.current = result.canvasVersion;
+
+    if (result.deletedNodeIds.length > 0) {
+      const deletedNodeIdSet = new Set(result.deletedNodeIds);
+      setNodes((current) => current.filter((node) => !deletedNodeIdSet.has(node.id)));
+      setSelectedNodeIds((current) => current.filter((nodeId) => !deletedNodeIdSet.has(nodeId)));
+      setSelectedNodeId((current) => (current && deletedNodeIdSet.has(current) ? null : current));
+    }
+
+    if (result.deletedEdgeIds.length > 0) {
+      const deletedEdgeIdSet = new Set(result.deletedEdgeIds);
+      setEdges((current) => current.filter((edge) => !deletedEdgeIdSet.has(edge.id)));
+      setSelectedEdgeId((current) => (current && deletedEdgeIdSet.has(current) ? null : current));
+    }
+
+    if (result.nodes.length > 0) {
+      setNodes((current) => {
+        const nodeMap = new Map(current.map((node) => [node.id, node]));
+
+        for (const node of result.nodes) {
+          nodeMap.set(node.id, {
+            ...node,
+            resourceRefs: normalizeResourceRefs(node.resourceRefs),
+          });
+        }
+
+        return Array.from(nodeMap.values());
+      });
+    }
+
+    if (result.edges.length > 0) {
+      setEdges((current) => {
+        const edgeMap = new Map(current.map((edge) => [edge.id, edge]));
+
+        for (const edge of result.edges) {
+          edgeMap.set(edge.id, edge);
+        }
+
+        return Array.from(edgeMap.values());
+      });
+    }
+  }, []);
+  const runGraphMutation = useCallback(
+    async (
+      operations: CanvasGraphOperation[],
+      fallbackMessage: string,
+      options?: {
+        successMessage?: string;
+        errorMessage?: string;
+        onSuccess?: (result: CanvasGraphMutationResult) => void;
+      },
+    ) => {
+      const execute = async () => {
+        try {
+          const result = await patchCanvasGraph(
+            apiContext,
+            {
+              baseVersion: canvasVersionRef.current,
+              operations,
+            },
+            fallbackMessage,
+          );
+
+          applyGraphMutationResult(result);
+          options?.onSuccess?.(result);
+
+          if (options?.successMessage) {
+            toast.success(options.successMessage);
+          }
+
+          return result;
+        } catch (error) {
+          const normalizedError = error as Error & { code?: string };
+
+          if (normalizedError.code === "CANVAS_VERSION_CONFLICT") {
+            toast.error("画布已在其他请求中更新，正在刷新最新状态。");
+            router.refresh();
+          }
+
+          throw error;
+        }
+      };
+
+      const task = mutationQueueRef.current.then(execute, execute);
+      mutationQueueRef.current = task.then(() => null, () => null);
+
+      return task;
+    },
+    [apiContext, applyGraphMutationResult, router],
+  );
+  const saveNodePatch = useCallback(
+    async (
+      nodeId: string,
+      patch: CanvasGraphNodePatch,
+      fallbackMessage: string,
+      options?: {
+        successMessage?: string;
+        errorMessage?: string;
+      },
+    ) => {
+      setNodes((current) => current.map((node) => (node.id === nodeId ? applyNodePatchToLocal(node, patch) : node)));
+
+      return runGraphMutation(
+        [
+          {
+            type: "update_node",
+            nodeId,
+            patch,
+          },
+        ],
+        fallbackMessage,
+        options,
+      );
+    },
+    [applyNodePatchToLocal, runGraphMutation],
+  );
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const buildNodeSettingsPayload = useCallback(
     (node: CanvasNode, settingsJson: Record<string, unknown> | null) =>
@@ -223,6 +388,92 @@ export function InfiniteCanvasBoard({
     effectiveSelectedNodeIds[0] ??
     null;
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
+  const selectedNodeDraftPatch = useMemo((): CanvasGraphNodePatch | null => {
+    if (!selectedNode) {
+      return null;
+    }
+
+    if (selectedNode.type === "text") {
+      return selectedNode.promptInput !== draftPrompt ? { promptInput: draftPrompt } : null;
+    }
+
+    if (selectedNode.type === "storyboard") {
+      const nextPatch: CanvasGraphNodePatch = {};
+      const nextSettingsJson = buildNodeSettingsPayload(selectedNode, serializeStoryboardNodeSettings(draftStoryboardSettings));
+
+      if (selectedNode.promptInput !== draftPrompt) {
+        nextPatch.promptInput = draftPrompt;
+      }
+
+      if (!isStructuredValueEqual(selectedNode.settingsJson ?? null, nextSettingsJson ?? null)) {
+        nextPatch.settingsJson = nextSettingsJson;
+      }
+
+      return Object.keys(nextPatch).length > 0 ? nextPatch : null;
+    }
+
+    if (selectedNode.type === "image") {
+      return selectedNode.promptInput !== draftImagePrompt ? { promptInput: draftImagePrompt } : null;
+    }
+
+    if (selectedNode.type === "video") {
+      const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
+      const nextSettingsJson = buildNodeSettingsPayload(selectedNode, {
+        generationMode: persistedSettings.generationMode,
+        duration: persistedSettings.durationSec,
+        durationSec: persistedSettings.durationSec,
+        size: persistedSettings.size,
+        motionStrength: persistedSettings.motionStrength,
+        withAudio: persistedSettings.withAudio,
+        firstFrameAssetId: persistedSettings.firstFrameAssetId,
+        lastFrameAssetId: persistedSettings.lastFrameAssetId,
+        referenceAssetIds: persistedSettings.referenceAssetIds,
+        shotPrompts: persistedSettings.shotPrompts,
+      });
+      const nextResourceRefs = {
+        subjectIds: draftResourceRefs.subjectIds,
+        sceneIds: draftResourceRefs.sceneIds,
+        instructionPresetIds: draftResourceRefs.instructionPresetIds,
+        assetIds: getManagedVideoAssetIds(draftVideoSettings),
+      };
+      const nextPatch: CanvasGraphNodePatch = {};
+
+      if (selectedNode.promptInput !== draftVideoPrompt) {
+        nextPatch.promptInput = draftVideoPrompt;
+      }
+
+      if (!isStructuredValueEqual(normalizeResourceRefs(selectedNode.resourceRefs), nextResourceRefs)) {
+        nextPatch.resourceRefs = nextResourceRefs;
+      }
+
+      if (!isStructuredValueEqual(selectedNode.settingsJson ?? null, nextSettingsJson ?? null)) {
+        nextPatch.settingsJson = nextSettingsJson;
+      }
+
+      return Object.keys(nextPatch).length > 0 ? nextPatch : null;
+    }
+
+    return null;
+  }, [
+    buildNodeSettingsPayload,
+    draftImagePrompt,
+    draftPrompt,
+    draftResourceRefs,
+    draftStoryboardSettings,
+    draftVideoPrompt,
+    draftVideoSettings,
+    isStructuredValueEqual,
+    selectedNode,
+  ]);
+  const canvasSaveStatusLabel =
+    canvasSaveState === "saving"
+      ? "保存中"
+      : canvasSaveState === "unsaved"
+        ? "未保存"
+        : canvasSaveState === "error"
+          ? "保存失败"
+          : "已保存";
+  const hasUnsavedCanvasChanges = selectedNodeDraftPatch !== null;
   const selectedNodes = effectiveSelectedNodeIds
     .map((nodeId) => nodeById.get(nodeId))
     .filter((node): node is CanvasNode => Boolean(node));
@@ -391,6 +642,10 @@ export function InfiniteCanvasBoard({
   }, [nodes, selectedNodeId]);
 
   useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
+  useEffect(() => {
     if (visibleBatchRuns.length === 0) {
       setIsBatchResultsOpen(false);
       setSelectedBatchRunId(null);
@@ -487,6 +742,61 @@ export function InfiniteCanvasBoard({
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
   }, [selectedNode]);
+
+  const flushCanvasChanges = useCallback(async () => {
+    if (!selectedNode || !selectedNodeDraftPatch) {
+      setCanvasSaveState("saved");
+      await mutationQueueRef.current;
+
+      return true;
+    }
+
+    setCanvasSaveState("saving");
+
+    let flushedSelectedNode = false;
+
+    try {
+      await saveNodePatch(selectedNode.id, selectedNodeDraftPatch, "节点保存失败。");
+      setCanvasSaveState("saved");
+      flushedSelectedNode = true;
+    } catch {
+      setCanvasSaveState("error");
+    }
+
+    await mutationQueueRef.current;
+
+    return flushedSelectedNode;
+  }, [saveNodePatch, selectedNode, selectedNodeDraftPatch]);
+  const isSelectionStateEqual = useCallback(
+    (nextSelectedNodeIds: string[], nextSelectedNodeId: string | null) =>
+      nextSelectedNodeId === effectiveSelectedNodeId &&
+      nextSelectedNodeIds.length === effectiveSelectedNodeIds.length &&
+      nextSelectedNodeIds.every((nodeId) => effectiveSelectedNodeIds.includes(nodeId)),
+    [effectiveSelectedNodeId, effectiveSelectedNodeIds],
+  );
+  const ensureSelectionChangeAllowed = useCallback(
+    (nextSelectedNodeIds: string[], nextSelectedNodeId: string | null) => {
+      if (isSelectionStateEqual(nextSelectedNodeIds, nextSelectedNodeId)) {
+        return true;
+      }
+
+      if (hasUnsavedCanvasChanges) {
+        toast.error("当前节点有未保存修改，请先保存画布。");
+        return false;
+      }
+
+      return true;
+    },
+    [hasUnsavedCanvasChanges, isSelectionStateEqual],
+  );
+
+  useEffect(() => {
+    if (canvasSaveState === "saving") {
+      return;
+    }
+
+    setCanvasSaveState(selectedNodeDraftPatch ? "unsaved" : "saved");
+  }, [canvasSaveState, selectedNodeDraftPatch]);
 
   useEffect(() => {
     if (!isStoryboardNodeSelected) {
@@ -768,18 +1078,18 @@ export function InfiniteCanvasBoard({
       setSavingNodeId(updates.length === 1 ? updates[0].nodeId : "group");
 
       try {
-        await Promise.all(
-          updates.map(({ nodeId, x, y }) =>
-            patchCanvasNode(
-              apiContext,
-              nodeId,
-              {
+        await runGraphMutation(
+          [
+            {
+              type: "move_nodes",
+              updates: updates.map(({ nodeId, x, y }) => ({
+                nodeId,
                 positionX: Math.round(x),
                 positionY: Math.round(y),
-              },
-              "节点位置保存失败。",
-            ),
-          ),
+              })),
+            },
+          ],
+          "节点位置保存失败。",
         );
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "节点位置保存失败。");
@@ -787,7 +1097,7 @@ export function InfiniteCanvasBoard({
         setSavingNodeId(null);
       }
     },
-    [apiContext],
+    [runGraphMutation],
   );
   const persistNodePosition = useCallback(
     async (nodeId: string, x: number, y: number) => {
@@ -814,20 +1124,30 @@ export function InfiniteCanvasBoard({
       }
 
       try {
-        await Promise.all(
-          dedupedUpdates.map(({ node, groupId }) =>
-            patchCanvasNode(
-              apiContext,
-              node.id,
-              {
-                settingsJson: setCanvasNodeGroupId(node.settingsJson, groupId),
-              },
-              fallbackMessage,
-            ),
-          ),
+        setNodes((current) =>
+          current.map((node) => {
+            const target = dedupedUpdates.find((item) => item.node.id === node.id);
+
+            return target
+              ? applyNodePatchToLocal(node, {
+                  settingsJson: setCanvasNodeGroupId(node.settingsJson ?? {}, target.groupId),
+                })
+              : node;
+          }),
         );
-        toast.success(successMessage);
-        router.refresh();
+        await runGraphMutation(
+          dedupedUpdates.map(({ node, groupId }) => ({
+            type: "update_node" as const,
+            nodeId: node.id,
+            patch: {
+              settingsJson: setCanvasNodeGroupId(node.settingsJson ?? {}, groupId),
+            },
+          })),
+          fallbackMessage,
+          {
+            successMessage,
+          },
+        );
 
         return true;
       } catch (error) {
@@ -836,7 +1156,7 @@ export function InfiniteCanvasBoard({
         return false;
       }
     },
-    [apiContext, nodeById, router],
+    [applyNodePatchToLocal, nodeById, runGraphMutation],
   );
 
   const clearPendingConnection = useCallback(() => {
@@ -853,7 +1173,7 @@ export function InfiniteCanvasBoard({
   }, []);
 
   const handleSelectNode = useCallback(
-    (nodeId: string, options?: { additive: boolean }) => {
+    async (nodeId: string, options?: { additive: boolean }) => {
       setSelectedEdgeId(null);
 
       if (options?.additive) {
@@ -861,31 +1181,46 @@ export function InfiniteCanvasBoard({
         const nextSelectedNodeIds = isSelected
           ? effectiveSelectedNodeIds.filter((currentNodeId) => currentNodeId !== nodeId)
           : [...effectiveSelectedNodeIds, nodeId];
+        const nextSelectedNodeId = isSelected ? nextSelectedNodeIds[nextSelectedNodeIds.length - 1] ?? null : nodeId;
+
+        if (!ensureSelectionChangeAllowed(nextSelectedNodeIds, nextSelectedNodeId)) {
+          return;
+        }
 
         setSelectedNodeIds(nextSelectedNodeIds);
-        setSelectedNodeId(isSelected ? nextSelectedNodeIds[nextSelectedNodeIds.length - 1] ?? null : nodeId);
+        setSelectedNodeId(nextSelectedNodeId);
 
+        return;
+      }
+
+      if (!ensureSelectionChangeAllowed([nodeId], nodeId)) {
         return;
       }
 
       setSelectedNodeIds([nodeId]);
       setSelectedNodeId(nodeId);
     },
-    [effectiveSelectedNodeIds],
+    [effectiveSelectedNodeIds, ensureSelectionChangeAllowed],
   );
   const handleSelectGroup = useCallback(
-    (groupId: string) => {
+    async (groupId: string) => {
       const memberIds = groupNodeIdsMap.get(groupId) ?? [];
 
       if (memberIds.length === 0) {
         return;
       }
 
+      const nextSelectedNodeId = memberIds[memberIds.length - 1] ?? null;
+
+      if (!ensureSelectionChangeAllowed(memberIds, nextSelectedNodeId)) {
+        return;
+      }
+
       setSelectedEdgeId(null);
       setSelectedNodeIds(memberIds);
-      setSelectedNodeId(memberIds[memberIds.length - 1] ?? null);
+      setSelectedNodeId(nextSelectedNodeId);
     },
-    [groupNodeIdsMap],
+    [ensureSelectionChangeAllowed, groupNodeIdsMap],
   );
   const handleGroupSelectedNodes = useCallback(async () => {
     if (!canEdit || effectiveSelectedNodeIds.length < 2) {
@@ -984,7 +1319,7 @@ export function InfiniteCanvasBoard({
     [getGroupedWorldBounds, groupNodeIdsMap, updateNodeGroupAssignments],
   );
   const startGroupDrag = useCallback(
-    (groupId: string, clientX: number, clientY: number) => {
+    async (groupId: string, clientX: number, clientY: number) => {
       if (!canEdit) {
         return;
       }
@@ -1004,7 +1339,15 @@ export function InfiniteCanvasBoard({
         }),
       ) as Record<string, { x: number; y: number }>;
 
-      handleSelectGroup(groupId);
+      const nextSelectedNodeId = memberIds[memberIds.length - 1] ?? null;
+
+      if (!ensureSelectionChangeAllowed(memberIds, nextSelectedNodeId)) {
+        return;
+      }
+
+      setSelectedEdgeId(null);
+      setSelectedNodeIds(memberIds);
+      setSelectedNodeId(nextSelectedNodeId);
       let moved = false;
 
       const handlePointerMove = (event: PointerEvent) => {
@@ -1060,7 +1403,7 @@ export function InfiniteCanvasBoard({
       window.addEventListener("pointermove", handlePointerMove);
       window.addEventListener("pointerup", handlePointerUp);
     },
-    [canEdit, getWorldPoint, groupNodeIdsMap, handleSelectGroup, nodePositionMap, persistNodePositions],
+    [canEdit, ensureSelectionChangeAllowed, getWorldPoint, groupNodeIdsMap, nodePositionMap, persistNodePositions],
   );
 
   const handleRunSelectedNodes = useCallback(async () => {
@@ -1076,6 +1419,12 @@ export function InfiniteCanvasBoard({
 
     if (hasRunningSelectedNode) {
       toast.error("所选节点中仍有运行中的任务，请稍后再试。");
+
+      return;
+    }
+
+    if (hasUnsavedCanvasChanges) {
+      toast.error("批量运行前请先保存画布。");
 
       return;
     }
@@ -1101,7 +1450,22 @@ export function InfiniteCanvasBoard({
     } finally {
       setIsBatchRunning(false);
     }
-  }, [apiContext, batchRunCount, canGenerate, effectiveSelectedNodeIds, hasRunningSelectedNode, router]);
+  }, [apiContext, batchRunCount, canGenerate, effectiveSelectedNodeIds, hasRunningSelectedNode, hasUnsavedCanvasChanges, router]);
+  const handleSaveCanvas = useCallback(async () => {
+    const saved = await flushCanvasChanges();
+
+    if (saved) {
+      toast.success("画布已保存。");
+      return;
+    }
+
+    if (!hasUnsavedCanvasChanges) {
+      toast.success("当前没有需要保存的修改。");
+      return;
+    }
+
+    toast.error("画布保存失败。");
+  }, [flushCanvasChanges, hasUnsavedCanvasChanges]);
 
   const startMarqueeSelection = useCallback(
     (clientX: number, clientY: number, additive: boolean) => {
@@ -1199,7 +1563,12 @@ export function InfiniteCanvasBoard({
       setDeletingNodeId(nodeId);
 
       try {
-        await deleteCanvasNode(apiContext, nodeId, "节点删除失败。");
+        const operations: CanvasGraphOperation[] = [
+          {
+            type: "delete_node",
+            nodeId,
+          },
+        ];
         const deletedGroupId = getCanvasNodeGroupId(deletingNode.settingsJson);
 
         if (deletedGroupId) {
@@ -1209,17 +1578,18 @@ export function InfiniteCanvasBoard({
             const remainingNode = nodeById.get(remainingGroupNodeIds[0]);
 
             if (remainingNode) {
-              await patchCanvasNode(
-                apiContext,
-                remainingNode.id,
-                {
-                  settingsJson: setCanvasNodeGroupId(remainingNode.settingsJson, null),
+              operations.push({
+                type: "update_node",
+                nodeId: remainingNode.id,
+                patch: {
+                  settingsJson: setCanvasNodeGroupId(remainingNode.settingsJson ?? {}, null),
                 },
-                "节点组合保存失败。",
-              );
+              });
             }
           }
         }
+
+        await runGraphMutation(operations, "节点删除失败。");
 
         setSelectedNodeId(nextSelectedNodeId);
         setSelectedNodeIds((current) => {
@@ -1257,18 +1627,17 @@ export function InfiniteCanvasBoard({
         }
 
         toast.success("节点已删除，关联边已一并清理。");
-        router.refresh();
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "节点删除失败。");
       } finally {
         setDeletingNodeId(null);
       }
     },
-    [apiContext, editingTextNodeTitleId, effectiveSelectedNodeId, groupNodeIdsMap, nodeById, nodes, router],
+    [editingTextNodeTitleId, effectiveSelectedNodeId, groupNodeIdsMap, nodeById, nodes, runGraphMutation],
   );
 
   const handleStartConnection = useCallback(
-    (nodeId: string) => {
+    async (nodeId: string) => {
       if (!canEdit) {
         return;
       }
@@ -1285,12 +1654,16 @@ export function InfiniteCanvasBoard({
         return;
       }
 
+      if (!ensureSelectionChangeAllowed([nodeId], nodeId)) {
+        return;
+      }
+
       setSelectedNodeIds([nodeId]);
       setSelectedNodeId(nodeId);
       setPendingConnectionSourceId(nodeId);
       setPendingConnectionPointer(getScreenPoint(nodePosition.x, nodePosition.y));
     },
-    [canEdit, clearPendingConnection, getScreenPoint, nodePositionMap, pendingConnectionSourceId],
+    [canEdit, clearPendingConnection, ensureSelectionChangeAllowed, getScreenPoint, nodePositionMap, pendingConnectionSourceId],
   );
 
   const handleCompleteConnection = useCallback(
@@ -1320,40 +1693,51 @@ export function InfiniteCanvasBoard({
       }
 
       try {
-        await createCanvasEdge(
-          apiContext,
-          {
-            sourceNodeId: sourceNode.id,
-            targetNodeId: targetNode.id,
-            mergeMode: "merge_all",
-            priority: edges.filter((edge) => edge.targetNodeId === targetNodeId).length,
-          },
+        await runGraphMutation(
+          [
+            {
+              type: "create_edge",
+              edge: {
+                sourceNodeId: sourceNode.id,
+                targetNodeId: targetNode.id,
+                mergeMode: "merge_all",
+                priority: edges.filter((edge) => edge.targetNodeId === targetNodeId).length,
+              },
+            },
+          ],
           "创建连线失败。",
+          {
+            successMessage: `${sourceNode.title} 已连接到 ${targetNode.title}，会自动作为${getCanvasConnectionLabel(sourceNode.type, targetNode.type)}。`,
+          },
         );
-
-        toast.success(`${sourceNode.title} 已连接到 ${targetNode.title}，会自动作为${getCanvasConnectionLabel(sourceNode.type, targetNode.type)}。`);
         clearPendingConnection();
-        router.refresh();
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "创建连线失败。");
         clearPendingConnection();
       }
     },
-    [apiContext, clearPendingConnection, edges, nodeById, pendingConnectionSourceId, router],
+    [clearPendingConnection, edges, nodeById, pendingConnectionSourceId, runGraphMutation],
   );
 
   const handleDeleteEdge = useCallback(
     async (edgeId: string) => {
       try {
-        await deleteCanvasEdge(apiContext, edgeId, "删除连线失败。");
+        await runGraphMutation(
+          [
+            {
+              type: "delete_edge",
+              edgeId,
+            },
+          ],
+          "删除连线失败。",
+        );
         setSelectedEdgeId((current) => (current === edgeId ? null : current));
         toast.success("连线已删除。");
-        router.refresh();
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "删除连线失败。");
       }
     },
-    [apiContext, router],
+    [runGraphMutation],
   );
 
   useEffect(() => {
@@ -1410,28 +1794,33 @@ export function InfiniteCanvasBoard({
     try {
       const option = quickCreateOptions.find((item) => item.value === type);
       const nextNodeIndex = (nodeCountByType[type] ?? 0) + 1;
-
-      const createdNode = await createCanvasNode(
-        apiContext,
-        {
-          type,
-          title: `${option?.label ?? type}节点 ${nextNodeIndex}`,
-          promptInput: "",
-          settingsJson: type === "storyboard" ? serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS) : undefined,
-          positionX: Math.round(x),
-          positionY: Math.round(y),
-        },
+      const clientId = `create-${crypto.randomUUID()}`;
+      const result = await runGraphMutation(
+        [
+          {
+            type: "create_node",
+            clientId,
+            node: {
+              type,
+              title: `${option?.label ?? type}节点 ${nextNodeIndex}`,
+              promptInput: "",
+              settingsJson: type === "storyboard" ? serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS) : undefined,
+              positionX: Math.round(x),
+              positionY: Math.round(y),
+            },
+          },
+        ],
         "拖入创建节点失败。",
       );
+      const createdNode = result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId);
 
       toast.success("节点已拖入画布。");
-      if (typeof createdNode.id === "string") {
-        setSelectedNodeIds([createdNode.id]);
-        setSelectedNodeId(createdNode.id);
+      if (createdNode?.nodeId) {
+        setSelectedNodeIds([createdNode.nodeId]);
+        setSelectedNodeId(createdNode.nodeId);
       }
       setQuickType(type);
       setIsCreateOpen(false);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "拖入创建节点失败。");
     }
@@ -1503,35 +1892,36 @@ export function InfiniteCanvasBoard({
     };
   }
 
-  async function connectStoryboardSourceNodesToVideoNode(
+  function connectStoryboardSourceNodesToVideoNode(
     storyboardNode: CanvasNode,
     targetNodeId: string,
     imageNodes: CanvasNode[],
-    errorMessage: string,
   ) {
-    await createCanvasEdge(
-      apiContext,
+    const edgeOperations: CanvasGraphOperation[] = [
       {
-        sourceNodeId: storyboardNode.id,
-        targetNodeId,
-        mergeMode: "merge_all",
-        priority: 0,
+        type: "create_edge",
+        edge: {
+          sourceNodeId: storyboardNode.id,
+          targetNodeId,
+          mergeMode: "merge_all",
+          priority: 0,
+        },
       },
-      errorMessage,
-    );
+    ];
 
     for (const [index, imageNode] of imageNodes.entries()) {
-      await createCanvasEdge(
-        apiContext,
-        {
+      edgeOperations.push({
+        type: "create_edge",
+        edge: {
           sourceNodeId: imageNode.id,
           targetNodeId,
           mergeMode: "merge_all",
           priority: index + 1,
         },
-        errorMessage,
-      );
+      });
     }
+
+    return edgeOperations;
   }
 
   async function saveCurrentStoryboardShot() {
@@ -1577,8 +1967,7 @@ export function InfiniteCanvasBoard({
       };
       const nextContent = JSON.stringify(nextStructuredData, null, 2);
 
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           outputSnapshot: {
@@ -1593,7 +1982,6 @@ export function InfiniteCanvasBoard({
 
       setExpandedTextContent(nextContent);
       toast.success(`Shot ${draftStoryboardShot.sequence} 已保存。`);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "当前 Shot 保存失败。");
     } finally {
@@ -1609,30 +1997,37 @@ export function InfiniteCanvasBoard({
     setIsCreatingStoryboardVideoNode(true);
 
     try {
-      const baseX = Number.parseFloat(selectedNode.positionX || "0");
-      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const basePosition = nodePositionMap.get(selectedNode.id) ?? {
+        x: Number.parseFloat(selectedNode.positionX || "0"),
+        y: Number.parseFloat(selectedNode.positionY || "0"),
+      };
       const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
-      const createdNode = await createCanvasNode(
-        apiContext,
-        {
-          type: "video",
-          title: `${selectedNode.title} · Shot ${draftStoryboardShot.sequence}`,
-          promptInput: buildSingleShotVideoPrompt(selectedNode, draftStoryboardShot),
-          settingsJson: serializeVideoNodeSettings(buildSingleShotVideoSettings(draftStoryboardShot)),
-          resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
-          positionX: Math.round(baseX + 360),
-          positionY: Math.round(baseY + activeStoryboardShotIndex * 48),
-        },
+      const clientId = `storyboard-shot-video-${crypto.randomUUID()}`;
+      const result = await runGraphMutation(
+        [
+          {
+            type: "create_node",
+            clientId,
+            node: {
+              type: "video",
+              title: `${selectedNode.title} · Shot ${draftStoryboardShot.sequence}`,
+              promptInput: buildSingleShotVideoPrompt(selectedNode, draftStoryboardShot),
+              settingsJson: serializeVideoNodeSettings(buildSingleShotVideoSettings(draftStoryboardShot)),
+              resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
+              positionX: Math.round(basePosition.x + 360),
+              positionY: Math.round(basePosition.y + activeStoryboardShotIndex * 48),
+            },
+          },
+          ...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes),
+        ],
         autoRun ? "当前 Shot 视频生成失败。" : "当前 Shot 视频节点创建失败。",
       );
-
-      const createdNodeId = typeof createdNode.id === "string" ? createdNode.id : null;
+      const createdNodeId =
+        result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
 
       if (!createdNodeId) {
         throw new Error("Shot 视频节点创建成功，但未返回节点 ID。");
       }
-
-      await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNodeId, connectedImageNodes, "当前 Shot 视频连线创建失败。");
 
       if (autoRun) {
         await runCanvasNode(apiContext, createdNodeId, `storyboard-shot-video-run-${crypto.randomUUID()}`, "当前 Shot 视频生成失败。");
@@ -1645,7 +2040,6 @@ export function InfiniteCanvasBoard({
           ? `Shot ${draftStoryboardShot.sequence} 视频已提交生成${connectedImageNodes.length > 0 ? `，并自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
           : `Shot ${draftStoryboardShot.sequence} 视频节点已创建${connectedImageNodes.length > 0 ? `，并自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
       );
-      router.refresh();
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : autoRun ? "当前 Shot 视频生成失败。" : "当前 Shot 视频节点创建失败。",
@@ -1671,31 +2065,38 @@ export function InfiniteCanvasBoard({
     setIsCreatingStoryboardVideoNode(true);
 
     try {
-      const baseX = Number.parseFloat(selectedNode.positionX || "0");
-      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const basePosition = nodePositionMap.get(selectedNode.id) ?? {
+        x: Number.parseFloat(selectedNode.positionX || "0"),
+        y: Number.parseFloat(selectedNode.positionY || "0"),
+      };
       const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
       const videoSettings = buildStoryboardVideoSettings(storyboardShots);
-      const createdNode = await createCanvasNode(
-        apiContext,
-        {
-          type: "video",
-          title: `${selectedNode.title} · 分镜视频`,
-          promptInput: buildStoryboardVideoPrompt(selectedNode, storyboardShots),
-          settingsJson: serializeVideoNodeSettings(videoSettings),
-          resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
-          positionX: Math.round(baseX + 360),
-          positionY: Math.round(baseY),
-        },
+      const clientId = `storyboard-video-${crypto.randomUUID()}`;
+      const result = await runGraphMutation(
+        [
+          {
+            type: "create_node",
+            clientId,
+            node: {
+              type: "video",
+              title: `${selectedNode.title} · 分镜视频`,
+              promptInput: buildStoryboardVideoPrompt(selectedNode, storyboardShots),
+              settingsJson: serializeVideoNodeSettings(videoSettings),
+              resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
+              positionX: Math.round(basePosition.x + 360),
+              positionY: Math.round(basePosition.y),
+            },
+          },
+          ...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes),
+        ],
         autoRun ? "分镜视频创建失败。" : "视频节点创建失败。",
       );
-
-      const createdNodeId = typeof createdNode.id === "string" ? createdNode.id : null;
+      const createdNodeId =
+        result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
 
       if (!createdNodeId) {
         throw new Error("视频节点创建成功，但未返回节点 ID。");
       }
-
-      await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNodeId, connectedImageNodes, "分镜视频连线创建失败。");
 
       if (autoRun) {
         await runCanvasNode(apiContext, createdNodeId, `storyboard-video-run-${crypto.randomUUID()}`, "分镜视频生成失败。");
@@ -1708,7 +2109,6 @@ export function InfiniteCanvasBoard({
           ? `已创建视频节点并提交分镜视频生成${connectedImageNodes.length > 0 ? `，自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
           : `已从分镜创建视频节点${connectedImageNodes.length > 0 ? `，自动接入 ${connectedImageNodes.length} 个图片节点。` : "。"}`
       );
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : autoRun ? "分镜视频生成失败。" : "视频节点创建失败。");
     } finally {
@@ -1732,40 +2132,42 @@ export function InfiniteCanvasBoard({
     setIsCreatingStoryboardVideoNode(true);
 
     try {
-      const baseX = Number.parseFloat(selectedNode.positionX || "0");
-      const baseY = Number.parseFloat(selectedNode.positionY || "0");
+      const basePosition = nodePositionMap.get(selectedNode.id) ?? {
+        x: Number.parseFloat(selectedNode.positionX || "0"),
+        y: Number.parseFloat(selectedNode.positionY || "0"),
+      };
       const connectedImageNodes = getIncomingImageNodes(selectedNode.id);
-      const createdNodeIds: string[] = [];
+      const nodeClientIds = storyboardShots.map(() => `storyboard-shot-${crypto.randomUUID()}`);
+      const operations: CanvasGraphOperation[] = [];
 
-      for (const [index, shot] of storyboardShots.entries()) {
-        const createdNode = await createCanvasNode(
-          apiContext,
-          {
+      storyboardShots.forEach((shot, index) => {
+        const clientId = nodeClientIds[index];
+        operations.push({
+          type: "create_node",
+          clientId,
+          node: {
             type: "video",
             title: `${selectedNode.title} · Shot ${shot.sequence}`,
             promptInput: buildSingleShotVideoPrompt(selectedNode, shot),
             settingsJson: serializeVideoNodeSettings(buildSingleShotVideoSettings(shot)),
             resourceRefs: normalizeResourceRefs(selectedNode.resourceRefs),
-            positionX: Math.round(baseX + 360),
-            positionY: Math.round(baseY + index * 220),
+            positionX: Math.round(basePosition.x + 360),
+            positionY: Math.round(basePosition.y + index * 220),
           },
-          `Shot ${shot.sequence} 视频节点创建失败。`,
-        );
+        });
+        operations.push(...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes));
+      });
 
-        if (typeof createdNode.id !== "string") {
-          throw new Error(`Shot ${shot.sequence} 视频节点创建成功，但未返回节点 ID。`);
-        }
-
-        await connectStoryboardSourceNodesToVideoNode(selectedNode, createdNode.id, connectedImageNodes, `Shot ${shot.sequence} 视频连线创建失败。`);
-        createdNodeIds.push(createdNode.id);
-      }
+      const result = await runGraphMutation(operations, "一键创建 Shot 视频节点失败。");
+      const createdNodeIds = nodeClientIds
+        .map((clientId) => result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId)
+        .filter((nodeId): nodeId is string => typeof nodeId === "string");
 
       setSelectedNodeIds(createdNodeIds);
       setSelectedNodeId(createdNodeIds[0] ?? null);
       toast.success(
         `已创建 ${createdNodeIds.length} 个 Shot 视频节点${connectedImageNodes.length > 0 ? `，每个节点都自动接入了 ${connectedImageNodes.length} 个图片节点。` : "。"}`
       );
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "一键创建 Shot 视频节点失败。");
     } finally {
@@ -1817,27 +2219,34 @@ export function InfiniteCanvasBoard({
     };
 
     try {
-      const createdNode = await createCanvasNode(
-        apiContext,
-        {
-          type: nodeType,
-          title: `${source.name} · ${option?.label ?? nodeType}`,
-          promptInput,
-          outputSnapshot,
-          resourceRefs,
-          positionX: Math.round(nextPosition.x),
-          positionY: Math.round(nextPosition.y),
-        },
+      const clientId = `resource-node-${crypto.randomUUID()}`;
+      const result = await runGraphMutation(
+        [
+          {
+            type: "create_node",
+            clientId,
+            node: {
+              type: nodeType,
+              title: `${source.name} · ${option?.label ?? nodeType}`,
+              promptInput,
+              outputSnapshot,
+              resourceRefs,
+              positionX: Math.round(nextPosition.x),
+              positionY: Math.round(nextPosition.y),
+            },
+          },
+        ],
         "资源节点创建失败。",
       );
+      const createdNodeId =
+        result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
 
       toast.success("资源已作为节点加入画布。");
-      if (typeof createdNode.id === "string") {
-        setSelectedNodeIds([createdNode.id]);
-        setSelectedNodeId(createdNode.id);
+      if (createdNodeId) {
+        setSelectedNodeIds([createdNodeId]);
+        setSelectedNodeId(createdNodeId);
       }
       setIsCreateOpen(false);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "资源节点创建失败。");
     }
@@ -1937,21 +2346,13 @@ export function InfiniteCanvasBoard({
 
       setDraftResourceRefs(nextResourceRefs);
 
-      await patchCanvasNode(
-        apiContext,
-        selectedNode.id,
-        {
-          resourceRefs: nextResourceRefs,
-        },
-        "节点引用图片保存失败。",
-      );
+      await saveNodePatch(selectedNode.id, { resourceRefs: nextResourceRefs }, "节点引用图片保存失败。");
 
       if (imageUploadInputRef.current) {
         imageUploadInputRef.current.value = "";
       }
 
       toast.success(`已上传 ${imageFiles.length} 张参考图。`);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "参考图上传失败。");
     } finally {
@@ -1973,17 +2374,9 @@ export function InfiniteCanvasBoard({
       };
 
       setDraftResourceRefs(nextResourceRefs);
-      await patchCanvasNode(
-        apiContext,
-        selectedNode.id,
-        {
-          resourceRefs: nextResourceRefs,
-        },
-        "移除参考图失败。",
-      );
+      await saveNodePatch(selectedNode.id, { resourceRefs: nextResourceRefs }, "移除参考图失败。");
 
       toast.success("参考图已移除。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "移除参考图失败。");
     } finally {
@@ -2036,8 +2429,7 @@ export function InfiniteCanvasBoard({
 
       setDraftResourceRefs(nextResourceRefs);
 
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           resourceRefs: nextResourceRefs,
@@ -2077,7 +2469,6 @@ export function InfiniteCanvasBoard({
             : "末帧参考已更新。",
       );
       setDraftVideoSettings(persistedSettings);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "视频节点参考图保存失败。");
     } finally {
@@ -2109,8 +2500,7 @@ export function InfiniteCanvasBoard({
 
       setDraftResourceRefs(nextResourceRefs);
 
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           resourceRefs: nextResourceRefs,
@@ -2132,7 +2522,6 @@ export function InfiniteCanvasBoard({
 
       toast.success("视频参考图已移除。");
       setDraftVideoSettings(persistedSettings);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "移除视频参考图失败。");
     } finally {
@@ -2148,9 +2537,8 @@ export function InfiniteCanvasBoard({
     setIsSavingPrompt(true);
 
     try {
-      await patchCanvasNode(apiContext, selectedNode.id, { promptInput: draftPrompt }, "文本节点内容保存失败。");
+      await saveNodePatch(selectedNode.id, { promptInput: draftPrompt }, "文本节点内容保存失败。");
       toast.success("文本节点内容已保存。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "文本节点更新失败。");
     } finally {
@@ -2166,8 +2554,7 @@ export function InfiniteCanvasBoard({
     setIsSavingPrompt(true);
 
     try {
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           promptInput: draftPrompt,
@@ -2176,7 +2563,6 @@ export function InfiniteCanvasBoard({
         "分镜节点配置保存失败。",
       );
       toast.success("分镜节点配置已保存。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "分镜节点配置保存失败。");
     } finally {
@@ -2196,7 +2582,7 @@ export function InfiniteCanvasBoard({
     setGeneratingTextNodeId(selectedNode.id);
 
     try {
-      await patchCanvasNode(apiContext, selectedNode.id, { promptInput: draftPrompt }, "文本提示词保存失败。");
+      await saveNodePatch(selectedNode.id, { promptInput: draftPrompt }, "文本提示词保存失败。");
       await runCanvasNode(apiContext, selectedNode.id, `text-node-run-${crypto.randomUUID()}`, "AI 生成失败。");
 
       setTextGenerateCooldown({
@@ -2204,7 +2590,6 @@ export function InfiniteCanvasBoard({
         expiresAt: Date.now() + TEXT_GENERATE_COOLDOWN_MS,
       });
       toast.success("已提交 AI 生成请求。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "AI 生成失败。");
     } finally {
@@ -2224,8 +2609,7 @@ export function InfiniteCanvasBoard({
     setGeneratingStoryboardNodeId(selectedNode.id);
 
     try {
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           promptInput: draftPrompt,
@@ -2236,7 +2620,6 @@ export function InfiniteCanvasBoard({
       await runCanvasNode(apiContext, selectedNode.id, `storyboard-node-run-${crypto.randomUUID()}`, "分镜生成失败。");
 
       toast.success("已提交分镜生成请求。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "分镜生成失败。");
     } finally {
@@ -2252,9 +2635,8 @@ export function InfiniteCanvasBoard({
     setIsSavingImagePrompt(true);
 
     try {
-      await patchCanvasNode(apiContext, selectedNode.id, { promptInput: draftImagePrompt }, "图片节点提示词保存失败。");
+      await saveNodePatch(selectedNode.id, { promptInput: draftImagePrompt }, "图片节点提示词保存失败。");
       toast.success("图片节点提示词已保存。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "图片节点提示词保存失败。");
     } finally {
@@ -2274,11 +2656,10 @@ export function InfiniteCanvasBoard({
     setGeneratingImageNodeId(selectedNode.id);
 
     try {
-      await patchCanvasNode(apiContext, selectedNode.id, { promptInput: draftImagePrompt }, "图片提示词保存失败。");
+      await saveNodePatch(selectedNode.id, { promptInput: draftImagePrompt }, "图片提示词保存失败。");
       await runCanvasNode(apiContext, selectedNode.id, `image-node-run-${crypto.randomUUID()}`, "图片生成失败。");
 
       toast.success("已提交图片生成请求。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "图片生成失败。");
     } finally {
@@ -2307,8 +2688,7 @@ export function InfiniteCanvasBoard({
     try {
       const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
 
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           promptInput: draftVideoPrompt,
@@ -2336,7 +2716,6 @@ export function InfiniteCanvasBoard({
 
       toast.success("视频节点配置已保存。");
       setDraftVideoSettings(persistedSettings);
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "视频节点配置保存失败。");
     } finally {
@@ -2358,8 +2737,7 @@ export function InfiniteCanvasBoard({
     try {
       const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
 
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           promptInput: draftVideoPrompt,
@@ -2387,7 +2765,6 @@ export function InfiniteCanvasBoard({
       await runCanvasNode(apiContext, selectedNode.id, `video-node-run-${crypto.randomUUID()}`, "视频生成失败。");
 
       toast.success("已提交视频生成请求。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "视频生成失败。");
     } finally {
@@ -2502,8 +2879,7 @@ export function InfiniteCanvasBoard({
     setIsSavingPrompt(true);
 
     try {
-      await patchCanvasNode(
-        apiContext,
+      await saveNodePatch(
         selectedNode.id,
         {
           outputSnapshot: {
@@ -2515,7 +2891,6 @@ export function InfiniteCanvasBoard({
       );
 
       toast.success(selectedNode.type === "storyboard" ? "分镜节点内容已保存。" : "文本节点正文已保存。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : selectedNode.type === "storyboard" ? "分镜节点内容保存失败。" : "文本节点内容保存失败。");
     } finally {
@@ -2536,11 +2911,10 @@ export function InfiniteCanvasBoard({
     setIsSavingTextNodeTitle(true);
 
     try {
-      await patchCanvasNode(apiContext, nodeId, { title: nextTitle }, "节点标题保存失败。");
+      await saveNodePatch(nodeId, { title: nextTitle }, "节点标题保存失败。");
       setEditingTextNodeTitleId(null);
       setEditingTextNodeTitle("");
       toast.success("节点标题已保存。");
-      router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "节点标题保存失败。");
     } finally {
@@ -2548,7 +2922,7 @@ export function InfiniteCanvasBoard({
     }
   }
 
-  function startNodeDrag(nodeId: string, clientX: number, clientY: number) {
+  async function startNodeDrag(nodeId: string, clientX: number, clientY: number) {
     if (!canEdit) {
       setSelectedNodeIds([nodeId]);
       setSelectedNodeId(nodeId);
@@ -2560,6 +2934,10 @@ export function InfiniteCanvasBoard({
     const position = nodePositionMap.get(nodeId);
 
     if (!boardPoint || !position) {
+      return;
+    }
+
+    if (!ensureSelectionChangeAllowed([nodeId], nodeId)) {
       return;
     }
 
@@ -2647,53 +3025,61 @@ export function InfiniteCanvasBoard({
     <div className="relative h-screen overflow-hidden overscroll-none bg-background text-foreground">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.06),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(14,165,233,0.08),transparent_22%)]" />
 
-      <InfiniteCanvasBoardCreatePanel
-        canEdit={canEdit}
-        canGenerate={canGenerate}
-        batchRunCount={batchRunCount}
-        edgeCount={edges.length}
-        hasGroupedSelection={hasGroupedSelection}
-        hasSelectedNode={Boolean(selectedNode)}
-        isBatchRunning={isBatchRunning}
-        instructionPresets={instructionPresets}
-        isCreateOpen={isCreateOpen}
-        nodeCount={nodes.length}
-        onBatchRunCountChange={(value) => {
-          const nextValue = Number.isFinite(value) ? Math.max(1, Math.min(50, Math.round(value))) : 1;
+      {isHydrated ? (
+        <InfiniteCanvasBoardCreatePanel
+          canEdit={canEdit}
+          canGenerate={canGenerate}
+          canSaveCanvas={canEdit}
+          batchRunCount={batchRunCount}
+          canvasSaveStatusLabel={canvasSaveStatusLabel}
+          edgeCount={edges.length}
+          hasGroupedSelection={hasGroupedSelection}
+          hasSelectedNode={Boolean(selectedNode)}
+          isBatchRunning={isBatchRunning}
+          isSavingCanvas={canvasSaveState === "saving"}
+          instructionPresets={instructionPresets}
+          isCreateOpen={isCreateOpen}
+          nodeCount={nodes.length}
+          onBatchRunCountChange={(value) => {
+            const nextValue = Number.isFinite(value) ? Math.max(1, Math.min(50, Math.round(value))) : 1;
 
-          setBatchRunCount(nextValue);
-        }}
-        onCreateInstructionNode={(instructionPreset) => {
-          void createNodeFromResource(instructionPreset, "instruction", "text");
-        }}
-        onCreateSceneNode={(scene, selectedAssetId) => {
-          void createNodeFromResource(scene, "scene", "image", selectedAssetId);
-        }}
-        onCreateSubjectNode={(subject, selectedAssetId) => {
-          void createNodeFromResource(subject, "subject", "image", selectedAssetId);
-        }}
-        onGroupSelectedNodes={() => {
-          void handleGroupSelectedNodes();
-        }}
-        onSelectQuickType={setQuickType}
-        onRunSelectedNodes={() => {
-          void handleRunSelectedNodes();
-        }}
-        onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
-        onUngroupSelectedNodes={() => {
-          void handleUngroupSelectedNodes();
-        }}
-        onZoomIn={() => updateZoom(zoom + 0.1)}
-        onZoomOut={() => updateZoom(zoom - 0.1)}
-        quickType={quickType}
-        scenes={scenes}
-        selectedNodeCount={effectiveSelectedNodeIds.length}
-        selectedNodeTitles={selectedNodeTitles}
-        subjects={subjects}
-        taskCount={tasks.length}
-        workspaceId={workspaceId}
-        zoomLabel={`${Math.round(zoom * 100)}%`}
-      />
+            setBatchRunCount(nextValue);
+          }}
+          onCreateInstructionNode={(instructionPreset) => {
+            void createNodeFromResource(instructionPreset, "instruction", "text");
+          }}
+          onCreateSceneNode={(scene, selectedAssetId) => {
+            void createNodeFromResource(scene, "scene", "image", selectedAssetId);
+          }}
+          onCreateSubjectNode={(subject, selectedAssetId) => {
+            void createNodeFromResource(subject, "subject", "image", selectedAssetId);
+          }}
+          onGroupSelectedNodes={() => {
+            void handleGroupSelectedNodes();
+          }}
+          onSelectQuickType={setQuickType}
+          onRunSelectedNodes={() => {
+            void handleRunSelectedNodes();
+          }}
+          onSaveCanvas={() => {
+            void handleSaveCanvas();
+          }}
+          onToggleCreateOpen={() => setIsCreateOpen((value) => !value)}
+          onUngroupSelectedNodes={() => {
+            void handleUngroupSelectedNodes();
+          }}
+          onZoomIn={() => updateZoom(zoom + 0.1)}
+          onZoomOut={() => updateZoom(zoom - 0.1)}
+          quickType={quickType}
+          scenes={scenes}
+          selectedNodeCount={effectiveSelectedNodeIds.length}
+          selectedNodeTitles={selectedNodeTitles}
+          subjects={subjects}
+          taskCount={tasks.length}
+          workspaceId={workspaceId}
+          zoomLabel={`${Math.round(zoom * 100)}%`}
+        />
+      ) : null}
 
       <div
         ref={containerRef}

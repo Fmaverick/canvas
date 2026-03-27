@@ -203,6 +203,7 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
         canEdit={canEdit}
         canGenerate={canGenerate}
         canvasId={canvas.id}
+        canvasVersion={canvas.version}
         edges={canvas.edges}
         instructionPresets={instructionPresets}
         nodes={normalizedNodes}

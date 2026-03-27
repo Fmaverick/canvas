@@ -31,8 +31,11 @@ type ResourceModalKind = "subject" | "scene" | "instruction";
 type InfiniteCanvasBoardCreatePanelProps = {
   canEdit: boolean;
   canGenerate: boolean;
+  canSaveCanvas: boolean;
   isCreateOpen: boolean;
+  isSavingCanvas: boolean;
   quickType: CanvasNodeType;
+  canvasSaveStatusLabel: string;
   workspaceId: string;
   nodeCount: number;
   edgeCount: number;
@@ -57,6 +60,7 @@ type InfiniteCanvasBoardCreatePanelProps = {
   onBatchRunCountChange: (value: number) => void;
   onGroupSelectedNodes: () => void;
   onRunSelectedNodes: () => void;
+  onSaveCanvas: () => void;
   onUngroupSelectedNodes: () => void;
 };
 
@@ -306,8 +310,11 @@ function getInstructionSubtitle(item: InstructionPresetOption) {
 export function InfiniteCanvasBoardCreatePanel({
   canEdit,
   canGenerate,
+  canSaveCanvas,
   isCreateOpen,
+  isSavingCanvas,
   quickType,
+  canvasSaveStatusLabel,
   workspaceId,
   nodeCount,
   edgeCount,
@@ -332,6 +339,7 @@ export function InfiniteCanvasBoardCreatePanel({
   onBatchRunCountChange,
   onGroupSelectedNodes,
   onRunSelectedNodes,
+  onSaveCanvas,
   onUngroupSelectedNodes,
 }: InfiniteCanvasBoardCreatePanelProps) {
   const [activeResourceModal, setActiveResourceModal] = useState<ResourceModalKind | null>(null);
@@ -416,6 +424,26 @@ export function InfiniteCanvasBoardCreatePanel({
       </div>
 
       <div className="absolute right-5 top-5 z-20 flex items-start gap-2">
+        {canEdit ? (
+          <div className="rounded-[20px] border bg-background px-3 py-2 shadow-sm">
+            <div className="flex items-center gap-2">
+              <div className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-foreground">画布 {canvasSaveStatusLabel}</div>
+              <button
+                className={cn(
+                  "rounded-full px-3 py-1.5 text-xs font-medium transition",
+                  canSaveCanvas && !isSavingCanvas
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                    : "cursor-not-allowed bg-muted text-muted-foreground",
+                )}
+                disabled={!canSaveCanvas || isSavingCanvas}
+                type="button"
+                onClick={onSaveCanvas}
+              >
+                {isSavingCanvas ? "保存中" : "保存画布"}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {canGenerate ? (
           <div className="rounded-[20px] border bg-background px-3 py-2 shadow-sm">
             <div className="flex flex-wrap items-center gap-2">

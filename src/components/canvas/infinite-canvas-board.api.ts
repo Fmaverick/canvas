@@ -1,3 +1,5 @@
+import type { CanvasEdge, CanvasNode, CanvasNodeResourceRefs, CanvasNodeType } from "@/components/canvas/infinite-canvas-board.shared";
+
 type CanvasBoardApiContext = {
   canvasId: string;
   workspaceId: string;
@@ -12,6 +14,7 @@ type UploadTicket = {
 type ApiEnvelope<T> = {
   data: T;
   error?: {
+    code?: string;
     message?: string;
   };
 };
@@ -20,7 +23,14 @@ async function parseApiEnvelope<T>(response: Response, fallbackMessage: string) 
   const result = (await response.json()) as ApiEnvelope<T>;
 
   if (!response.ok) {
-    throw new Error(result?.error?.message ?? fallbackMessage);
+    const error = new Error(result?.error?.message ?? fallbackMessage) as Error & {
+      code?: string;
+      status?: number;
+    };
+    error.code = result?.error?.code;
+    error.status = response.status;
+
+    throw error;
   }
 
   return result.data;
@@ -59,6 +69,103 @@ export async function patchCanvasNode(
   });
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
+}
+
+export type CanvasGraphNodePatch = {
+  title?: string;
+  promptInput?: string | null;
+  outputSnapshot?: Record<string, unknown> | null;
+  modelKey?: string | null;
+  settingsJson?: Record<string, unknown> | null;
+  resourceRefs?: CanvasNodeResourceRefs;
+  positionX?: number;
+  positionY?: number;
+  status?: "idle" | "queued" | "processing" | "succeeded" | "failed";
+};
+
+export type CanvasGraphCreateNodePayload = {
+  type: CanvasNodeType;
+  title: string;
+  promptInput?: string;
+  outputSnapshot?: Record<string, unknown> | null;
+  modelKey?: string;
+  settingsJson?: Record<string, unknown>;
+  resourceRefs?: CanvasNodeResourceRefs;
+  positionX?: number;
+  positionY?: number;
+};
+
+export type CanvasGraphCreateEdgePayload = {
+  sourceNodeId: string;
+  targetNodeId: string;
+  mergeMode: "previous_only" | "merge_all" | "custom";
+  priority?: number;
+};
+
+export type CanvasGraphOperation =
+  | {
+      type: "move_nodes";
+      updates: Array<{
+        nodeId: string;
+        positionX: number;
+        positionY: number;
+      }>;
+    }
+  | {
+      type: "update_node";
+      nodeId: string;
+      patch: CanvasGraphNodePatch;
+    }
+  | {
+      type: "create_node";
+      clientId?: string;
+      node: CanvasGraphCreateNodePayload;
+    }
+  | {
+      type: "delete_node";
+      nodeId: string;
+    }
+  | {
+      type: "create_edge";
+      edge: CanvasGraphCreateEdgePayload;
+    }
+  | {
+      type: "delete_edge";
+      edgeId: string;
+    };
+
+export type CanvasGraphMutationResult = {
+  canvasVersion: number;
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  deletedNodeIds: string[];
+  deletedEdgeIds: string[];
+  operationResults: Array<{
+    type: string;
+    clientId: string | null;
+    nodeId: string | null;
+    edgeId: string | null;
+  }>;
+};
+
+export async function patchCanvasGraph(
+  context: CanvasBoardApiContext,
+  payload: {
+    baseVersion: number;
+    operations: CanvasGraphOperation[];
+  },
+  fallbackMessage: string,
+) {
+  const response = await fetch(`/api/canvases/${context.canvasId}/graph`, {
+    method: "PATCH",
+    headers: getWorkspaceHeaders(context.workspaceId),
+    body: JSON.stringify({
+      baseVersion: payload.baseVersion,
+      operations: payload.operations,
+    }),
+  });
+
+  return parseApiEnvelope<CanvasGraphMutationResult>(response, fallbackMessage);
 }
 
 export async function createCanvasNode(
