@@ -73,6 +73,32 @@ import {
 } from "@/components/canvas/infinite-canvas-board.shared";
 import { cn } from "@/lib/utils";
 
+function getNodePositionsFromNodes(nodes: CanvasNode[]) {
+  return Object.fromEntries(
+    nodes.map((node) => [
+      node.id,
+      {
+        x: Number.parseFloat(node.positionX || "0"),
+        y: Number.parseFloat(node.positionY || "0"),
+      },
+    ]),
+  ) as Record<string, { x: number; y: number }>;
+}
+
+function areNodePositionsEqual(
+  left: Record<string, { x: number; y: number }>,
+  right: Record<string, { x: number; y: number }>,
+) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return rightKeys.every((nodeId) => left[nodeId]?.x === right[nodeId]?.x && left[nodeId]?.y === right[nodeId]?.y);
+}
+
 export function InfiniteCanvasBoard({
   workspaceId,
   canEdit,
@@ -96,6 +122,8 @@ export function InfiniteCanvasBoard({
   const videoPreviewRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const canvasVersionRef = useRef(initialCanvasVersion);
   const mutationQueueRef = useRef(Promise.resolve<CanvasGraphMutationResult | null>(null));
+  const selectedNodeDraftPatchRef = useRef<CanvasGraphNodePatch | null>(null);
+  const effectiveSelectedNodeIdRef = useRef<string | null>(null);
 
   const [nodes, setNodes] = useState(initialNodes);
   const [edges, setEdges] = useState(initialEdges);
@@ -469,8 +497,13 @@ export function InfiniteCanvasBoard({
     isStructuredValueEqual,
     selectedNode,
   ]);
+  selectedNodeDraftPatchRef.current = selectedNodeDraftPatch;
+  effectiveSelectedNodeIdRef.current = effectiveSelectedNodeId;
   const applyRuntimeSnapshot = useCallback(
     (snapshot: CanvasRuntimeSnapshot) => {
+      const draftPatch = selectedNodeDraftPatchRef.current;
+      const selectedNodeId = effectiveSelectedNodeIdRef.current;
+
       canvasVersionRef.current = snapshot.canvasVersion;
 
       setNodes(
@@ -480,12 +513,12 @@ export function InfiniteCanvasBoard({
             resourceRefs: normalizeResourceRefs(node.resourceRefs),
           };
 
-          if (selectedNodeDraftPatch && node.id === effectiveSelectedNodeId) {
+          if (draftPatch && node.id === selectedNodeId) {
+            const patchedNode = applyNodePatchToLocal(normalizedNode, draftPatch);
+
             return {
-              ...applyNodePatchToLocal(normalizedNode, selectedNodeDraftPatch),
-              resourceRefs: normalizeResourceRefs(
-                applyNodePatchToLocal(normalizedNode, selectedNodeDraftPatch).resourceRefs,
-              ),
+              ...patchedNode,
+              resourceRefs: normalizeResourceRefs(patchedNode.resourceRefs),
             };
           }
 
@@ -495,7 +528,7 @@ export function InfiniteCanvasBoard({
       setTasks(snapshot.tasks);
       setBatchRuns(snapshot.batchRuns);
     },
-    [applyNodePatchToLocal, effectiveSelectedNodeId, selectedNodeDraftPatch],
+    [applyNodePatchToLocal],
   );
   const refreshCanvasRuntime = useCallback(
     async (fallbackMessage = "画布运行态刷新失败。") => {
@@ -652,17 +685,9 @@ export function InfiniteCanvasBoard({
     : [];
 
   useEffect(() => {
-    setNodePositions(
-      Object.fromEntries(
-        nodes.map((node) => [
-          node.id,
-          {
-            x: Number.parseFloat(node.positionX || "0"),
-            y: Number.parseFloat(node.positionY || "0"),
-          },
-        ]),
-      ),
-    );
+    const nextNodePositions = getNodePositionsFromNodes(nodes);
+
+    setNodePositions((current) => (areNodePositionsEqual(current, nextNodePositions) ? current : nextNodePositions));
   }, [nodes]);
 
   useEffect(() => {
