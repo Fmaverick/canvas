@@ -18,6 +18,7 @@ import { InfiniteCanvasBoardNodeCard } from "@/components/canvas/infinite-canvas
 import {
   completeUpload,
   createUploadPresign,
+  fetchCanvasBatchRunDetail,
   fetchCanvasRuntime,
   patchCanvasGraph,
   runCanvasNode,
@@ -61,6 +62,7 @@ import {
   serializeVideoNodeSettings,
   setCanvasNodeGroupId,
   triggerDownload,
+  type CanvasBatchRunDetail,
   type CanvasNode,
   type CanvasBatchRunResult,
   type CanvasNodeReferenceAsset,
@@ -133,6 +135,7 @@ export function InfiniteCanvasBoard({
   const [edges, setEdges] = useState(initialEdges);
   const [tasks, setTasks] = useState(initialTasks);
   const [batchRuns, setBatchRuns] = useState(initialBatchRuns);
+  const [batchRunDetailsById, setBatchRunDetailsById] = useState<Record<string, CanvasBatchRunDetail>>({});
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialNodes[0]?.id ?? null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(initialNodes[0]?.id ? [initialNodes[0].id] : []);
   const [isCreateOpen, setIsCreateOpen] = useState(initialNodes.length === 0);
@@ -182,6 +185,7 @@ export function InfiniteCanvasBoard({
   const [batchRunCount, setBatchRunCount] = useState(1);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [isBatchResultsOpen, setIsBatchResultsOpen] = useState(initialBatchRuns.length > 0);
+  const [isBatchRunDetailLoading, setIsBatchRunDetailLoading] = useState(false);
   const [selectedBatchRunId, setSelectedBatchRunId] = useState<string | null>(initialBatchRuns[0]?.id ?? null);
   const [batchPreviewPage, setBatchPreviewPage] = useState(1);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -589,20 +593,23 @@ export function InfiniteCanvasBoard({
   const visibleBatchRuns = isBatchRunSelectionFiltered ? matchingBatchRuns : batchRuns;
   const activeBatchRun =
     visibleBatchRuns.find((batchRun) => batchRun.id === selectedBatchRunId) ?? visibleBatchRuns[0] ?? null;
+  const activeBatchRunDetail = activeBatchRun ? batchRunDetailsById[activeBatchRun.id] ?? null : null;
   const activeBatchRunPreviewItems = useMemo(() => {
     if (!activeBatchRun) {
       return [];
     }
 
+    const activeRuns = activeBatchRunDetail?.runs ?? [];
+
     if (!isBatchRunSelectionFiltered) {
-      return activeBatchRun.runs;
+      return activeRuns;
     }
 
     const selectedNodeIdSet = new Set(effectiveSelectedNodeIds);
-    const filteredRuns = activeBatchRun.runs.filter((run) => selectedNodeIdSet.has(run.nodeId));
+    const filteredRuns = activeRuns.filter((run) => selectedNodeIdSet.has(run.nodeId));
 
-    return filteredRuns.length > 0 ? filteredRuns : activeBatchRun.runs;
-  }, [activeBatchRun, effectiveSelectedNodeIds, isBatchRunSelectionFiltered]);
+    return filteredRuns.length > 0 ? filteredRuns : activeRuns;
+  }, [activeBatchRun, activeBatchRunDetail, effectiveSelectedNodeIds, isBatchRunSelectionFiltered]);
   const batchPreviewPageSize = 4;
   const batchPreviewTotalPages = Math.max(1, Math.ceil(activeBatchRunPreviewItems.length / batchPreviewPageSize));
   const paginatedBatchPreviewItems = useMemo(() => {
@@ -738,6 +745,51 @@ export function InfiniteCanvasBoard({
   }, [selectedBatchRunId, visibleBatchRuns]);
 
   useEffect(() => {
+    if (!isBatchResultsOpen || !activeBatchRun) {
+      return;
+    }
+
+    if (
+      activeBatchRunDetail &&
+      activeBatchRunDetail.updatedAt === activeBatchRun.updatedAt &&
+      activeBatchRun.status !== "processing"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    setIsBatchRunDetailLoading(true);
+
+    void fetchCanvasBatchRunDetail(apiContext, activeBatchRun.id)
+      .then((detail) => {
+        if (cancelled) {
+          return;
+        }
+
+        setBatchRunDetailsById((current) => ({
+          ...current,
+          [detail.id]: detail,
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        toast.error(error instanceof Error ? error.message : "批量运行详情加载失败。");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsBatchRunDetailLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBatchRun, activeBatchRunDetail, apiContext, isBatchResultsOpen]);
+
+  useEffect(() => {
     const previousBatchRunIds = previousBatchRunIdsRef.current;
     const nextBatchRunIds = batchRuns.map((batchRun) => batchRun.id);
     const hasNewBatchRun = nextBatchRunIds.some((batchRunId) => !previousBatchRunIds.includes(batchRunId));
@@ -841,6 +893,8 @@ export function InfiniteCanvasBoard({
       batchRuns: initialBatchRuns,
     });
     setEdges(initialEdges);
+    setBatchRunDetailsById({});
+    setIsBatchRunDetailLoading(false);
     previousBatchRunIdsRef.current = initialBatchRuns.map((batchRun) => batchRun.id);
   }, [applyRuntimeSnapshot, initialBatchRuns, initialCanvasVersion, initialEdges, initialNodes, initialTasks]);
 
@@ -3875,6 +3929,7 @@ export function InfiniteCanvasBoard({
           canvasId={canvasId}
           currentPage={Math.min(batchPreviewPage, batchPreviewTotalPages)}
           filteredBySelection={isBatchRunSelectionFiltered}
+          isLoadingRuns={isBatchRunDetailLoading && !activeBatchRunDetail}
           onClose={() => setIsBatchResultsOpen(false)}
           onDownloadRun={downloadBatchRunResult}
           onNextPage={() => setBatchPreviewPage((currentPage) => Math.min(batchPreviewTotalPages, currentPage + 1))}

@@ -110,7 +110,7 @@ export type CanvasBatchRunResult = {
   assetMimeType: string | null;
 };
 
-export type CanvasBatchRunDetail = {
+export type CanvasBatchRunSummary = {
   id: string;
   mode: string;
   status: string;
@@ -122,6 +122,9 @@ export type CanvasBatchRunDetail = {
   selectedNodesJson: CanvasBatchRunNode[];
   createdAt: string | Date;
   updatedAt: string | Date;
+};
+
+export type CanvasBatchRunDetail = CanvasBatchRunSummary & {
   runs: CanvasBatchRunResult[];
 };
 
@@ -133,7 +136,7 @@ export type InfiniteCanvasBoardProps = {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   tasks: CanvasTask[];
-  batchRuns: CanvasBatchRunDetail[];
+  batchRuns: CanvasBatchRunSummary[];
   canvasId: string;
   subjects: LibraryItemOption[];
   scenes: LibraryItemOption[];

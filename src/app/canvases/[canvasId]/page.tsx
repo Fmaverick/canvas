@@ -2,11 +2,11 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 
 import { getCurrentUserFromRequest } from "@/application/services/auth-service";
-import { listAssetsByOwner } from "@/application/services/asset-service";
+import { listAssetsByOwners } from "@/application/services/asset-service";
 import { getCanvasDetail } from "@/application/services/canvas-service";
 import { listInstructionPresets } from "@/application/services/instruction-preset-service";
 import { listLibraryItems } from "@/application/services/library-item-service";
-import { getNodeRunBatch, listNodeRunBatches, listTasks } from "@/application/services/task-service";
+import { listNodeRunBatches, listTasks } from "@/application/services/task-service";
 import { InfiniteCanvasBoard } from "@/components/canvas/infinite-canvas-board";
 import { normalizeResourceRefs } from "@/components/canvas/infinite-canvas-board.shared";
 import { Badge } from "@/components/ui/badge";
@@ -59,33 +59,37 @@ async function enrichLibraryItemsWithAssets<
     coverAssetUrl: string | null;
   },
 >(workspaceId: string, items: TItem[]) {
-  const itemAssets = await Promise.all(
-    items.map(async (item) => {
-      const assets = await listAssetsByOwner({
-        workspaceId,
-        ownerType: "library_item",
-        ownerId: item.id,
-      });
-      const imageAssets = assets
-        .filter((asset) => asset.assetType === "image")
-        .map((asset) => ({
-          id: asset.id,
-          fileName: asset.fileName,
-          fileUrl: asset.fileUrl,
-          mimeType: asset.mimeType,
-          width: asset.width,
-          height: asset.height,
-        }));
+  const ownerAssets = await listAssetsByOwners({
+    workspaceId,
+    ownerType: "library_item",
+    ownerIds: items.map((item) => item.id),
+  });
+  const assetsByOwnerId = new Map<string, typeof ownerAssets>();
 
-      return {
-        ...item,
-        coverAssetUrl: item.coverAssetUrl ?? imageAssets.find((asset) => asset.id === item.coverAssetId)?.fileUrl ?? imageAssets[0]?.fileUrl ?? null,
-        assets: imageAssets,
-      };
-    }),
-  );
+  for (const asset of ownerAssets) {
+    const currentAssets = assetsByOwnerId.get(asset.ownerId) ?? [];
+    currentAssets.push(asset);
+    assetsByOwnerId.set(asset.ownerId, currentAssets);
+  }
 
-  return itemAssets;
+  return items.map((item) => {
+    const imageAssets = (assetsByOwnerId.get(item.id) ?? [])
+      .filter((asset) => asset.assetType === "image")
+      .map((asset) => ({
+        id: asset.id,
+        fileName: asset.fileName,
+        fileUrl: asset.fileUrl,
+        mimeType: asset.mimeType,
+        width: asset.width,
+        height: asset.height,
+      }));
+
+    return {
+      ...item,
+      coverAssetUrl: item.coverAssetUrl ?? imageAssets.find((asset) => asset.id === item.coverAssetId)?.fileUrl ?? imageAssets[0]?.fileUrl ?? null,
+      assets: imageAssets,
+    };
+  });
 }
 
 export default async function CanvasDetailPage({ params, searchParams }: CanvasDetailPageProps) {
@@ -177,15 +181,7 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
     listLibraryItems({ workspaceId, kind: "scene" }),
     listInstructionPresets({ workspaceId, userId: currentUserResult.user.id }),
   ]);
-  const [batchRuns, enrichedSubjects, enrichedScenes] = await Promise.all([
-    Promise.all(
-      batchRunSummaries.map((batchRun) =>
-        getNodeRunBatch({
-          workspaceId,
-          batchRunId: batchRun.id,
-        }),
-      ),
-    ),
+  const [enrichedSubjects, enrichedScenes] = await Promise.all([
     enrichLibraryItemsWithAssets(workspaceId, subjects),
     enrichLibraryItemsWithAssets(workspaceId, scenes),
   ]);
@@ -199,7 +195,7 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
   return (
     <main className="min-h-screen bg-muted/30 text-foreground">
       <InfiniteCanvasBoard
-        batchRuns={batchRuns}
+        batchRuns={batchRunSummaries}
         canEdit={canEdit}
         canGenerate={canGenerate}
         canvasId={canvas.id}

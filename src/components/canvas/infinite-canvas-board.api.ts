@@ -1,5 +1,6 @@
 import type {
   CanvasBatchRunDetail,
+  CanvasBatchRunSummary,
   CanvasEdge,
   CanvasNode,
   CanvasNodeResourceRefs,
@@ -159,7 +160,7 @@ export type CanvasRuntimeSnapshot = {
   canvasVersion: number;
   nodes: CanvasNode[];
   tasks: CanvasTask[];
-  batchRuns: CanvasBatchRunDetail[];
+  batchRuns: CanvasBatchRunSummary[];
 };
 
 export async function patchCanvasGraph(
@@ -192,6 +193,19 @@ export async function fetchCanvasRuntime(
   });
 
   return parseApiEnvelope<CanvasRuntimeSnapshot>(response, fallbackMessage);
+}
+
+export async function fetchCanvasBatchRunDetail(
+  context: CanvasBoardApiContext,
+  batchRunId: string,
+  fallbackMessage = "批量运行详情加载失败。",
+) {
+  const response = await fetch(`/api/tasks/batch-runs/${batchRunId}`, {
+    method: "GET",
+    headers: getWorkspaceHeaders(context.workspaceId, false),
+  });
+
+  return parseApiEnvelope<CanvasBatchRunDetail>(response, fallbackMessage);
 }
 
 export function subscribeCanvasRuntime(

@@ -1,8 +1,6 @@
 import { resolveWorkspaceContextFromRequest } from "@/application/services/auth-service";
 import { getCanvasDetail, getCanvasDetailInputSchema } from "@/application/services/canvas-service";
 import {
-  getNodeRunBatch,
-  getNodeRunBatchInputSchema,
   listNodeRunBatches,
   listNodeRunBatchesInputSchema,
   listTasks,
@@ -17,7 +15,7 @@ type RouteContext = {
 };
 
 export async function getCanvasRuntimeSnapshot(workspaceId: string, canvasId: string) {
-  const [canvas, tasks, batchRunSummaries] = await Promise.all([
+  const [canvas, tasks, batchRuns] = await Promise.all([
     getCanvasDetail(
       getCanvasDetailInputSchema.parse({
         workspaceId,
@@ -39,16 +37,6 @@ export async function getCanvasRuntimeSnapshot(workspaceId: string, canvasId: st
       }),
     ),
   ]);
-  const batchRuns = await Promise.all(
-    batchRunSummaries.map((batchRun) =>
-      getNodeRunBatch(
-        getNodeRunBatchInputSchema.parse({
-          workspaceId,
-          batchRunId: batchRun.id,
-        }),
-      ),
-    ),
-  );
 
   return {
     canvasVersion: canvas.version,

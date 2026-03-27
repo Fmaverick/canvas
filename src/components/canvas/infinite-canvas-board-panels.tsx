@@ -15,7 +15,7 @@ import {
   getCanvasBatchRunTitle,
   inferImageExtension,
   getStoryboardShotAssetNames,
-  type CanvasBatchRunDetail,
+  type CanvasBatchRunSummary,
   type CanvasBatchRunResult,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
@@ -1177,13 +1177,14 @@ export function ExpandedTextEditor({
 type BatchRunResultsPanelProps = {
   workspaceId: string;
   canvasId: string;
-  batchRuns: CanvasBatchRunDetail[];
+  batchRuns: CanvasBatchRunSummary[];
   activeBatchRunId: string | null;
   filteredBySelection: boolean;
   selectedNodeCount: number;
   currentPage: number;
   totalPages: number;
   paginatedRuns: CanvasBatchRunResult[];
+  isLoadingRuns: boolean;
   onSelectBatchRun: (batchRunId: string) => void;
   onPreviousPage: () => void;
   onNextPage: () => void;
@@ -1275,6 +1276,7 @@ export function BatchRunResultsPanel({
   currentPage,
   totalPages,
   paginatedRuns,
+  isLoadingRuns,
   onSelectBatchRun,
   onPreviousPage,
   onNextPage,
@@ -1390,7 +1392,11 @@ export function BatchRunResultsPanel({
               </div>
             </div>
 
-            {paginatedRuns.length === 0 ? (
+            {isLoadingRuns ? (
+              <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
+                正在加载当前批量运行详情。
+              </div>
+            ) : paginatedRuns.length === 0 ? (
               <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
                 当前筛选范围下还没有可预览的结果。
               </div>

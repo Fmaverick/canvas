@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/infrastructure/db/client";
@@ -32,6 +32,11 @@ const assetOwnerInputSchema = z.object({
   workspaceId: z.uuid(),
   ownerType: ownerTypeSchema,
   ownerId: z.uuid(),
+});
+const assetOwnersInputSchema = z.object({
+  workspaceId: z.uuid(),
+  ownerType: ownerTypeSchema,
+  ownerIds: z.array(z.uuid()).default([]),
 });
 const deleteAssetInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -119,6 +124,26 @@ export async function listAssetsByOwner(input: z.infer<typeof assetOwnerInputSch
     .select()
     .from(assets)
     .where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.ownerType, parsed.ownerType), eq(assets.ownerId, parsed.ownerId)))
+    .orderBy(asc(assets.createdAt));
+}
+
+export async function listAssetsByOwners(input: z.infer<typeof assetOwnersInputSchema>) {
+  const parsed = assetOwnersInputSchema.parse(input);
+
+  if (parsed.ownerIds.length === 0) {
+    return [];
+  }
+
+  return db
+    .select()
+    .from(assets)
+    .where(
+      and(
+        eq(assets.workspaceId, parsed.workspaceId),
+        eq(assets.ownerType, parsed.ownerType),
+        inArray(assets.ownerId, parsed.ownerIds),
+      ),
+    )
     .orderBy(asc(assets.createdAt));
 }
 
