@@ -435,9 +435,13 @@ function buildVideoReferenceImageEntries(input: {
 }
 
 function resolveVideoGenerationMode(settings: Record<string, unknown>) {
-  return settings.generationMode === "first_last" || settings.generationMode === "multi_shot"
+  return (
+    settings.generationMode === "first_last" ||
+    settings.generationMode === "multi_shot" ||
+    settings.generationMode === "smart_storyboard"
     ? settings.generationMode
-    : "reference";
+    : "reference"
+  );
 }
 
 async function getUpstreamImagePromptContextMap(
@@ -1191,7 +1195,7 @@ async function buildExecutionPayload(
   ]);
   const videoGenerationMode = node.type === "video" ? resolveVideoGenerationMode(mergedSettings) : null;
   const isFirstLastVideoMode = videoGenerationMode === "first_last";
-  const isMultiShotVideoMode = videoGenerationMode === "multi_shot";
+  const isStoryboardVideoMode = videoGenerationMode === "multi_shot" || videoGenerationMode === "smart_storyboard";
   const referenceOrderMaps = createVideoReferenceOrderMaps({
     subjectIds: normalizedNodeRefs.subjectIds,
     sceneIds: normalizedNodeRefs.sceneIds,
@@ -1247,7 +1251,7 @@ async function buildExecutionPayload(
   const firstFrameImageUrl = isFirstLastVideoMode ? firstFrameAsset?.fileUrl ?? configuredFirstFrameImageUrl : undefined;
   const lastFrameImageUrl = isFirstLastVideoMode ? lastFrameAsset?.fileUrl ?? configuredLastFrameImageUrl : undefined;
   const shotPrompts = uniqueStrings(
-    ((isMultiShotVideoMode ? ((mergedSettings.shotPrompts as unknown[]) ?? []) : []).filter(
+    ((isStoryboardVideoMode ? ((mergedSettings.shotPrompts as unknown[]) ?? []) : []).filter(
       (item): item is string => typeof item === "string",
     )),
   );

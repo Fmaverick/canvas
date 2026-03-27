@@ -751,6 +751,8 @@ export function VideoNodePanel({
   const isReferenceVideoMode = draftVideoSettings.generationMode === "reference";
   const isFirstLastVideoMode = draftVideoSettings.generationMode === "first_last";
   const isMultiShotVideoMode = draftVideoSettings.generationMode === "multi_shot";
+  const isSmartStoryboardVideoMode = draftVideoSettings.generationMode === "smart_storyboard";
+  const isStoryboardVideoMode = isMultiShotVideoMode || isSmartStoryboardVideoMode;
   const hasPresetVideoModel = VIDEO_MODEL_PRESET_OPTIONS.some((option) => option.value === draftVideoModelKey);
   const selectedVideoModelPreset = draftVideoModelKey.length === 0 || hasPresetVideoModel ? draftVideoModelKey : "__custom__";
 
@@ -787,13 +789,15 @@ export function VideoNodePanel({
               <p className="text-xs text-muted-foreground">
                 {isFirstLastVideoMode
                   ? "当前为首尾帧模式；上游文本会进入 prompt，上游图片会补充为参考图。"
-                  : isMultiShotVideoMode
-                    ? "当前为多镜头模式；上游文本会进入 prompt，上游图片会补充为参考图。"
+                  : isSmartStoryboardVideoMode
+                    ? "当前为智能分镜模式；会优先按完整分镜语义组织镜头，上游文本会进入 prompt，上游图片会补充为参考图。"
+                    : isMultiShotVideoMode
+                      ? "当前为自定义多镜头模式；上游文本会进入 prompt，上游图片会补充为参考图。"
                     : "当前为参考生成模式；上游文本会进入 prompt，上游图片会补充为参考图。"}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {!isMultiShotVideoMode ? (
+              {!isStoryboardVideoMode ? (
                 <Button
                   disabled={!canEdit || isUploadingVideoImages}
                   size="sm"
@@ -864,7 +868,8 @@ export function VideoNodePanel({
                 >
                   <option value="reference">参考生成</option>
                   <option value="first_last">首尾帧视频</option>
-                  <option value="multi_shot">多镜头模式</option>
+                  <option value="smart_storyboard">智能分镜</option>
+                  <option value="multi_shot">自定义多镜头</option>
                 </select>
               </label>
               <label className="space-y-1 text-xs text-muted-foreground">
@@ -966,8 +971,10 @@ export function VideoNodePanel({
             <p className="text-xs text-muted-foreground">
               {isFirstLastVideoMode
                 ? `${selectedVideoFirstFrameAsset ? "已设置首帧" : "未设置首帧"} · ${selectedVideoLastFrameAsset ? "已设置末帧" : "未设置末帧"}`
-                : isMultiShotVideoMode
-                  ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
+                : isSmartStoryboardVideoMode
+                  ? `已准备 ${draftVideoSettings.shotPrompts.length} 条分镜参考`
+                  : isMultiShotVideoMode
+                    ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
                   : `已关联 ${selectedVideoReferenceAssets.length} 张参考图`}
               {draftVideoModelKey.trim() ? ` · 当前模型 ${draftVideoModelKey.trim()}` : " · 当前使用默认视频模型"}
               {draftVideoSettings.withAudio ? " · 将请求带声音视频" : " · 当前请求静音视频"}

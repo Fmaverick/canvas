@@ -700,8 +700,10 @@ function InfiniteCanvasBoardNodeCardComponent({
               <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-foreground shadow-sm">
                 {videoSettings.generationMode === "first_last"
                   ? "首尾帧"
+                  : videoSettings.generationMode === "smart_storyboard"
+                    ? "智能分镜"
                   : videoSettings.generationMode === "multi_shot"
-                    ? "多镜头"
+                    ? "自定义多镜头"
                     : "参考生成"}
               </div>
               <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">

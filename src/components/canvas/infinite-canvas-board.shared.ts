@@ -143,7 +143,7 @@ export type InfiniteCanvasBoardProps = {
   instructionPresets: InstructionPresetOption[];
 };
 
-export type VideoGenerationMode = "reference" | "first_last" | "multi_shot";
+export type VideoGenerationMode = "reference" | "first_last" | "multi_shot" | "smart_storyboard";
 export type VideoAspectSize = "9:16" | "16:9" | "1:1";
 
 export type VideoNodeSettings = {
@@ -443,7 +443,9 @@ export function normalizeVideoNodeSettings(
   settingsJson: Record<string, unknown> | null | undefined,
 ): VideoNodeSettings {
   const generationMode =
-    settingsJson?.generationMode === "first_last" || settingsJson?.generationMode === "multi_shot"
+    settingsJson?.generationMode === "first_last" ||
+    settingsJson?.generationMode === "multi_shot" ||
+    settingsJson?.generationMode === "smart_storyboard"
       ? settingsJson.generationMode
       : "reference";
   const durationCandidate =
@@ -499,7 +501,7 @@ export function getPersistedVideoNodeSettings(settings: VideoNodeSettings): Vide
     };
   }
 
-  if (settings.generationMode === "multi_shot") {
+  if (settings.generationMode === "multi_shot" || settings.generationMode === "smart_storyboard") {
     return {
       ...settings,
       firstFrameAssetId: null,

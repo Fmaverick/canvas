@@ -2112,7 +2112,7 @@ export function InfiniteCanvasBoard({
 
     return {
       ...DEFAULT_VIDEO_NODE_SETTINGS,
-      generationMode: "multi_shot" as const,
+      generationMode: "smart_storyboard" as const,
       durationSec: Math.min(30, Math.max(1, totalDuration || Math.max(1, storyboardShots.length * 5))),
       shotPrompts,
     };
@@ -2135,28 +2135,14 @@ export function InfiniteCanvasBoard({
   function buildSingleShotVideoSettings(shot: StoryboardShot) {
     return {
       ...DEFAULT_VIDEO_NODE_SETTINGS,
-      generationMode: "multi_shot" as const,
+      generationMode: "smart_storyboard" as const,
       durationSec: Math.min(30, Math.max(1, shot.duration ?? 5)),
       shotPrompts: [shot.videoPrompt || shot.description].filter((value): value is string => Boolean(value && value.trim())),
     };
   }
 
-  function connectStoryboardSourceNodesToVideoNode(
-    storyboardNode: CanvasNode,
-    targetNodeId: string,
-    imageNodes: CanvasNode[],
-  ) {
-    const edgeOperations: CanvasGraphOperation[] = [
-      {
-        type: "create_edge",
-        edge: {
-          sourceNodeId: storyboardNode.id,
-          targetNodeId,
-          mergeMode: "merge_all",
-          priority: 0,
-        },
-      },
-    ];
+  function connectStoryboardImagesToVideoNode(targetNodeId: string, imageNodes: CanvasNode[]) {
+    const edgeOperations: CanvasGraphOperation[] = [];
 
     for (const [index, imageNode] of imageNodes.entries()) {
       edgeOperations.push({
@@ -2165,7 +2151,7 @@ export function InfiniteCanvasBoard({
           sourceNodeId: imageNode.id,
           targetNodeId,
           mergeMode: "merge_all",
-          priority: index + 1,
+          priority: index,
         },
       });
     }
@@ -2267,7 +2253,7 @@ export function InfiniteCanvasBoard({
               positionY: Math.round(basePosition.y + activeStoryboardShotIndex * 48),
             },
           },
-          ...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes),
+          ...connectStoryboardImagesToVideoNode(clientId, connectedImageNodes),
         ],
         autoRun ? "当前 Shot 视频生成失败。" : "当前 Shot 视频节点创建失败。",
       );
@@ -2337,7 +2323,7 @@ export function InfiniteCanvasBoard({
               positionY: Math.round(basePosition.y),
             },
           },
-          ...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes),
+          ...connectStoryboardImagesToVideoNode(clientId, connectedImageNodes),
         ],
         autoRun ? "分镜视频创建失败。" : "视频节点创建失败。",
       );
@@ -2406,7 +2392,7 @@ export function InfiniteCanvasBoard({
             positionY: Math.round(basePosition.y + index * 220),
           },
         });
-        operations.push(...connectStoryboardSourceNodesToVideoNode(selectedNode, clientId, connectedImageNodes));
+        operations.push(...connectStoryboardImagesToVideoNode(clientId, connectedImageNodes));
       });
 
       const result = await runGraphMutation(operations, "一键创建 Shot 视频节点失败。");

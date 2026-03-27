@@ -187,7 +187,7 @@ function normalizeVideoReferenceImageEntries(input: {
   return entries;
 }
 
-type CloubicVideoGenerationMode = "reference" | "first_last" | "multi_shot";
+type CloubicVideoGenerationMode = "reference" | "first_last" | "multi_shot" | "smart_storyboard";
 
 type CloubicVideoMultiPromptEntry = {
   prompt: string;
@@ -217,10 +217,19 @@ function resolveCloubicVideoGenerationMode(input: {
   candidate?: string;
   shotPrompts: string[];
   metadataMultiShot: boolean;
+  metadataShotType?: string;
   lastFrameImageUrl?: string;
 }): CloubicVideoGenerationMode {
-  if (input.candidate === "first_last" || input.candidate === "multi_shot") {
+  if (input.candidate === "first_last" || input.candidate === "multi_shot" || input.candidate === "smart_storyboard") {
     return input.candidate;
+  }
+
+  if (input.candidate === "smart") {
+    return "smart_storyboard";
+  }
+
+  if (input.metadataShotType === "smart") {
+    return "smart_storyboard";
   }
 
   if (input.shotPrompts.length > 0 || input.metadataMultiShot) {
@@ -248,8 +257,16 @@ function buildCloubicVideoPrompt(input: {
     promptSegments.push("生成模式：首尾帧视频。");
   }
 
+  if (input.generationMode === "smart_storyboard") {
+    promptSegments.push("生成模式：智能分镜视频。请基于完整分镜自动组织镜头切换、节奏与衔接。");
+  }
+
   if (input.generationMode === "multi_shot" && input.shotPrompts.length > 0) {
     promptSegments.push(`多镜头脚本：\n${input.shotPrompts.map((shotPrompt, index) => `${index + 1}. ${shotPrompt}`).join("\n")}`);
+  }
+
+  if (input.generationMode === "smart_storyboard" && input.shotPrompts.length > 0) {
+    promptSegments.push(`分镜参考：\n${input.shotPrompts.map((shotPrompt, index) => `${index + 1}. ${shotPrompt}`).join("\n")}`);
   }
 
   if (!hasImagePlaceholders && input.imageEntries.length > 0) {
@@ -284,6 +301,7 @@ function buildCloubicVideoRequestContext(input: GenerateVideoInput, resolvedMode
   const size = toString(input.settings?.size) ?? toString(input.settings?.aspectRatio) ?? toString(metadataSettings?.aspect_ratio) ?? "9:16";
   const metadataGenerationMode = toString(metadataSettings?.generation_mode);
   const metadataMultiShot = toBoolean(metadataSettings?.multi_shot) ?? false;
+  const metadataShotType = toString(metadataSettings?.shot_type);
   const directShotPrompts = Array.isArray(input.settings?.shotPrompts)
     ? input.settings.shotPrompts.filter(
         (shotPrompt): shotPrompt is string => typeof shotPrompt === "string" && shotPrompt.trim().length > 0,
@@ -303,6 +321,7 @@ function buildCloubicVideoRequestContext(input: GenerateVideoInput, resolvedMode
     candidate: toString(input.settings?.generationMode) ?? metadataGenerationMode,
     shotPrompts,
     metadataMultiShot,
+    metadataShotType,
     lastFrameImageUrl,
   });
   const motionStrength = toNumber(input.settings?.motionStrength) ?? toNumber(metadataSettings?.motion_strength);
@@ -369,10 +388,13 @@ function buildCloubicVideoRequestContext(input: GenerateVideoInput, resolvedMode
 }
 
 function buildCloubicVideoRequestBody(context: CloubicVideoRequestContext) {
+  const isStoryboardMultiShotMode = context.generationMode === "multi_shot" || context.generationMode === "smart_storyboard";
+  const metadataGenerationMode = context.generationMode === "smart_storyboard" ? "multi_shot" : context.generationMode;
+
   if (context.isOmniVideoModel) {
     const metadata: Record<string, unknown> = {
       ...(context.metadataSettings ?? {}),
-      multi_shot: context.generationMode === "multi_shot",
+      multi_shot: isStoryboardMultiShotMode,
       aspect_ratio: context.size,
       sound: context.sound,
       ...(context.referenceImageUrls.length > 0
@@ -387,6 +409,10 @@ function buildCloubicVideoRequestBody(context: CloubicVideoRequestContext) {
     if (context.generationMode === "multi_shot") {
       metadata.shot_type = "customize";
       metadata.multi_prompt = context.multiPrompt;
+    }
+
+    if (context.generationMode === "smart_storyboard") {
+      metadata.shot_type = "smart";
     }
 
     const requestBody: Record<string, unknown> = {
@@ -406,10 +432,10 @@ function buildCloubicVideoRequestBody(context: CloubicVideoRequestContext) {
 
   const metadata: Record<string, unknown> = {
     ...(context.metadataSettings ?? {}),
-    multi_shot: context.generationMode === "multi_shot",
+    multi_shot: isStoryboardMultiShotMode,
     aspect_ratio: context.size,
     sound: context.sound,
-    generation_mode: context.generationMode,
+    generation_mode: metadataGenerationMode,
     ...(context.imageEntries.length > 0
       ? {
           image_list: context.imageEntries.map((entry) => ({
@@ -424,6 +450,10 @@ function buildCloubicVideoRequestBody(context: CloubicVideoRequestContext) {
   if (context.generationMode === "multi_shot") {
     metadata.shot_type = "customize";
     metadata.multi_prompt = context.multiPrompt;
+  }
+
+  if (context.generationMode === "smart_storyboard") {
+    metadata.shot_type = "smart";
   }
 
   if (context.generationMode === "first_last" && context.encodedLastFrameImageUrl) {
