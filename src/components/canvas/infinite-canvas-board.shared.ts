@@ -221,8 +221,8 @@ export const IMAGE_NODE_MIN_HEIGHT = 140;
 export const IMAGE_NODE_MAX_HEIGHT = 320;
 export const VIDEO_NODE_WIDTH = 300;
 export const VIDEO_NODE_HEIGHT = 180;
-export const MIN_ZOOM = 0.6;
-export const MAX_ZOOM = 1.8;
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 4;
 export const TEXT_GENERATE_COOLDOWN_MS = 4000;
 export const CANVAS_NODE_GROUP_SETTINGS_KEY = "groupId";
 

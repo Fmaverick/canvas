@@ -1265,6 +1265,48 @@ export function InfiniteCanvasBoard({
     [camera.x, camera.y, viewportSize.height, viewportSize.width, zoom],
   );
 
+  const handleCanvasWheel = useCallback(
+    (event: WheelEvent) => {
+      event.preventDefault();
+
+      if (event.ctrlKey || event.metaKey) {
+        updateZoom(zoom - event.deltaY * 0.0015, event.clientX, event.clientY);
+
+        return;
+      }
+
+      setCamera((current) => ({
+        x: current.x + event.deltaX / zoom,
+        y: current.y + event.deltaY / zoom,
+      }));
+    },
+    [updateZoom, zoom],
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    const preventGestureDefault = (event: Event) => {
+      event.preventDefault();
+    };
+
+    container.addEventListener("wheel", handleCanvasWheel, { passive: false });
+    container.addEventListener("gesturestart", preventGestureDefault);
+    container.addEventListener("gesturechange", preventGestureDefault);
+    container.addEventListener("gestureend", preventGestureDefault);
+
+    return () => {
+      container.removeEventListener("wheel", handleCanvasWheel);
+      container.removeEventListener("gesturestart", preventGestureDefault);
+      container.removeEventListener("gesturechange", preventGestureDefault);
+      container.removeEventListener("gestureend", preventGestureDefault);
+    };
+  }, [handleCanvasWheel]);
+
   const syncImagePreviewSize = useCallback((nodeId: string, width: number, height: number) => {
     if (width <= 0 || height <= 0) {
       return;
@@ -3427,20 +3469,6 @@ export function InfiniteCanvasBoard({
           }
 
           startMarqueeSelection(event.clientX, event.clientY, event.metaKey || event.ctrlKey || event.shiftKey);
-        }}
-        onWheel={(event) => {
-          event.preventDefault();
-
-          if (event.ctrlKey || event.metaKey) {
-            updateZoom(zoom - event.deltaY * 0.0015, event.clientX, event.clientY);
-
-            return;
-          }
-
-          setCamera((current) => ({
-            x: current.x + event.deltaX / zoom,
-            y: current.y + event.deltaY / zoom,
-          }));
         }}
       >
         <div
