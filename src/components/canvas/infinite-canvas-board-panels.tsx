@@ -193,7 +193,9 @@ export function StoryboardNodePanel({
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{selectedNode.title}</p>
             <p className="text-xs text-muted-foreground">
-              这里会按 shotOutFormat 模板输出结构化分镜 JSON，上游文本会自动拼进 prompt，连入图片时会优先使用图片节点里的文本描述来提炼资产。
+              {draftSettings.generationMode === "smart_storyboard"
+                ? "当前为智能分镜：系统会基于故事梗概自动补足镜头节奏、景别变化、转场和情绪推进，并输出结构化分镜 JSON。"
+                : "当前为标准分镜：系统会按输入内容拆分镜头，并输出结构化分镜 JSON。"}
             </p>
           </div>
           <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
@@ -211,7 +213,23 @@ export function StoryboardNodePanel({
             />
 
             <div className="grid min-w-0 gap-3">
-              <div className="grid min-w-0 gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2">
+              <div className="grid min-w-0 gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-3">
+                <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                  <span>分镜方式</span>
+                  <select
+                    className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                    value={draftSettings.generationMode}
+                    onChange={(event) =>
+                      onSettingsChange((current) => ({
+                        ...current,
+                        generationMode: event.target.value === "standard" ? "standard" : "smart_storyboard",
+                      }))
+                    }
+                  >
+                    <option value="smart_storyboard">智能分镜</option>
+                    <option value="standard">标准分镜</option>
+                  </select>
+                </label>
                 <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
                   <span>镜头数量</span>
                   <Input
@@ -240,7 +258,11 @@ export function StoryboardNodePanel({
                 </div>
               </div>
 
-              <div className="grid gap-3 md:grid-cols-4">
+              <div className="grid gap-3 md:grid-cols-5">
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">分镜方式</div>
+                  <div className="mt-1 text-lg font-semibold">{draftSettings.generationMode === "smart_storyboard" ? "智能" : "标准"}</div>
+                </div>
                 <div className="rounded-2xl border bg-background/70 px-3 py-3">
                   <div className="text-[11px] text-muted-foreground">目标镜头</div>
                   <div className="mt-1 text-lg font-semibold">{draftSettings.shotCount}</div>
@@ -260,7 +282,10 @@ export function StoryboardNodePanel({
               </div>
 
               <div className="rounded-2xl border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。生成完成后可以直接创建分镜视频节点，并自动继承已连接的图片节点。
+                {draftSettings.generationMode === "smart_storyboard"
+                  ? "智能分镜会主动补镜头衔接、节奏变化和情绪推进。输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。"
+                  : "输出格式固定为 JSON，字段结构来自模板文件，videoPrompt 会强制保持英文。"}
+                生成完成后可以直接创建分镜视频节点，并自动继承已连接的图片节点。
               </div>
             </div>
           </div>
@@ -496,7 +521,7 @@ export function StoryboardNodePanel({
                 ? " · 当前正在生成中"
                 : hasShots
                   ? " · 当前分镜已可直接转为视频节点。"
-                  : " · 生成结果会作为结构化 JSON 回写到节点。"}
+                  : ` · ${draftSettings.generationMode === "smart_storyboard" ? "将按智能分镜方式生成。" : "生成结果会作为结构化 JSON 回写到节点。"}`}
             </p>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
               <Button disabled={isSavingPrompt || !canEdit} size="sm" type="button" variant="outline" onClick={onSavePrompt}>
@@ -508,7 +533,13 @@ export function StoryboardNodePanel({
                 type="button"
                 onClick={onGenerate}
               >
-                {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成分镜"}
+                {isGenerating
+                  ? "提交中..."
+                  : isTaskActive
+                    ? "生成中..."
+                    : draftSettings.generationMode === "smart_storyboard"
+                      ? "AI 智能分镜"
+                      : "AI 生成分镜"}
               </Button>
               <Button
                 disabled={!hasShots || isCreatingVideoNode || !canEdit}

@@ -145,6 +145,7 @@ export type InfiniteCanvasBoardProps = {
 
 export type VideoGenerationMode = "reference" | "first_last" | "multi_shot" | "smart_storyboard";
 export type VideoAspectSize = "9:16" | "16:9" | "1:1";
+export type StoryboardGenerationMode = "smart_storyboard" | "standard";
 
 export type VideoNodeSettings = {
   generationMode: VideoGenerationMode;
@@ -159,6 +160,7 @@ export type VideoNodeSettings = {
 };
 
 export type StoryboardNodeSettings = {
+  generationMode: StoryboardGenerationMode;
   shotCount: number;
   responseFormat: "json";
   templateFile: string;
@@ -237,6 +239,7 @@ export const DEFAULT_VIDEO_NODE_SETTINGS: VideoNodeSettings = {
 };
 
 export const DEFAULT_STORYBOARD_NODE_SETTINGS: StoryboardNodeSettings = {
+  generationMode: "smart_storyboard",
   shotCount: 6,
   responseFormat: "json",
   templateFile: "shotOutFormat.md",
@@ -554,8 +557,11 @@ export function normalizeStoryboardNodeSettings(
 ): StoryboardNodeSettings {
   const shotCountCandidate =
     typeof settingsJson?.shotCount === "number" ? settingsJson.shotCount : DEFAULT_STORYBOARD_NODE_SETTINGS.shotCount;
+  const generationMode: StoryboardGenerationMode =
+    settingsJson?.generationMode === "standard" ? "standard" : DEFAULT_STORYBOARD_NODE_SETTINGS.generationMode;
 
   return {
+    generationMode,
     shotCount: clampNumber(Math.round(shotCountCandidate), 1, 24),
     responseFormat: "json",
     templateFile:
@@ -567,6 +573,7 @@ export function normalizeStoryboardNodeSettings(
 
 export function serializeStoryboardNodeSettings(settings: StoryboardNodeSettings) {
   return {
+    generationMode: settings.generationMode,
     shotCount: settings.shotCount,
     responseFormat: settings.responseFormat,
     templateFile: settings.templateFile,

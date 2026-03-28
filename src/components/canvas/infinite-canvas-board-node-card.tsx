@@ -436,6 +436,9 @@ function InfiniteCanvasBoardNodeCardComponent({
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-2">
                   <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-foreground shadow-sm">
+                    {storyboardSettings?.generationMode === "standard" ? "标准分镜" : "智能分镜"}
+                  </div>
+                  <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-foreground shadow-sm">
                     {storyboardShotCount > 0 ? `${storyboardShotCount} 镜头` : `${storyboardSettings?.shotCount ?? 0} 镜头目标`}
                   </div>
                   <div className="rounded-full bg-background/88 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">

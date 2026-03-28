@@ -237,6 +237,10 @@ function normalizeStoryboardShotCount(shotCount: unknown) {
   return DEFAULT_STORYBOARD_SHOT_COUNT;
 }
 
+function normalizeStoryboardGenerationMode(mode: unknown) {
+  return mode === "standard" ? "standard" : "smart_storyboard";
+}
+
 function resolveStoryboardTemplatePath(templateFile: string) {
   return path.isAbsolute(templateFile) ? templateFile : path.join(process.cwd(), templateFile);
 }
@@ -260,16 +264,23 @@ function getStoryboardTemplate(templateFile: string) {
 function buildStoryboardGenerationPrompt(prompt: string, settings: Record<string, unknown>) {
   const templateFile = normalizeStoryboardTemplateFile(settings.templateFile);
   const shotCount = normalizeStoryboardShotCount(settings.shotCount);
+  const generationMode = normalizeStoryboardGenerationMode(settings.generationMode);
   const template = getStoryboardTemplate(templateFile);
   const brief = prompt.trim() || "请生成一套具备明确动作设计、镜头衔接和视频生成提示词的连续分镜。";
 
   return [
     "请根据以下创意简报生成一组连续分镜。",
+    generationMode === "smart_storyboard"
+      ? "采用智能分镜方式：主动补足叙事节奏、景别变化、镜头运动、转场设计和情绪推进，让整组分镜具备清晰起承转合。"
+      : "采用标准分镜方式：按用户提供的信息稳定拆分镜头，保持结构完整和描述准确。",
     `镜头数量必须严格为 ${shotCount} 个，sequence 从 1 递增到 ${shotCount}。`,
     "输出必须严格遵循下方模板中的字段名和层级结构。",
     "模板中的注释、说明文字、示例值、占位符和省略号都不要原样出现在最终 JSON 中。",
     "每个 shot 都必须补全 characters、transition、suggestedAssets、videoPrompt 等字段。",
     "videoPrompt 必须为英文，其他字段可根据内容自然表达，但整体必须保持 JSON 可解析。",
+    generationMode === "smart_storyboard"
+      ? "如果用户没有写清镜头衔接，请主动设计建立镜头、推进镜头、强调镜头和收束镜头，并保证前后镜头在人物、场景与动作上连续。"
+      : null,
     "如果上游存在图片节点，请优先使用这些图片节点中的文本描述来提炼稳定人物、场景和关键资产，并写入 suggestedAssetNames 与 suggestedAssets，命名保持一致。",
     `模板文件：${templateFile}`,
     "模板内容：",
