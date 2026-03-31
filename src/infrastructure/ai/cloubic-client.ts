@@ -833,7 +833,7 @@ export async function generateImageWithCloubic(input: GenerateImageInput): Promi
   }
 
   const referenceImages = (input.referenceImages ?? []).filter((imageUrl) => typeof imageUrl === "string" && imageUrl.trim().length > 0);
-  const rawResponse = await postChatCompletion({
+  const requestBody = {
     model: input.model ?? env.cloubicImageModel,
     messages: [
       {
@@ -856,7 +856,11 @@ export async function generateImageWithCloubic(input: GenerateImageInput): Promi
       },
     ],
     n: 1,
-  });
+  };
+
+  console.info("[cloubic-image] request payload", JSON.stringify(requestBody, null, 2));
+
+  const rawResponse = await postChatCompletion(requestBody);
 
   const content = rawResponse?.choices?.[0]?.message?.content;
 
