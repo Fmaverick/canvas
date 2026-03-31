@@ -27,18 +27,43 @@ type ApiEnvelope<T> = {
   };
 };
 
+function createApiError(
+  message: string,
+  options?: {
+    code?: string;
+    status?: number;
+  },
+) {
+  const error = new Error(message) as Error & {
+    code?: string;
+    status?: number;
+  };
+  error.code = options?.code;
+  error.status = options?.status;
+
+  return error;
+}
+
+async function requestApi(input: RequestInfo | URL, init: RequestInit, fallbackMessage: string) {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+
+    throw createApiError(fallbackMessage);
+  }
+}
+
 async function parseApiEnvelope<T>(response: Response, fallbackMessage: string) {
   const result = (await response.json()) as ApiEnvelope<T>;
 
   if (!response.ok) {
-    const error = new Error(result?.error?.message ?? fallbackMessage) as Error & {
-      code?: string;
-      status?: number;
-    };
-    error.code = result?.error?.code;
-    error.status = response.status;
-
-    throw error;
+    throw createApiError(result?.error?.message ?? fallbackMessage, {
+      code: result?.error?.code,
+      status: response.status,
+    });
   }
 
   return result.data;
@@ -56,10 +81,14 @@ export async function deleteCanvasNode(
   nodeId: string,
   fallbackMessage = "节点删除失败。",
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/nodes/${nodeId}`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}`,
+    {
     method: "DELETE",
     headers: getWorkspaceHeaders(context.workspaceId, false),
-  });
+    },
+    fallbackMessage,
+  );
 
   await parseApiEnvelope(response, fallbackMessage);
 }
@@ -70,11 +99,15 @@ export async function patchCanvasNode(
   payload: Record<string, unknown>,
   fallbackMessage: string,
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/nodes/${nodeId}`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}`,
+    {
     method: "PATCH",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify(payload),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
@@ -171,14 +204,18 @@ export async function patchCanvasGraph(
   },
   fallbackMessage: string,
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/graph`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/graph`,
+    {
     method: "PATCH",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify({
       baseVersion: payload.baseVersion,
       operations: payload.operations,
     }),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<CanvasGraphMutationResult>(response, fallbackMessage);
 }
@@ -187,10 +224,14 @@ export async function fetchCanvasRuntime(
   context: CanvasBoardApiContext,
   fallbackMessage = "画布运行态刷新失败。",
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/runtime`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/runtime`,
+    {
     method: "GET",
     headers: getWorkspaceHeaders(context.workspaceId, false),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<CanvasRuntimeSnapshot>(response, fallbackMessage);
 }
@@ -200,10 +241,14 @@ export async function fetchCanvasBatchRunDetail(
   batchRunId: string,
   fallbackMessage = "批量运行详情加载失败。",
 ) {
-  const response = await fetch(`/api/tasks/batch-runs/${batchRunId}`, {
+  const response = await requestApi(
+    `/api/tasks/batch-runs/${batchRunId}`,
+    {
     method: "GET",
     headers: getWorkspaceHeaders(context.workspaceId, false),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<CanvasBatchRunDetail>(response, fallbackMessage);
 }
@@ -246,12 +291,16 @@ export function subscribeCanvasRuntime(
 
   const connect = async () => {
     try {
-      const response = await fetch(`/api/canvases/${context.canvasId}/runtime/events`, {
+      const response = await requestApi(
+        `/api/canvases/${context.canvasId}/runtime/events`,
+        {
         method: "GET",
         headers: getWorkspaceHeaders(context.workspaceId, false),
         cache: "no-store",
         signal: abortController.signal,
-      });
+        },
+        "画布运行态连接失败，正在重连。",
+      );
 
       if (!response.ok) {
         await parseApiEnvelope(response, "画布运行态订阅失败。");
@@ -309,11 +358,15 @@ export async function createCanvasNode(
   payload: Record<string, unknown>,
   fallbackMessage = "创建节点失败。",
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/nodes`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes`,
+    {
     method: "POST",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify(payload),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
@@ -323,11 +376,15 @@ export async function createCanvasEdge(
   payload: Record<string, unknown>,
   fallbackMessage = "创建连线失败。",
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/edges`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/edges`,
+    {
     method: "POST",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify(payload),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
@@ -337,10 +394,14 @@ export async function deleteCanvasEdge(
   edgeId: string,
   fallbackMessage = "删除连线失败。",
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/edges/${edgeId}`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/edges/${edgeId}`,
+    {
     method: "DELETE",
     headers: getWorkspaceHeaders(context.workspaceId, false),
-  });
+    },
+    fallbackMessage,
+  );
 
   await parseApiEnvelope(response, fallbackMessage);
 }
@@ -351,14 +412,18 @@ export async function runCanvasNode(
   requestId: string,
   fallbackMessage: string,
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/nodes/${nodeId}/run`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/run`,
+    {
     method: "POST",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify({
       request_id: requestId,
       useUpstreamOutputs: true,
     }),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
@@ -371,14 +436,18 @@ export async function runCanvasNodeBatch(
   },
   fallbackMessage: string,
 ) {
-  const response = await fetch(`/api/canvases/${context.canvasId}/batch-runs`, {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/batch-runs`,
+    {
     method: "POST",
     headers: getWorkspaceHeaders(context.workspaceId),
     body: JSON.stringify({
       node_ids: payload.nodeIds,
       run_count: payload.runCount,
     }),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<Record<string, unknown>>(response, fallbackMessage);
 }
@@ -388,11 +457,15 @@ export async function createUploadPresign(
   payload: Record<string, unknown>,
   fallbackMessage = "上传凭证获取失败。",
 ) {
-  const response = await fetch("/api/uploads/presign", {
+  const response = await requestApi(
+    "/api/uploads/presign",
+    {
     method: "POST",
     headers: getWorkspaceHeaders(workspaceId),
     body: JSON.stringify(payload),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<UploadTicket>(response, fallbackMessage);
 }
@@ -402,11 +475,15 @@ export async function completeUpload(
   payload: Record<string, unknown>,
   fallbackMessage = "上传文件登记失败。",
 ) {
-  const response = await fetch("/api/uploads/complete", {
+  const response = await requestApi(
+    "/api/uploads/complete",
+    {
     method: "POST",
     headers: getWorkspaceHeaders(workspaceId),
     body: JSON.stringify(payload),
-  });
+    },
+    fallbackMessage,
+  );
 
   return parseApiEnvelope<{ id: string }>(response, fallbackMessage);
 }

@@ -36,6 +36,8 @@ type InfiniteCanvasBoardCreatePanelProps = {
   isSavingCanvas: boolean;
   quickType: CanvasNodeType;
   canvasSaveStatusLabel: string;
+  runtimeSyncStatusLabel: string;
+  runtimeSyncStatusTone: string;
   workspaceId: string;
   nodeCount: number;
   edgeCount: number;
@@ -315,6 +317,8 @@ export function InfiniteCanvasBoardCreatePanel({
   isSavingCanvas,
   quickType,
   canvasSaveStatusLabel,
+  runtimeSyncStatusLabel,
+  runtimeSyncStatusTone,
   workspaceId,
   nodeCount,
   edgeCount,
@@ -428,6 +432,7 @@ export function InfiniteCanvasBoardCreatePanel({
           <div className="rounded-[20px] border bg-background px-3 py-2 shadow-sm">
             <div className="flex items-center gap-2">
               <div className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-foreground">画布 {canvasSaveStatusLabel}</div>
+              <div className={cn("rounded-full px-2.5 py-1 text-[11px]", runtimeSyncStatusTone)}>{runtimeSyncStatusLabel}</div>
               <button
                 className={cn(
                   "rounded-full px-3 py-1.5 text-xs font-medium transition",

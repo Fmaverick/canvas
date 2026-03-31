@@ -196,6 +196,9 @@ export function InfiniteCanvasBoard({
     currentY: number;
   } | null>(null);
   const [canvasSaveState, setCanvasSaveState] = useState<"saved" | "saving" | "unsaved" | "error">("saved");
+  const [runtimeSyncState, setRuntimeSyncState] = useState<"connecting" | "live" | "reconnecting" | "degraded">(
+    "connecting",
+  );
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
   const isStructuredValueEqual = useCallback((left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right), []);
@@ -561,6 +564,20 @@ export function InfiniteCanvasBoard({
         : canvasSaveState === "error"
           ? "保存失败"
           : "已保存";
+  const runtimeSyncStatusLabel =
+    runtimeSyncState === "live"
+      ? "运行态已连接"
+      : runtimeSyncState === "reconnecting"
+        ? "运行态重连中"
+        : runtimeSyncState === "degraded"
+          ? "运行态降级刷新"
+          : "运行态连接中";
+  const runtimeSyncStatusTone =
+    runtimeSyncState === "live"
+      ? "bg-emerald-50 text-emerald-700"
+      : runtimeSyncState === "degraded"
+        ? "bg-amber-50 text-amber-700"
+        : "bg-muted text-foreground";
   const hasUnsavedCanvasChanges = selectedNodeDraftPatch !== null;
   const selectedNodes = effectiveSelectedNodeIds
     .map((nodeId) => nodeById.get(nodeId))
@@ -907,10 +924,15 @@ export function InfiniteCanvasBoard({
     let unsubscribe: (() => void) | null = null;
 
     const connect = () => {
+      if (runtimeStreamErrorCountRef.current === 0) {
+        setRuntimeSyncState("connecting");
+      }
+
       unsubscribe?.();
       unsubscribe = subscribeCanvasRuntime(apiContext, {
         onSnapshot: (snapshot) => {
           runtimeStreamErrorCountRef.current = 0;
+          setRuntimeSyncState("live");
           applyRuntimeSnapshot(snapshot);
         },
         onError: (error) => {
@@ -919,6 +941,8 @@ export function InfiniteCanvasBoard({
           }
 
           runtimeStreamErrorCountRef.current += 1;
+          setRuntimeSyncState(runtimeStreamErrorCountRef.current >= 3 ? "degraded" : "reconnecting");
+          void refreshCanvasRuntime("画布运行态临时刷新失败。").catch(() => undefined);
 
           if (runtimeStreamErrorCountRef.current === 1) {
             toast.error(error.message);
@@ -948,15 +972,36 @@ export function InfiniteCanvasBoard({
         runtimeStreamRetryTimeoutRef.current = null;
       }
     };
-  }, [apiContext, applyRuntimeSnapshot, isHydrated]);
+  }, [apiContext, applyRuntimeSnapshot, isHydrated, refreshCanvasRuntime]);
 
   useEffect(() => {
-    if (document.visibilityState !== "visible" || !hasActiveCanvasTasks || isPanning || selectionRect) {
-        return;
+    if (!isHydrated || !hasActiveCanvasTasks) {
+      return;
     }
 
-    void refreshCanvasRuntime();
-  }, [hasActiveCanvasTasks, isHydrated, isPanning, refreshCanvasRuntime, selectionRect]);
+    const refreshRuntime = () => {
+      if (document.visibilityState !== "visible" || isPanning || selectionRect) {
+        return;
+      }
+
+      void refreshCanvasRuntime("任务状态兜底刷新失败。").catch(() => undefined);
+    };
+    const intervalMs = runtimeSyncState === "live" ? 15000 : 5000;
+    const intervalId = window.setInterval(refreshRuntime, intervalMs);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshRuntime();
+      }
+    };
+
+    handleVisibilityChange();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [hasActiveCanvasTasks, isHydrated, isPanning, refreshCanvasRuntime, runtimeSyncState, selectionRect]);
 
   const flushCanvasChanges = useCallback(async () => {
     if (!selectedNode || !selectedNodeDraftPatch) {
@@ -3380,6 +3425,8 @@ export function InfiniteCanvasBoard({
           onZoomIn={() => updateZoom(zoom + 0.1)}
           onZoomOut={() => updateZoom(zoom - 0.1)}
           quickType={quickType}
+          runtimeSyncStatusLabel={runtimeSyncStatusLabel}
+          runtimeSyncStatusTone={runtimeSyncStatusTone}
           scenes={scenes}
           selectedNodeCount={effectiveSelectedNodeIds.length}
           selectedNodeTitles={selectedNodeTitles}
