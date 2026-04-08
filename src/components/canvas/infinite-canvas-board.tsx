@@ -432,6 +432,7 @@ export function InfiniteCanvasBoard({
     effectiveSelectedNodeIds[0] ??
     null;
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
+  const selectedNodeDraftIdentity = selectedNode ? `${selectedNode.id}:${selectedNode.type}` : null;
   const selectedNodeDraftPatch = useMemo((): CanvasGraphNodePatch | null => {
     if (!selectedNode) {
       return null;
@@ -900,7 +901,17 @@ export function InfiniteCanvasBoard({
     setDraftResourceRefs(normalizeResourceRefs(selectedNode?.resourceRefs));
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
-  }, [selectedNode]);
+  }, [selectedNodeDraftIdentity]);
+
+  useEffect(() => {
+    if (isExpandedEditorOpen) {
+      return;
+    }
+
+    if (selectedNode?.type === "text" || selectedNode?.type === "storyboard") {
+      setExpandedTextContent(getTextNodeContent(selectedNode.outputSnapshot));
+    }
+  }, [isExpandedEditorOpen, selectedNode?.id, selectedNode?.outputSnapshot, selectedNode?.type]);
 
   useEffect(() => {
     applyRuntimeSnapshot({

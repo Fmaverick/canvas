@@ -164,25 +164,28 @@ function NodeFloatingTitleBar({
 
 type ConnectionHandleProps = {
   direction: "incoming" | "outgoing";
+  zoom: number;
   isActive: boolean;
   isAvailable: boolean;
   label: string;
   onClick: () => void;
 };
 
-function ConnectionHandle({ direction, isActive, isAvailable, label, onClick }: ConnectionHandleProps) {
+function ConnectionHandle({ direction, zoom, isActive, isAvailable, label, onClick }: ConnectionHandleProps) {
   const isIncoming = direction === "incoming";
+  const handleScale = zoom < 1 ? Math.min(1.65, 1 / Math.max(zoom, 0.45)) : 1;
 
   return (
     <button
       aria-label={label}
       className={cn(
-        "absolute top-1/2 z-30 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border bg-background/96 text-[10px] font-semibold text-muted-foreground shadow-sm transition",
-        isIncoming ? "-left-4" : "-right-4",
+        "absolute top-1/2 z-30 inline-flex h-10 w-10 touch-manipulation items-center justify-center rounded-full border bg-background/96 text-[11px] font-semibold text-muted-foreground shadow-md transition",
+        isIncoming ? "-left-5" : "-right-5",
         isAvailable ? "hover:border-primary/50 hover:text-primary" : "cursor-not-allowed opacity-45",
         isActive ? "border-primary bg-primary text-primary-foreground opacity-100" : undefined,
       )}
       disabled={!isAvailable}
+      style={{ transform: `translateY(-50%) scale(${handleScale})` }}
       type="button"
       onClick={(event) => {
         event.stopPropagation();
@@ -322,6 +325,7 @@ function InfiniteCanvasBoardNodeCardComponent({
       {canReceiveConnection ? (
         <ConnectionHandle
           direction="incoming"
+          zoom={zoom}
           isActive={canAcceptPendingConnection}
           isAvailable={Boolean(pendingConnectionSourceId && canAcceptPendingConnection)}
           label={
@@ -342,6 +346,7 @@ function InfiniteCanvasBoardNodeCardComponent({
       {canStartConnection ? (
         <ConnectionHandle
           direction="outgoing"
+          zoom={zoom}
           isActive={isPendingSource}
           isAvailable
           label={isPendingSource ? `取消从${node.title}发出的连线` : `从${node.title}发起连线`}

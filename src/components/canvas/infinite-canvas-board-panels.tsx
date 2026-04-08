@@ -786,10 +786,18 @@ export function VideoNodePanel({
   const isStoryboardVideoMode = isMultiShotVideoMode || isSmartStoryboardVideoMode;
   const hasPresetVideoModel = VIDEO_MODEL_PRESET_OPTIONS.some((option) => option.value === draftVideoModelKey);
   const selectedVideoModelPreset = draftVideoModelKey.length === 0 || hasPresetVideoModel ? draftVideoModelKey : "__custom__";
+  const previewFallbackAsset =
+    selectedVideoFirstFrameAsset ?? selectedVideoLastFrameAsset ?? selectedVideoReferenceAssets[0] ?? null;
+  const videoPreviewAspectClass =
+    draftVideoSettings.size === "16:9"
+      ? "aspect-video"
+      : draftVideoSettings.size === "1:1"
+        ? "aspect-square"
+        : "aspect-[9/16]";
 
   return (
     <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
-      <div className="w-full max-w-6xl rounded-[24px] border bg-background/96 p-3 shadow-lg">
+      <div className="max-h-[calc(100vh-6rem)] w-full max-w-7xl overflow-y-auto rounded-[24px] border bg-background/96 p-3 shadow-lg">
         <input
           ref={videoFirstFrameInputRef}
           accept="image/*"
@@ -813,55 +821,55 @@ export function VideoNodePanel({
           onChange={(event) => onUploadVideoImages("reference", event.target.files)}
         />
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{selectedNode.title}</p>
-              <p className="text-xs text-muted-foreground">
-                {isFirstLastVideoMode
-                  ? "当前为首尾帧模式；上游文本会进入 prompt，上游图片会补充为参考图。"
-                  : isSmartStoryboardVideoMode
-                    ? "当前为智能分镜模式；会优先按完整分镜语义组织镜头，上游文本会进入 prompt，上游图片会补充为参考图。"
-                    : isMultiShotVideoMode
-                      ? "当前为自定义多镜头模式；上游文本会进入 prompt，上游图片会补充为参考图。"
-                    : "当前为参考生成模式；上游文本会进入 prompt，上游图片会补充为参考图。"}
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {!isStoryboardVideoMode ? (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="min-w-0 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">{selectedNode.title}</p>
+                <p className="text-xs text-muted-foreground">
+                  {isFirstLastVideoMode
+                    ? "当前为首尾帧模式；上游文本会进入 prompt，上游图片会补充为参考图。"
+                    : isSmartStoryboardVideoMode
+                      ? "当前为智能分镜模式；会优先按完整分镜语义组织镜头，上游文本会进入 prompt，上游图片会补充为参考图。"
+                      : isMultiShotVideoMode
+                        ? "当前为自定义多镜头模式；上游文本会进入 prompt，上游图片会补充为参考图。"
+                        : "当前为参考生成模式；上游文本会进入 prompt，上游图片会补充为参考图。"}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {!isStoryboardVideoMode ? (
+                  <Button
+                    disabled={!canEdit || isUploadingVideoImages}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      if (isFirstLastVideoMode) {
+                        videoFirstFrameInputRef.current?.click();
+
+                        return;
+                      }
+
+                      videoReferenceInputRef.current?.click();
+                    }}
+                  >
+                    <Upload className="mr-1 size-4" />
+                    {isUploadingVideoImages ? "上传中..." : isFirstLastVideoMode ? "上传首帧" : "上传参考图"}
+                  </Button>
+                ) : null}
                 <Button
-                  disabled={!canEdit || isUploadingVideoImages}
+                  disabled={!selectedVideoOutputSource}
                   size="sm"
                   type="button"
                   variant="outline"
-                  onClick={() => {
-                    if (isFirstLastVideoMode) {
-                      videoFirstFrameInputRef.current?.click();
-
-                      return;
-                    }
-
-                    videoReferenceInputRef.current?.click();
-                  }}
+                  onClick={onDownloadVideo}
                 >
-                  <Upload className="mr-1 size-4" />
-                  {isUploadingVideoImages ? "上传中..." : isFirstLastVideoMode ? "上传首帧" : "上传参考图"}
+                  <Download className="mr-1 size-4" />
+                  下载视频
                 </Button>
-              ) : null}
-              <Button
-                disabled={!selectedVideoOutputSource}
-                size="sm"
-                type="button"
-                variant="outline"
-                onClick={onDownloadVideo}
-              >
-                <Download className="mr-1 size-4" />
-                下载视频
-              </Button>
+              </div>
             </div>
-          </div>
 
-          <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
             <Textarea
               className="min-h-32 resize-none rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2"
               placeholder="描述视频内容、镜头语言、运动方式、主体和节奏，也可以结合首尾帧或参考图生成"
@@ -869,7 +877,7 @@ export function VideoNodePanel({
               onChange={(event) => onPromptChange(event.target.value)}
             />
 
-            <div className="grid gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2">
+            <div className="grid gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2 xl:grid-cols-3">
               <label className="space-y-1 text-xs text-muted-foreground">
                 <span>视频模型</span>
                 <select
@@ -968,186 +976,264 @@ export function VideoNodePanel({
                 />
               </label>
             </div>
-          </div>
 
-          {selectedVideoModelPreset === "__custom__" ? (
-            <label className="block space-y-1 text-xs text-muted-foreground">
-              <span>自定义模型 Key</span>
-              <Input
-                placeholder="例如：kling-3.0-master"
-                value={draftVideoModelKey}
-                onChange={(event) => onModelKeyChange(event.target.value)}
+            {selectedVideoModelPreset === "__custom__" ? (
+              <label className="block space-y-1 text-xs text-muted-foreground">
+                <span>自定义模型 Key</span>
+                <Input
+                  placeholder="例如：kling-3.0-master"
+                  value={draftVideoModelKey}
+                  onChange={(event) => onModelKeyChange(event.target.value)}
+                />
+              </label>
+            ) : null}
+
+            {isMultiShotVideoMode ? (
+              <Textarea
+                className="min-h-24 resize-none rounded-2xl border-0 bg-muted/30 shadow-none focus-visible:ring-2"
+                placeholder={"一行一个镜头，例如：\n镜头 1：产品从暗处转入主光，缓慢推进\n镜头 2：特写展示材质与细节\n镜头 3：人物上手使用并收尾定格"}
+                value={draftVideoSettings.shotPrompts.join("\n")}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    shotPrompts: event.target.value
+                      .split("\n")
+                      .map((item) => item.trim())
+                      .filter(Boolean),
+                  }))
+                }
               />
-            </label>
-          ) : null}
+            ) : null}
 
-          {isMultiShotVideoMode ? (
-            <Textarea
-              className="min-h-24 resize-none rounded-2xl border-0 bg-muted/30 shadow-none focus-visible:ring-2"
-              placeholder={"一行一个镜头，例如：\n镜头 1：产品从暗处转入主光，缓慢推进\n镜头 2：特写展示材质与细节\n镜头 3：人物上手使用并收尾定格"}
-              value={draftVideoSettings.shotPrompts.join("\n")}
-              onChange={(event) =>
-                onSettingsChange((current) => ({
-                  ...current,
-                  shotPrompts: event.target.value
-                    .split("\n")
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                }))
-              }
-            />
-          ) : null}
-
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              {isFirstLastVideoMode
-                ? `${selectedVideoFirstFrameAsset ? "已设置首帧" : "未设置首帧"} · ${selectedVideoLastFrameAsset ? "已设置末帧" : "未设置末帧"}`
-                : isSmartStoryboardVideoMode
-                  ? `已准备 ${draftVideoSettings.shotPrompts.length} 条分镜参考`
-                  : isMultiShotVideoMode
-                    ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
-                  : `已关联 ${selectedVideoReferenceAssets.length} 张参考图`}
-              {draftVideoModelKey.trim() ? ` · 当前模型 ${draftVideoModelKey.trim()}` : " · 当前使用默认视频模型"}
-              {draftVideoSettings.withAudio ? " · 将请求带声音视频" : " · 当前请求静音视频"}
-              {selectedVideoOutputSource ? " · 结果会直接显示在视频节点上。" : "。"}
-            </p>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button
-                disabled={isSavingVideoPrompt || !canEdit}
-                size="sm"
-                type="button"
-                variant="outline"
-                onClick={onSavePrompt}
-              >
-                {isSavingVideoPrompt ? "保存中..." : "保存配置"}
-              </Button>
-              <Button
-                disabled={isSavingVideoPrompt || isGenerating || isTaskActive || !canGenerate}
-                size="sm"
-                type="button"
-                onClick={onGenerate}
-              >
-                {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成视频"}
-              </Button>
-            </div>
-          </div>
-
-          {isFirstLastVideoMode ? (
-            <div className="grid gap-3 xl:grid-cols-2">
-              <div className="rounded-2xl border bg-muted/20 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium text-foreground">首帧</p>
-                  <Button
-                    disabled={!canEdit || isUploadingVideoImages}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                    onClick={() => videoFirstFrameInputRef.current?.click()}
-                  >
-                    上传
-                  </Button>
-                </div>
-                {selectedVideoFirstFrameAsset ? (
-                  <div className="relative h-24 overflow-hidden rounded-xl border">
-                    <img
-                      alt={selectedVideoFirstFrameAsset.fileName}
-                      className="h-full w-full object-cover"
-                      src={selectedVideoFirstFrameAsset.fileUrl}
-                    />
-                    <button
-                      aria-label="移除首帧"
-                      className="absolute right-2 top-2 inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
-                      disabled={!canEdit || isUploadingVideoImages}
-                      type="button"
-                      onClick={() => onRemoveVideoAsset(selectedVideoFirstFrameAsset.id)}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
-                    上传首帧参考
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-2xl border bg-muted/20 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium text-foreground">末帧</p>
-                  <Button
-                    disabled={!canEdit || isUploadingVideoImages}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                    onClick={() => videoLastFrameInputRef.current?.click()}
-                  >
-                    上传
-                  </Button>
-                </div>
-                {selectedVideoLastFrameAsset ? (
-                  <div className="relative h-24 overflow-hidden rounded-xl border">
-                    <img
-                      alt={selectedVideoLastFrameAsset.fileName}
-                      className="h-full w-full object-cover"
-                      src={selectedVideoLastFrameAsset.fileUrl}
-                    />
-                    <button
-                      aria-label="移除末帧"
-                      className="absolute right-2 top-2 inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
-                      disabled={!canEdit || isUploadingVideoImages}
-                      type="button"
-                      onClick={() => onRemoveVideoAsset(selectedVideoLastFrameAsset.id)}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
-                    上传末帧参考
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : null}
-
-          {isReferenceVideoMode ? (
-            <div className="rounded-2xl border bg-muted/20 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-xs font-medium text-foreground">参考图</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                {isFirstLastVideoMode
+                  ? `${selectedVideoFirstFrameAsset ? "已设置首帧" : "未设置首帧"} · ${selectedVideoLastFrameAsset ? "已设置末帧" : "未设置末帧"}`
+                  : isSmartStoryboardVideoMode
+                    ? `已准备 ${draftVideoSettings.shotPrompts.length} 条分镜参考`
+                    : isMultiShotVideoMode
+                      ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
+                      : `已关联 ${selectedVideoReferenceAssets.length} 张参考图`}
+                {draftVideoModelKey.trim() ? ` · 当前模型 ${draftVideoModelKey.trim()}` : " · 当前使用默认视频模型"}
+                {draftVideoSettings.withAudio ? " · 将请求带声音视频" : " · 当前请求静音视频"}
+                {selectedVideoOutputSource ? " · 结果会直接显示在右侧预览区。" : "。"}
+              </p>
+              <div className="flex shrink-0 items-center gap-2">
                 <Button
-                  disabled={!canEdit || isUploadingVideoImages}
+                  disabled={isSavingVideoPrompt || !canEdit}
                   size="sm"
                   type="button"
                   variant="outline"
-                  onClick={() => videoReferenceInputRef.current?.click()}
+                  onClick={onSavePrompt}
                 >
-                  上传
+                  {isSavingVideoPrompt ? "保存中..." : "保存配置"}
+                </Button>
+                <Button
+                  disabled={isSavingVideoPrompt || isGenerating || isTaskActive || !canGenerate}
+                  size="sm"
+                  type="button"
+                  onClick={onGenerate}
+                >
+                  {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成视频"}
                 </Button>
               </div>
-              {selectedVideoReferenceAssets.length ? (
-                <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                  {selectedVideoReferenceAssets.map((asset) => (
-                    <div key={asset.id} className="relative shrink-0">
-                      <img alt={asset.fileName} className="h-16 w-16 rounded-xl border object-cover" src={asset.fileUrl} />
+            </div>
+
+            {isFirstLastVideoMode ? (
+              <div className="grid gap-3 xl:grid-cols-2">
+                <div className="rounded-2xl border bg-muted/20 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-foreground">首帧</p>
+                    <Button
+                      disabled={!canEdit || isUploadingVideoImages}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                      onClick={() => videoFirstFrameInputRef.current?.click()}
+                    >
+                      上传
+                    </Button>
+                  </div>
+                  {selectedVideoFirstFrameAsset ? (
+                    <div className="relative h-24 overflow-hidden rounded-xl border">
+                      <img
+                        alt={selectedVideoFirstFrameAsset.fileName}
+                        className="h-full w-full object-cover"
+                        src={selectedVideoFirstFrameAsset.fileUrl}
+                      />
                       <button
-                        aria-label="移除参考图"
-                        className="absolute -right-1 -top-1 inline-flex size-5 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
+                        aria-label="移除首帧"
+                        className="absolute right-2 top-2 inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
                         disabled={!canEdit || isUploadingVideoImages}
                         type="button"
-                        onClick={() => onRemoveVideoAsset(asset.id)}
+                        onClick={() => onRemoveVideoAsset(selectedVideoFirstFrameAsset.id)}
                       >
                         <X className="size-3" />
                       </button>
                     </div>
-                  ))}
+                  ) : (
+                    <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
+                      上传首帧参考
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border bg-muted/20 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-foreground">末帧</p>
+                    <Button
+                      disabled={!canEdit || isUploadingVideoImages}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                      onClick={() => videoLastFrameInputRef.current?.click()}
+                    >
+                      上传
+                    </Button>
+                  </div>
+                  {selectedVideoLastFrameAsset ? (
+                    <div className="relative h-24 overflow-hidden rounded-xl border">
+                      <img
+                        alt={selectedVideoLastFrameAsset.fileName}
+                        className="h-full w-full object-cover"
+                        src={selectedVideoLastFrameAsset.fileUrl}
+                      />
+                      <button
+                        aria-label="移除末帧"
+                        className="absolute right-2 top-2 inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
+                        disabled={!canEdit || isUploadingVideoImages}
+                        type="button"
+                        onClick={() => onRemoveVideoAsset(selectedVideoLastFrameAsset.id)}
+                      >
+                        <X className="size-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
+                      上传末帧参考
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {isReferenceVideoMode ? (
+              <div className="rounded-2xl border bg-muted/20 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-foreground">参考图</p>
+                  <Button
+                    disabled={!canEdit || isUploadingVideoImages}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={() => videoReferenceInputRef.current?.click()}
+                  >
+                    上传
+                  </Button>
+                </div>
+                {selectedVideoReferenceAssets.length ? (
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                    {selectedVideoReferenceAssets.map((asset) => (
+                      <div key={asset.id} className="relative shrink-0">
+                        <img alt={asset.fileName} className="h-16 w-16 rounded-xl border object-cover" src={asset.fileUrl} />
+                        <button
+                          aria-label="移除参考图"
+                          className="absolute -right-1 -top-1 inline-flex size-5 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
+                          disabled={!canEdit || isUploadingVideoImages}
+                          type="button"
+                          onClick={() => onRemoveVideoAsset(asset.id)}
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
+                    上传参考图做视频参考生成
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="rounded-[22px] border bg-muted/18 p-3">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-foreground">当前视频预览</p>
+                <p className="text-xs text-muted-foreground">
+                  右侧固定预览当前选中视频节点，参数配置保持在左侧正常显示。
+                </p>
+              </div>
+              <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {draftVideoSettings.size}
+              </div>
+            </div>
+
+            <div className={`overflow-hidden rounded-[20px] border bg-black ${videoPreviewAspectClass}`}>
+              {selectedVideoOutputSource ? (
+                <video
+                  key={selectedVideoOutputSource}
+                  className="h-full w-full object-contain"
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={selectedVideoOutputSource}
+                />
+              ) : previewFallbackAsset ? (
+                <div className="relative h-full w-full">
+                  <img
+                    alt={previewFallbackAsset.fileName}
+                    className="h-full w-full object-cover opacity-90"
+                    src={previewFallbackAsset.fileUrl}
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/45">
+                    <div className="rounded-full bg-background/90 px-3 py-1 text-xs text-foreground shadow-sm">
+                      暂无生成结果，当前展示参考图
+                    </div>
+                  </div>
                 </div>
               ) : (
-                <div className="flex h-24 items-center justify-center rounded-xl border border-dashed text-xs text-muted-foreground">
-                  上传参考图做视频参考生成
+                <div className="flex h-full items-center justify-center px-6 text-center">
+                  <div>
+                    <div className="mx-auto mb-3 inline-flex size-12 items-center justify-center rounded-full bg-white/10 text-white">
+                      <Video className="size-5" />
+                    </div>
+                    <p className="text-sm font-medium text-white">当前还没有可预览的视频结果</p>
+                    <p className="mt-1 text-xs text-white/70">左侧完成参数配置后生成，结果会直接显示在这里。</p>
+                  </div>
                 </div>
               )}
             </div>
-          ) : null}
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                disabled={!selectedVideoOutputSource}
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={onDownloadVideo}
+              >
+                <Download className="mr-1 size-4" />
+                下载当前结果
+              </Button>
+              <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {isFirstLastVideoMode
+                  ? "首尾帧"
+                  : isSmartStoryboardVideoMode
+                    ? "智能分镜"
+                    : isMultiShotVideoMode
+                      ? "自定义多镜头"
+                      : "参考生成"}
+              </div>
+              <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {draftVideoSettings.durationSec}s
+              </div>
+              <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {draftVideoSettings.withAudio ? "带声音" : "静音视频"}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
