@@ -14,6 +14,7 @@ export const listLibraryItemsInputSchema = z.object({
   kind: libraryItemKindSchema,
   keyword: z.string().trim().optional(),
   tag: z.string().trim().optional(),
+  entityType: z.string().trim().optional(),
 });
 
 export const createLibraryItemInputSchema = z.object({
@@ -110,6 +111,7 @@ export async function listLibraryItems(input: z.infer<typeof listLibraryItemsInp
         eq(libraryItems.kind, parsed.kind),
         eq(libraryItems.status, "active"),
         parsed.keyword ? ilike(libraryItems.name, `%${parsed.keyword}%`) : undefined,
+        parsed.entityType ? eq(libraryItems.entityType, parsed.entityType) : undefined,
       ),
     )
     .orderBy(desc(libraryItems.updatedAt));

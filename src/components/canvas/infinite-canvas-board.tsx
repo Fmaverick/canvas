@@ -2785,12 +2785,13 @@ export function InfiniteCanvasBoard({
     resourceType: "subject" | "scene" | "instruction",
     nodeType: Exclude<CanvasNodeType, "audio">,
     selectedAssetId?: string | null,
+    explicitPosition?: { x: number; y: number },
   ) {
     if (!canEdit) {
       return;
     }
 
-    const nextPosition = getNextCreatePosition();
+    const nextPosition = explicitPosition ?? getNextCreatePosition();
     const option = quickCreateOptions.find((item) => item.value === nodeType);
     const instructionContent =
       resourceType === "instruction" ? buildPromptFromInstructionPreset(source as InstructionPresetOption) : null;
@@ -3730,7 +3731,10 @@ export function InfiniteCanvasBoard({
             return;
           }
 
-          if (event.dataTransfer.types.includes("application/x-canvas-node-type")) {
+          if (
+            event.dataTransfer.types.includes("application/x-canvas-node-type") ||
+            event.dataTransfer.types.includes("application/x-canvas-library-item")
+          ) {
             event.preventDefault();
             event.dataTransfer.dropEffect = "copy";
             setIsCanvasDragOver(true);
@@ -3742,8 +3746,9 @@ export function InfiniteCanvasBoard({
           }
 
           const draggedType = event.dataTransfer.getData("application/x-canvas-node-type") as CanvasNodeType | "";
+          const draggedLibraryItem = event.dataTransfer.getData("application/x-canvas-library-item");
 
-          if (!draggedType) {
+          if (!draggedType && !draggedLibraryItem) {
             return;
           }
 
@@ -3755,7 +3760,35 @@ export function InfiniteCanvasBoard({
             return;
           }
 
-          void createNodeAtPosition(draggedType, point.x, point.y);
+          if (draggedType) {
+            void createNodeAtPosition(draggedType, point.x, point.y);
+
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(draggedLibraryItem) as {
+              id?: string;
+              kind?: string;
+            };
+
+            if (!parsed?.id || (parsed.kind !== "subject" && parsed.kind !== "scene")) {
+              return;
+            }
+
+            const source =
+              parsed.kind === "subject"
+                ? subjects.find((item) => item.id === parsed.id) ?? null
+                : scenes.find((item) => item.id === parsed.id) ?? null;
+
+            if (!source) {
+              return;
+            }
+
+            void createNodeFromResource(source, parsed.kind, "image", source.coverAssetId ?? source.assets?.[0]?.id ?? null, point);
+          } catch {
+            return;
+          }
         }}
         onPointerMove={(event) => {
           if (!pendingConnectionSourceId) {

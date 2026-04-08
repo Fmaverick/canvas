@@ -67,6 +67,20 @@ type LibraryDraft = {
   tags: string;
 };
 
+type SubjectViewMode = "all" | "model" | "product";
+
+type ModelProfileDraft = {
+  gender: string;
+  ageRange: string;
+  makeupStyle: string;
+  hairStyle: string;
+  outfitStyle: string;
+  ecommerceCategory: string;
+  shootTexture: string;
+  usageNotes: string;
+  presetType: string;
+};
+
 type LibraryAssetRecord = {
   id: string;
   ownerId: string;
@@ -160,6 +174,8 @@ const sectionMeta = {
   },
 } as const;
 
+const MODEL_ENTITY_TYPES = new Set(["model", "person"]);
+
 function normalizeTags(value: string) {
   return Array.from(
     new Set(
@@ -169,6 +185,65 @@ function normalizeTags(value: string) {
         .filter(Boolean),
     ),
   );
+}
+
+function isModelEntityType(value: string | null | undefined) {
+  return typeof value === "string" && MODEL_ENTITY_TYPES.has(value.trim().toLowerCase());
+}
+
+function createEmptyModelProfileDraft(): ModelProfileDraft {
+  return {
+    gender: "",
+    ageRange: "",
+    makeupStyle: "",
+    hairStyle: "",
+    outfitStyle: "",
+    ecommerceCategory: "",
+    shootTexture: "",
+    usageNotes: "",
+    presetType: "",
+  };
+}
+
+function buildModelProfileDraft(item: LibraryItemRecord | null): ModelProfileDraft {
+  const profileMeta = item?.profileMeta && typeof item.profileMeta === "object" ? item.profileMeta : {};
+
+  return {
+    gender: typeof profileMeta.gender === "string" ? profileMeta.gender : "",
+    ageRange: typeof profileMeta.ageRange === "string" ? profileMeta.ageRange : "",
+    makeupStyle: typeof profileMeta.makeupStyle === "string" ? profileMeta.makeupStyle : "",
+    hairStyle: typeof profileMeta.hairStyle === "string" ? profileMeta.hairStyle : "",
+    outfitStyle: typeof profileMeta.outfitStyle === "string" ? profileMeta.outfitStyle : "",
+    ecommerceCategory: typeof profileMeta.ecommerceCategory === "string" ? profileMeta.ecommerceCategory : "",
+    shootTexture: typeof profileMeta.shootTexture === "string" ? profileMeta.shootTexture : "",
+    usageNotes: typeof profileMeta.usageNotes === "string" ? profileMeta.usageNotes : "",
+    presetType: typeof profileMeta.presetType === "string" ? profileMeta.presetType : "",
+  };
+}
+
+function mergeModelProfileMeta(
+  currentProfileMeta: Record<string, unknown> | undefined,
+  modelProfileDraft: ModelProfileDraft,
+  enabled: boolean,
+) {
+  const base = { ...(currentProfileMeta ?? {}) };
+
+  if (!enabled) {
+    return base;
+  }
+
+  return {
+    ...base,
+    gender: modelProfileDraft.gender.trim() || null,
+    ageRange: modelProfileDraft.ageRange.trim() || null,
+    makeupStyle: modelProfileDraft.makeupStyle.trim() || null,
+    hairStyle: modelProfileDraft.hairStyle.trim() || null,
+    outfitStyle: modelProfileDraft.outfitStyle.trim() || null,
+    ecommerceCategory: modelProfileDraft.ecommerceCategory.trim() || null,
+    shootTexture: modelProfileDraft.shootTexture.trim() || null,
+    usageNotes: modelProfileDraft.usageNotes.trim() || null,
+    presetType: modelProfileDraft.presetType.trim() || null,
+  };
 }
 
 function formatDate(value: string | Date) {
@@ -267,10 +342,12 @@ function buildGenerationDraftFromProfileMeta(item: LibraryItemRecord | null): Su
 function buildLibraryItemProfileMeta(
   currentProfileMeta: Record<string, unknown> | undefined,
   generationDraft: SubjectGenerationDraft,
+  modelProfileDraft?: ModelProfileDraft,
+  isModel = false,
   assembledPrompt?: string,
 ) {
   return {
-    ...(currentProfileMeta ?? {}),
+    ...mergeModelProfileMeta(currentProfileMeta, modelProfileDraft ?? createEmptyModelProfileDraft(), isModel),
     libraryGeneration: {
       mode: generationDraft.mode,
       instructionPresetId: generationDraft.instructionPresetId || null,
@@ -364,15 +441,20 @@ export function LibrariesStudio({
   const [subjectItems, setSubjectItems] = useState(subjects);
   const [sceneItems, setSceneItems] = useState(scenes);
   const [instructionItems, setInstructionItems] = useState(instructionPresets);
+  const [subjectViewMode, setSubjectViewMode] = useState<SubjectViewMode>("all");
   const [selectedId, setSelectedId] = useState<string | null>(subjects[0]?.id ?? null);
   const [keyword, setKeyword] = useState("");
   const [libraryDraft, setLibraryDraft] = useState<LibraryDraft>(
     subjects[0] ? buildLibraryDraft(subjects[0]) : createEmptyLibraryDraft("subject"),
   );
+  const [modelProfileDraft, setModelProfileDraft] = useState<ModelProfileDraft>(
+    subjects[0] ? buildModelProfileDraft(subjects[0]) : createEmptyModelProfileDraft(),
+  );
   const [instructionDraft, setInstructionDraft] = useState<InstructionDraft>(
     instructionPresets[0] ? buildInstructionDraft(instructionPresets[0]) : createEmptyInstructionDraft(),
   );
   const [createLibraryDraft, setCreateLibraryDraft] = useState<LibraryDraft>(createEmptyLibraryDraft("subject"));
+  const [createModelProfileDraft, setCreateModelProfileDraft] = useState<ModelProfileDraft>(createEmptyModelProfileDraft());
   const [createInstructionDraft, setCreateInstructionDraft] = useState<InstructionDraft>(createEmptyInstructionDraft());
   const [subjectAssets, setSubjectAssets] = useState<LibraryAssetRecord[]>([]);
   const [subjectPreviewUrls, setSubjectPreviewUrls] = useState<Record<string, string>>({});
@@ -420,10 +502,21 @@ export function LibrariesStudio({
       ? "邀请成员加入当前 team workspace 后，对方切换到这个空间即可直接使用这里的主体、场景和指令库。"
       : "当前页面已经是共享资源库。你可以直接使用这些资源，但成员邀请和角色调整需要 owner 或 admin 操作。"
     : "当前页面属于 personal workspace，资源默认私有，不支持直接邀请成员共享。";
+  const currentSubjectItems = useMemo(() => {
+    if (subjectViewMode === "all") {
+      return subjectItems;
+    }
+
+    if (subjectViewMode === "model") {
+      return subjectItems.filter((item) => isModelEntityType(item.entityType));
+    }
+
+    return subjectItems.filter((item) => !isModelEntityType(item.entityType));
+  }, [subjectItems, subjectViewMode]);
 
   const currentItems = useMemo(() => {
     if (activeSection === "subject") {
-      return subjectItems;
+      return currentSubjectItems;
     }
 
     if (activeSection === "scene") {
@@ -431,7 +524,7 @@ export function LibrariesStudio({
     }
 
     return instructionItems;
-  }, [activeSection, instructionItems, sceneItems, subjectItems]);
+  }, [activeSection, currentSubjectItems, instructionItems, sceneItems]);
 
   const filteredItems = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
@@ -467,6 +560,19 @@ export function LibrariesStudio({
     () => currentItems.find((item) => item.id === selectedId) ?? null,
     [currentItems, selectedId],
   );
+  const isSelectedSubjectModel = activeSection === "subject" && !!selectedItem && !("promptTemplate" in selectedItem) && isModelEntityType(selectedItem.entityType);
+
+  useEffect(() => {
+    if (currentItems.length === 0) {
+      setSelectedId(null);
+
+      return;
+    }
+
+    if (!selectedId || !currentItems.some((item) => item.id === selectedId)) {
+      setSelectedId(currentItems[0]?.id ?? null);
+    }
+  }, [currentItems, selectedId]);
   const selectedSubjectPreset = useMemo(
     () => instructionItems.find((preset) => preset.id === subjectGenerationDraft.instructionPresetId) ?? null,
     [instructionItems, subjectGenerationDraft.instructionPresetId],
@@ -544,6 +650,7 @@ export function LibrariesStudio({
     }
 
     setLibraryDraft(buildLibraryDraft(selectedItem as LibraryItemRecord));
+    setModelProfileDraft(buildModelProfileDraft(selectedItem as LibraryItemRecord));
   }, [activeSection, selectedItem]);
 
   useEffect(() => {
@@ -659,6 +766,9 @@ export function LibrariesStudio({
 
     setActiveSection(section);
     setKeyword("");
+    if (section !== "subject") {
+      setSubjectViewMode("all");
+    }
     setSelectedId(items[0]?.id ?? null);
     setIsDetailModalOpen(false);
   }
@@ -671,7 +781,14 @@ export function LibrariesStudio({
     if (activeSection === "instruction") {
       setCreateInstructionDraft(createEmptyInstructionDraft());
     } else {
-      setCreateLibraryDraft(createEmptyLibraryDraft(activeSection === "subject" ? "subject" : "scene"));
+      const nextDraft = createEmptyLibraryDraft(activeSection === "subject" ? "subject" : "scene");
+
+      if (activeSection === "subject" && subjectViewMode === "model") {
+        nextDraft.entityType = "model";
+      }
+
+      setCreateLibraryDraft(nextDraft);
+      setCreateModelProfileDraft(createEmptyModelProfileDraft());
     }
 
     setIsCreateModalOpen(true);
@@ -685,7 +802,7 @@ export function LibrariesStudio({
     setBatchImportFiles([]);
     setBatchImportResults(null);
     setBatchImportTags("");
-    setBatchImportEntityType(activeSection === "subject" ? "product" : "studio");
+    setBatchImportEntityType(activeSection === "subject" ? (subjectViewMode === "model" ? "model" : "product") : "studio");
     setIsBatchImportOpen(true);
   }
 
@@ -901,6 +1018,7 @@ export function LibrariesStudio({
     setIsSaving(true);
 
     try {
+      const isSubjectModel = kind === "subject" && isModelEntityType(draft.entityType);
       const createdItem = await parseJsonResponse<LibraryItemRecord>(
         await fetch("/api/library-items", {
           method: "POST",
@@ -916,6 +1034,7 @@ export function LibrariesStudio({
             description: draft.description.trim() || undefined,
             promptHints: draft.promptHints.trim() || undefined,
             tags: normalizeTags(draft.tags),
+            profileMeta: mergeModelProfileMeta(undefined, createModelProfileDraft, isSubjectModel),
           }),
         }),
       );
@@ -952,6 +1071,7 @@ export function LibrariesStudio({
     setIsSaving(true);
 
     try {
+      const isSubjectModel = kind === "subject" && isModelEntityType(libraryDraft.entityType);
       const updatedItem = await parseJsonResponse<LibraryItemRecord>(
         await fetch(`/api/library-items/${selectedItem.id}`, {
           method: "PATCH",
@@ -966,6 +1086,11 @@ export function LibrariesStudio({
             description: libraryDraft.description.trim() || null,
             promptHints: libraryDraft.promptHints.trim() || null,
             tags: normalizeTags(libraryDraft.tags),
+            profileMeta: mergeModelProfileMeta(
+              (selectedItem as LibraryItemRecord).profileMeta,
+              modelProfileDraft,
+              isSubjectModel,
+            ),
           }),
         }),
       );
@@ -1261,7 +1386,13 @@ export function LibrariesStudio({
     setIsGeneratingSubjectImage(true);
 
     try {
-      const persistedProfileMeta = buildLibraryItemProfileMeta(subjectItem.profileMeta, subjectGenerationDraft, assembledPrompt);
+      const persistedProfileMeta = buildLibraryItemProfileMeta(
+        subjectItem.profileMeta,
+        subjectGenerationDraft,
+        modelProfileDraft,
+        isModelEntityType(subjectItem.entityType),
+        assembledPrompt,
+      );
       const persistedItem = await parseJsonResponse<LibraryItemRecord>(
         await fetch(`/api/library-items/${selectedItem.id}`, {
           method: "PATCH",
@@ -1367,7 +1498,7 @@ export function LibrariesStudio({
     setIsGeneratingSceneImage(true);
 
     try {
-      const persistedProfileMeta = buildLibraryItemProfileMeta(sceneItem.profileMeta, sceneGenerationDraft, assembledPrompt);
+      const persistedProfileMeta = buildLibraryItemProfileMeta(sceneItem.profileMeta, sceneGenerationDraft, undefined, false, assembledPrompt);
       const persistedItem = await parseJsonResponse<LibraryItemRecord>(
         await fetch(`/api/library-items/${selectedItem.id}`, {
           method: "PATCH",
@@ -1463,6 +1594,8 @@ export function LibrariesStudio({
     const persistedProfileMeta = buildLibraryItemProfileMeta(
       subjectItem.profileMeta,
       nextGenerationDraft,
+      modelProfileDraft,
+      isModelEntityType(subjectItem.entityType),
       buildGenerationPromptPreview({
         item: subjectItem,
         preset: instructionItems.find((preset) => preset.id === nextGenerationDraft.instructionPresetId) ?? null,
@@ -1546,6 +1679,8 @@ export function LibrariesStudio({
     const persistedProfileMeta = buildLibraryItemProfileMeta(
       sceneItem.profileMeta,
       nextGenerationDraft,
+      undefined,
+      false,
       buildGenerationPromptPreview({
         item: sceneItem,
         preset: instructionItems.find((preset) => preset.id === nextGenerationDraft.instructionPresetId) ?? null,
@@ -1825,6 +1960,29 @@ export function LibrariesStudio({
                       </span>
                     </div>
                     <p className="text-sm text-muted-foreground">{activeMeta.description}</p>
+                    {activeSection === "subject" ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {[
+                          { key: "all", label: "全部主体", count: subjectItems.length },
+                          { key: "model", label: "模特主体", count: subjectItems.filter((item) => isModelEntityType(item.entityType)).length },
+                          { key: "product", label: "商品主体", count: subjectItems.filter((item) => !isModelEntityType(item.entityType)).length },
+                        ].map((option) => (
+                          <button
+                            key={option.key}
+                            className={cn(
+                              "rounded-full border px-3 py-1 text-xs transition",
+                              subjectViewMode === option.key
+                                ? "border-black/10 bg-white text-foreground shadow-sm"
+                                : "border-transparent bg-transparent text-muted-foreground hover:border-black/8 hover:bg-white",
+                            )}
+                            type="button"
+                            onClick={() => setSubjectViewMode(option.key as SubjectViewMode)}
+                          >
+                            {option.label} · {option.count}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -1893,10 +2051,18 @@ export function LibrariesStudio({
                             : item.coverAssetUrl ??
                               (item.kind === "subject" ? subjectPreviewUrls[item.id] : scenePreviewUrls[item.id]) ??
                               null;
+                        const dragPayload =
+                          "promptTemplate" in item || !previewImageUrl
+                            ? null
+                            : JSON.stringify({
+                                id: item.id,
+                                kind: item.kind,
+                              });
 
                         return (
                           <button
                             key={item.id}
+                            draggable={Boolean(dragPayload)}
                             className={cn(
                               "group w-full rounded-[20px] border bg-white p-3.5 text-left transition",
                               isSelected
@@ -1904,6 +2070,14 @@ export function LibrariesStudio({
                                 : "border-black/5 hover:border-black/10",
                             )}
                             type="button"
+                            onDragStart={(event) => {
+                              if (!dragPayload) {
+                                return;
+                              }
+
+                              event.dataTransfer.setData("application/x-canvas-library-item", dragPayload);
+                              event.dataTransfer.effectAllowed = "copy";
+                            }}
                             onClick={() => openDetail(item.id)}
                           >
                             <div className="space-y-2.5">
@@ -1926,7 +2100,14 @@ export function LibrariesStudio({
                               </div>
                               <div className="space-y-1">
                                 <div className="flex items-start justify-between gap-2">
-                                  <p className="line-clamp-1 font-medium text-foreground">{item.name}</p>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <p className="line-clamp-1 font-medium text-foreground">{item.name}</p>
+                                      {"promptTemplate" in item ? null : item.kind === "subject" && isModelEntityType(item.entityType) ? (
+                                        <span className="shrink-0 rounded-full bg-fuchsia-100 px-2 py-0.5 text-[10px] text-fuchsia-700">模特</span>
+                                      ) : null}
+                                    </div>
+                                  </div>
                                   <span className="shrink-0 text-[10px] text-muted-foreground">{formatDate(item.updatedAt)}</span>
                                 </div>
                                 <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
@@ -2120,6 +2301,53 @@ export function LibrariesStudio({
                         }
                       />
                     </div>
+
+                    {activeSection === "subject" && isModelEntityType(createLibraryDraft.entityType) ? (
+                      <div className="space-y-4 rounded-2xl border border-black/6 bg-white p-4">
+                        <div>
+                          <p className="font-medium text-foreground">模特资料</p>
+                          <p className="mt-1 text-sm text-muted-foreground">这些信息会写入主体库的 `profileMeta`，便于后续筛选和复用。</p>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>性别</Label>
+                            <Input value={createModelProfileDraft.gender} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, gender: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>年龄段</Label>
+                            <Input value={createModelProfileDraft.ageRange} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, ageRange: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>妆容风格</Label>
+                            <Input value={createModelProfileDraft.makeupStyle} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, makeupStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>发型</Label>
+                            <Input value={createModelProfileDraft.hairStyle} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, hairStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>穿搭风格</Label>
+                            <Input value={createModelProfileDraft.outfitStyle} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, outfitStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>电商类目</Label>
+                            <Input value={createModelProfileDraft.ecommerceCategory} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, ecommerceCategory: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>拍摄质感</Label>
+                            <Input value={createModelProfileDraft.shootTexture} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, shootTexture: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>预设类型</Label>
+                            <Input value={createModelProfileDraft.presetType} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, presetType: event.target.value }))} />
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <Label>使用说明</Label>
+                          <Textarea rows={4} value={createModelProfileDraft.usageNotes} onChange={(event) => setCreateModelProfileDraft((current) => ({ ...current, usageNotes: event.target.value }))} />
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="space-y-4 rounded-2xl bg-[#fafafa] p-4">
@@ -2467,6 +2695,53 @@ export function LibrariesStudio({
                         }
                       />
                     </div>
+
+                    {activeSection === "subject" && isSelectedSubjectModel ? (
+                      <div className="space-y-4 rounded-2xl border border-black/6 bg-white p-4">
+                        <div>
+                          <p className="font-medium text-foreground">模特资料</p>
+                          <p className="mt-1 text-sm text-muted-foreground">用于筛选模特主体，并作为后续画布引用时的识别信息。</p>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>性别</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.gender} onChange={(event) => setModelProfileDraft((current) => ({ ...current, gender: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>年龄段</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.ageRange} onChange={(event) => setModelProfileDraft((current) => ({ ...current, ageRange: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>妆容风格</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.makeupStyle} onChange={(event) => setModelProfileDraft((current) => ({ ...current, makeupStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>发型</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.hairStyle} onChange={(event) => setModelProfileDraft((current) => ({ ...current, hairStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>穿搭风格</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.outfitStyle} onChange={(event) => setModelProfileDraft((current) => ({ ...current, outfitStyle: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>电商类目</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.ecommerceCategory} onChange={(event) => setModelProfileDraft((current) => ({ ...current, ecommerceCategory: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>拍摄质感</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.shootTexture} onChange={(event) => setModelProfileDraft((current) => ({ ...current, shootTexture: event.target.value }))} />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>预设类型</Label>
+                            <Input disabled={!canEdit} value={modelProfileDraft.presetType} onChange={(event) => setModelProfileDraft((current) => ({ ...current, presetType: event.target.value }))} />
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <Label>使用说明</Label>
+                          <Textarea disabled={!canEdit} rows={4} value={modelProfileDraft.usageNotes} onChange={(event) => setModelProfileDraft((current) => ({ ...current, usageNotes: event.target.value }))} />
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="space-y-4 rounded-2xl bg-[#fafafa] p-4">

@@ -13,6 +13,7 @@ const libraryItemQuerySchema = z.object({
   kind: libraryItemKindSchema,
   keyword: z.string().trim().optional(),
   tag: z.string().trim().optional(),
+  entityType: z.string().trim().optional(),
 });
 
 export async function GET(request: Request) {
@@ -25,6 +26,7 @@ export async function GET(request: Request) {
       kind: searchParams.get("kind") ?? undefined,
       keyword: searchParams.get("keyword") ?? undefined,
       tag: searchParams.get("tag") ?? undefined,
+      entityType: searchParams.get("entityType") ?? undefined,
     });
     const items = await listLibraryItems({
       workspaceId,

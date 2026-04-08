@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -121,6 +121,7 @@ type ResourcePickerDialogProps<TResource> = {
   onSelectAsset?: (assetId: string) => void;
   getAssets?: (item: TResource) => CanvasNodeReferenceAsset[];
   getCoverAssetId?: (item: TResource) => string | null | undefined;
+  headerAccessory?: ReactNode;
 };
 
 function ResourcePickerDialog<TResource>({
@@ -143,6 +144,7 @@ function ResourcePickerDialog<TResource>({
   onSelectAsset,
   getAssets,
   getCoverAssetId,
+  headerAccessory,
 }: ResourcePickerDialogProps<TResource>) {
   const selectedItem = selectedId ? items.find((item) => getKey(item) === selectedId) ?? null : null;
   const selectedAssets = selectedItem && getAssets ? getAssets(selectedItem) : [];
@@ -183,6 +185,7 @@ function ResourcePickerDialog<TResource>({
               {items.length > 0 ? `${items.length} 个资源可选` : "暂无可选资源"}
             </span>
             <span className="rounded-full border border-black/5 bg-background/80 px-2.5 py-1 text-muted-foreground">{nodeLabel}</span>
+            {headerAccessory}
           </div>
         </div>
 
@@ -349,6 +352,18 @@ export function InfiniteCanvasBoardCreatePanel({
   const [activeResourceModal, setActiveResourceModal] = useState<ResourceModalKind | null>(null);
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [selectedResourceAssetId, setSelectedResourceAssetId] = useState<string | null>(null);
+  const [subjectPickerFilter, setSubjectPickerFilter] = useState<"all" | "model" | "product">("all");
+  const filteredSubjects = useMemo(() => {
+    if (subjectPickerFilter === "all") {
+      return subjects;
+    }
+
+    if (subjectPickerFilter === "model") {
+      return subjects.filter((item) => item.entityType === "model" || item.entityType === "person");
+    }
+
+    return subjects.filter((item) => item.entityType !== "model" && item.entityType !== "person");
+  }, [subjectPickerFilter, subjects]);
 
   function resolveDefaultAssetId(item: LibraryItemOption | undefined) {
     if (!item) {
@@ -361,11 +376,15 @@ export function InfiniteCanvasBoardCreatePanel({
   function openResourceModal(kind: ResourceModalKind) {
     const firstResource =
       kind === "subject"
-        ? subjects[0]
+        ? filteredSubjects[0] ?? subjects[0]
         : kind === "scene"
           ? scenes[0]
           : instructionPresets[0];
     const firstResourceId = firstResource?.id ?? null;
+
+    if (kind === "subject") {
+      setSubjectPickerFilter("all");
+    }
 
     setActiveResourceModal(kind);
     setSelectedResourceId(firstResourceId);
@@ -607,15 +626,48 @@ export function InfiniteCanvasBoardCreatePanel({
         getSubtitle={getLibraryItemSubtitle}
         getTitle={(item) => item.name}
         icon={Boxes}
-        items={subjects}
+        items={filteredSubjects}
         nodeLabel="图片节点"
         open={activeResourceModal === "subject"}
         selectedId={selectedResourceId}
         title="选择主体资源"
+        headerAccessory={
+          <div className="flex flex-wrap gap-2">
+            {[
+              { key: "all", label: "全部主体" },
+              { key: "model", label: "模特主体" },
+              { key: "product", label: "商品主体" },
+            ].map((option) => (
+              <button
+                key={option.key}
+                className={cn(
+                  "rounded-full border border-black/5 bg-background/80 px-2.5 py-1 text-muted-foreground transition hover:text-foreground",
+                  subjectPickerFilter === option.key ? "text-foreground shadow-sm" : undefined,
+                )}
+                type="button"
+                onClick={() => {
+                  setSubjectPickerFilter(option.key as "all" | "model" | "product");
+                  const nextItems =
+                    option.key === "all"
+                      ? subjects
+                      : option.key === "model"
+                        ? subjects.filter((item) => item.entityType === "model" || item.entityType === "person")
+                        : subjects.filter((item) => item.entityType !== "model" && item.entityType !== "person");
+                  const nextSubject = nextItems[0] ?? null;
+
+                  setSelectedResourceId(nextSubject?.id ?? null);
+                  setSelectedResourceAssetId(resolveDefaultAssetId(nextSubject));
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        }
         onClose={closeResourceModal}
         onConfirm={confirmResourceSelection}
         onSelect={(resourceId) => {
-          const selectedSubject = subjects.find((item) => item.id === resourceId);
+          const selectedSubject = filteredSubjects.find((item) => item.id === resourceId) ?? subjects.find((item) => item.id === resourceId);
 
           setSelectedResourceId(resourceId);
           setSelectedResourceAssetId(resolveDefaultAssetId(selectedSubject));
