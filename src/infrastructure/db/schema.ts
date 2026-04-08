@@ -317,6 +317,64 @@ export const nodeTemplates = pgTable(
   ],
 );
 
+export const workflowTemplates = pgTable(
+  "workflow_templates",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => users.id),
+    scope: varchar("scope", { length: 20 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    coverAssetId: uuid("cover_asset_id"),
+    effectCategory: varchar("effect_category", { length: 80 }),
+    contentCategory: varchar("content_category", { length: 80 }),
+    snapshotJson: jsonb("snapshot_json")
+      .$type<{
+        nodes: Array<{
+          templateNodeId: string;
+          type: string;
+          title: string;
+          promptInput: string;
+          outputSnapshot?: Record<string, unknown> | null;
+          modelKey?: string | null;
+          settingsJson?: Record<string, unknown>;
+          resourceRefs?: {
+            subjectIds?: string[];
+            sceneIds?: string[];
+            instructionPresetIds?: string[];
+            assetIds?: string[];
+          };
+          status?: string | null;
+          positionX: number;
+          positionY: number;
+        }>;
+        edges: Array<{
+          sourceTemplateNodeId: string;
+          targetTemplateNodeId: string;
+          mergeMode: string;
+          priority: number;
+        }>;
+      }>()
+      .notNull()
+      .default({ nodes: [], edges: [] }),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    usageCount: integer("usage_count").notNull().default(0),
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    ...timestamps,
+  },
+  (table) => [
+    index("workflow_templates_workspace_scope_status_idx").on(table.workspaceId, table.scope, table.status),
+    index("workflow_templates_created_by_idx").on(table.createdBy),
+    index("workflow_templates_effect_category_idx").on(table.effectCategory),
+    index("workflow_templates_content_category_idx").on(table.contentCategory),
+  ],
+);
+
 export const nodeRunBatches = pgTable(
   "node_run_batches",
   {

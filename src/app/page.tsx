@@ -338,8 +338,8 @@ export default async function Home() {
                   <Link className={workspaceLinkClass(false)} href={`/libraries?workspaceId=${activeWorkspace.id}`}>
                     进入资源库
                   </Link>
-                  <Link className={workspaceLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
-                    查看任务中心
+                  <Link className={workspaceLinkClass(false)} href={`/workflow-templates?workspaceId=${activeWorkspace.id}`}>
+                    封装工作流
                   </Link>
                 </div>
               </div>
@@ -508,8 +508,8 @@ export default async function Home() {
                       <Link className={workspaceLinkClass(false)} href={`/canvases?workspaceId=${activeWorkspace.id}`}>
                         画布
                       </Link>
-                      <Link className={workspaceLinkClass(false)} href={`/tasks?workspaceId=${activeWorkspace.id}`}>
-                        任务中心
+                      <Link className={workspaceLinkClass(false)} href={`/workflow-templates?workspaceId=${activeWorkspace.id}`}>
+                        封装工作流
                       </Link>
                     </div>
                   </div>

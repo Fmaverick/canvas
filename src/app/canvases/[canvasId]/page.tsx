@@ -194,6 +194,14 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
 
   return (
     <main className="min-h-screen bg-muted/30 text-foreground">
+      <div className="pointer-events-none fixed right-4 top-4 z-30 flex flex-wrap gap-2">
+        <Link
+          className={`${actionLinkClass(false)} pointer-events-auto bg-background/95 shadow-sm backdrop-blur`}
+          href={`/workflow-templates?workspaceId=${workspaceId}&canvasId=${canvas.id}`}
+        >
+          封装当前工作流
+        </Link>
+      </div>
       <InfiniteCanvasBoard
         batchRuns={batchRunSummaries}
         canEdit={canEdit}

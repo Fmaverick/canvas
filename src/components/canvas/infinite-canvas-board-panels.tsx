@@ -1,9 +1,11 @@
 "use client";
 
 import Image from "next/image";
+import { useState } from "react";
 import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -794,10 +796,12 @@ export function VideoNodePanel({
       : draftVideoSettings.size === "1:1"
         ? "aspect-square"
         : "aspect-[9/16]";
+  const [isVideoPreviewOpen, setIsVideoPreviewOpen] = useState(false);
 
   return (
-    <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
-      <div className="max-h-[calc(100vh-6rem)] w-full max-w-7xl overflow-y-auto rounded-[24px] border bg-background/96 p-3 shadow-lg">
+    <>
+      <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
+        <div className="max-h-[calc(100vh-6rem)] w-full max-w-7xl overflow-y-auto rounded-[24px] border bg-background/96 p-3 shadow-lg">
         <input
           ref={videoFirstFrameInputRef}
           accept="image/*"
@@ -1212,6 +1216,16 @@ export function VideoNodePanel({
                 size="sm"
                 type="button"
                 variant="outline"
+                onClick={() => setIsVideoPreviewOpen(true)}
+              >
+                <Expand className="mr-1 size-4" />
+                放大预览
+              </Button>
+              <Button
+                disabled={!selectedVideoOutputSource}
+                size="sm"
+                type="button"
+                variant="outline"
                 onClick={onDownloadVideo}
               >
                 <Download className="mr-1 size-4" />
@@ -1236,7 +1250,45 @@ export function VideoNodePanel({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+
+      <Dialog open={isVideoPreviewOpen} onOpenChange={setIsVideoPreviewOpen}>
+        <DialogContent className="max-h-[calc(100vh-2rem)] max-w-6xl overflow-hidden rounded-[28px] border border-black/5 p-0 sm:max-w-6xl" showCloseButton>
+          <div className="flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-[24px] bg-white">
+            <DialogHeader className="px-6 py-5">
+              <DialogTitle className="text-lg">{selectedNode.title || "视频预览"}</DialogTitle>
+              <DialogDescription>放大查看当前视频节点结果，并可直接下载。</DialogDescription>
+            </DialogHeader>
+            <div className="min-h-0 overflow-auto px-6 pb-6">
+              <div className="overflow-hidden rounded-[24px] border bg-black">
+                {selectedVideoOutputSource ? (
+                  <video className="max-h-[70vh] w-full object-contain" controls playsInline preload="metadata" src={selectedVideoOutputSource} />
+                ) : previewFallbackAsset ? (
+                  <div className="relative">
+                    <img alt={previewFallbackAsset.fileName} className="max-h-[70vh] w-full object-contain" src={previewFallbackAsset.fileUrl} />
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/45">
+                      <div className="rounded-full bg-background/90 px-3 py-1 text-xs text-foreground shadow-sm">
+                        当前还没有视频结果，正在预览参考图
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-[420px] items-center justify-center text-sm text-white/80">
+                    当前还没有可放大的视频结果
+                  </div>
+                )}
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button disabled={!selectedVideoOutputSource} type="button" variant="outline" onClick={onDownloadVideo}>
+                  <Download className="mr-1 size-4" />
+                  下载当前结果
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

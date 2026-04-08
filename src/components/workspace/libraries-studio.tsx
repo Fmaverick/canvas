@@ -86,6 +86,13 @@ type PreviewAssetState = {
   fileUrl: string;
 };
 
+type BatchImportResult = {
+  fileName: string;
+  itemName: string;
+  success: boolean;
+  message: string;
+};
+
 type SubjectGenerationDraft = {
   mode: "text_to_image" | "image_to_image";
   instructionPresetId: string;
@@ -329,6 +336,10 @@ function buildInstructionDraft(item: InstructionPresetRecord): InstructionDraft 
   };
 }
 
+function getImportItemName(fileName: string) {
+  return fileName.replace(/\.[^/.]+$/, "").trim() || "未命名资源";
+}
+
 async function parseJsonResponse<T>(response: Response) {
   const result = await response.json().catch(() => null);
 
@@ -371,6 +382,12 @@ export function LibrariesStudio({
   const [subjectGenerationDraft, setSubjectGenerationDraft] = useState<SubjectGenerationDraft>(createEmptyGenerationDraft());
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+  const [isBatchImportOpen, setIsBatchImportOpen] = useState(false);
+  const [batchImportFiles, setBatchImportFiles] = useState<File[]>([]);
+  const [batchImportTags, setBatchImportTags] = useState("");
+  const [batchImportEntityType, setBatchImportEntityType] = useState("");
+  const [batchImportResults, setBatchImportResults] = useState<BatchImportResult[] | null>(null);
+  const [isBatchImporting, setIsBatchImporting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isLoadingSubjectAssets, setIsLoadingSubjectAssets] = useState(false);
@@ -385,6 +402,7 @@ export function LibrariesStudio({
   const [deletingSceneAssetId, setDeletingSceneAssetId] = useState<string | null>(null);
   const [latestGeneratedSceneAsset, setLatestGeneratedSceneAsset] = useState<LibraryAssetRecord | null>(null);
   const sceneImageInputRef = useRef<HTMLInputElement | null>(null);
+  const batchImportInputRef = useRef<HTMLInputElement | null>(null);
   const [previewAsset, setPreviewAsset] = useState<PreviewAssetState | null>(null);
 
   const activeMeta = sectionMeta[activeSection];
@@ -659,6 +677,18 @@ export function LibrariesStudio({
     setIsCreateModalOpen(true);
   }
 
+  function openBatchImport() {
+    if (activeSection !== "subject" && activeSection !== "scene") {
+      return;
+    }
+
+    setBatchImportFiles([]);
+    setBatchImportResults(null);
+    setBatchImportTags("");
+    setBatchImportEntityType(activeSection === "subject" ? "product" : "studio");
+    setIsBatchImportOpen(true);
+  }
+
   function openDetail(itemId: string) {
     setSelectedId(itemId);
     setIsDetailModalOpen(true);
@@ -725,6 +755,137 @@ export function LibrariesStudio({
     }
 
     return uploadedAssets;
+  }
+
+  async function createLibraryItemRecord(params: {
+    kind: "subject" | "scene";
+    entityType: string;
+    name: string;
+    tags: string[];
+  }) {
+    return parseJsonResponse<LibraryItemRecord>(
+      await fetch("/api/library-items", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": workspaceId,
+        },
+        body: JSON.stringify({
+          workspaceId,
+          kind: params.kind,
+          entityType: params.entityType,
+          name: params.name,
+          tags: params.tags,
+          description: "",
+          promptHints: "",
+          profileMeta: {},
+        }),
+      }),
+    );
+  }
+
+  async function handleBatchImportSubmit() {
+    if (!canEdit || (activeSection !== "subject" && activeSection !== "scene")) {
+      return;
+    }
+
+    const imageFiles = batchImportFiles.filter((file) => file.type.startsWith("image/"));
+
+    if (imageFiles.length === 0) {
+      toast.error("请至少选择一张图片。");
+
+      return;
+    }
+
+    setIsBatchImporting(true);
+    setBatchImportResults(null);
+
+    const kind = activeSection;
+    const normalizedTags = Array.from(
+      new Set(
+        batchImportTags
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+    const importedItems: LibraryItemRecord[] = [];
+    const nextPreviewUrls: Record<string, string> = {};
+    const results: BatchImportResult[] = [];
+
+    try {
+      for (const file of imageFiles) {
+        const itemName = getImportItemName(file.name);
+
+        try {
+          const createdItem = await createLibraryItemRecord({
+            kind,
+            entityType: batchImportEntityType.trim() || (kind === "subject" ? "product" : "studio"),
+            name: itemName,
+            tags: normalizedTags,
+          });
+          const uploadedAssets = await uploadImagesToLibraryItem(createdItem.id, [file]);
+          let finalItem = createdItem;
+
+          if (uploadedAssets[0]) {
+            finalItem = await parseJsonResponse<LibraryItemRecord>(
+              await fetch(`/api/library-items/${createdItem.id}`, {
+                method: "PATCH",
+                headers: {
+                  "content-type": "application/json",
+                  "x-workspace-id": workspaceId,
+                },
+                body: JSON.stringify({
+                  workspaceId,
+                  coverAssetId: uploadedAssets[0].id,
+                }),
+              }),
+            );
+            nextPreviewUrls[createdItem.id] = uploadedAssets[0].fileUrl;
+          }
+
+          importedItems.push(finalItem);
+          results.push({
+            fileName: file.name,
+            itemName,
+            success: true,
+            message: "导入成功",
+          });
+        } catch (error) {
+          results.push({
+            fileName: file.name,
+            itemName,
+            success: false,
+            message: error instanceof Error ? error.message : "导入失败",
+          });
+        }
+      }
+
+      if (importedItems.length > 0) {
+        if (kind === "subject") {
+          setSubjectItems((current) => [...importedItems, ...current]);
+          setSubjectPreviewUrls((current) => ({
+            ...nextPreviewUrls,
+            ...current,
+          }));
+        } else {
+          setSceneItems((current) => [...importedItems, ...current]);
+          setScenePreviewUrls((current) => ({
+            ...nextPreviewUrls,
+            ...current,
+          }));
+        }
+
+        setSelectedId(importedItems[0]?.id ?? null);
+      }
+
+      setBatchImportResults(results);
+      const successCount = results.filter((item) => item.success).length;
+      const failedCount = results.length - successCount;
+      toast.success(`批量导入完成：成功 ${successCount} 条${failedCount > 0 ? `，失败 ${failedCount} 条` : ""}。`);
+    } finally {
+      setIsBatchImporting(false);
+    }
   }
 
   async function createLibraryItem() {
@@ -1676,6 +1837,12 @@ export function LibrariesStudio({
                         onChange={(event) => setKeyword(event.target.value)}
                       />
                     </div>
+                    {canEdit && (activeSection === "subject" || activeSection === "scene") ? (
+                      <Button type="button" variant="outline" onClick={openBatchImport}>
+                        <Upload className="size-4" />
+                        批量导入
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
                 </div>
@@ -1987,6 +2154,120 @@ export function LibrariesStudio({
                 </Button>
                 <Button disabled={isSaving} onClick={handleCreateSubmit}>
                   {isSaving ? "创建中..." : activeMeta.createLabel}
+                </Button>
+              </DialogFooter>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isBatchImportOpen} onOpenChange={setIsBatchImportOpen}>
+          <DialogContent className="max-h-[calc(100vh-2rem)] max-w-3xl overflow-hidden rounded-[28px] border border-black/5 p-0 sm:max-w-3xl" showCloseButton>
+            <div className="flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-[24px] bg-white">
+              <DialogHeader className="px-6 py-5">
+                <DialogTitle className="text-lg">
+                  {activeSection === "subject" ? "批量导入主体" : "批量导入场景"}
+                </DialogTitle>
+                <DialogDescription>一次选择多张图片，每张图片会自动生成一条资源记录，并汇总显示导入结果。</DialogDescription>
+              </DialogHeader>
+
+              <div className="min-h-0 space-y-5 overflow-y-auto px-6 pb-6">
+                <input
+                  ref={batchImportInputRef}
+                  accept="image/*"
+                  className="hidden"
+                  multiple
+                  type="file"
+                  onChange={(event) => {
+                    setBatchImportResults(null);
+                    setBatchImportFiles(Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")));
+                  }}
+                />
+
+                <div className="rounded-2xl border border-dashed border-black/10 bg-[#fafafa] p-5">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="font-medium text-foreground">导入图片</p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        支持一次导入多张图片，系统会按文件名自动生成资源名称。
+                      </p>
+                    </div>
+                    <Button disabled={isBatchImporting} type="button" variant="outline" onClick={() => batchImportInputRef.current?.click()}>
+                      <Upload className="size-4" />
+                      选择图片
+                    </Button>
+                  </div>
+                  <div className="mt-4 rounded-xl bg-white px-4 py-3 text-sm text-muted-foreground">
+                    已选择 {batchImportFiles.length} 张图片
+                  </div>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="batch-import-entity-type">类型</Label>
+                    <Input
+                      id="batch-import-entity-type"
+                      placeholder={activeSection === "subject" ? "例如：product / model" : "例如：studio / outdoor"}
+                      value={batchImportEntityType}
+                      onChange={(event) => setBatchImportEntityType(event.target.value)}
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="batch-import-tags">统一标签</Label>
+                    <Input
+                      id="batch-import-tags"
+                      placeholder="例如：新品, 电商, 白底"
+                      value={batchImportTags}
+                      onChange={(event) => setBatchImportTags(event.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {batchImportFiles.length > 0 ? (
+                  <div className="space-y-2">
+                    <Label>待导入列表</Label>
+                    <div className="max-h-52 space-y-2 overflow-y-auto rounded-2xl border border-black/8 bg-[#fcfcfd] p-3">
+                      {batchImportFiles.map((file) => (
+                        <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-foreground">{getImportItemName(file.name)}</p>
+                            <p className="truncate text-xs text-muted-foreground">{file.name}</p>
+                          </div>
+                          <span className="shrink-0 text-[11px] text-muted-foreground">{Math.round(file.size / 1024)} KB</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {batchImportResults ? (
+                  <div className="space-y-2">
+                    <Label>导入结果</Label>
+                    <div className="max-h-56 space-y-2 overflow-y-auto rounded-2xl border border-black/8 bg-[#fcfcfd] p-3">
+                      {batchImportResults.map((result, index) => (
+                        <div
+                          key={`${result.fileName}-${index}`}
+                          className={cn(
+                            "rounded-xl px-3 py-2 text-sm",
+                            result.success ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700",
+                          )}
+                        >
+                          <p className="font-medium">{result.itemName}</p>
+                          <p className="mt-1 text-xs">{result.fileName}</p>
+                          <p className="mt-1 text-xs">{result.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <DialogFooter className="border-black/5 bg-white">
+                <Button variant="outline" onClick={() => setIsBatchImportOpen(false)}>
+                  关闭
+                </Button>
+                <Button disabled={isBatchImporting || batchImportFiles.length === 0} onClick={() => void handleBatchImportSubmit()}>
+                  {isBatchImporting ? "导入中..." : "开始批量导入"}
                 </Button>
               </DialogFooter>
             </div>

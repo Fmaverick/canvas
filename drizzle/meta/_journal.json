@@ -36,6 +36,13 @@
       "when": 1775631400000,
       "tag": "0004_hot_batch_result_node",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775637000000,
+      "tag": "0005_workflow_templates",
+      "breakpoints": true
     }
   ]
 }
