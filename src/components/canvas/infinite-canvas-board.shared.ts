@@ -1,6 +1,6 @@
 import { AudioLines, Clapperboard, ImageIcon, Type, Video } from "lucide-react";
 
-export type CanvasNodeType = "text" | "image" | "video" | "audio" | "storyboard";
+export type CanvasNodeType = "text" | "image" | "video" | "audio" | "storyboard" | "batch_result";
 export type CanvasConnectionSemantic = "prompt" | "reference_image";
 
 export type CanvasNodeReferenceAsset = {
@@ -114,6 +114,7 @@ export type CanvasBatchRunSummary = {
   id: string;
   mode: string;
   status: string;
+  resultNodeId?: string | null;
   requestedRunCount: number;
   totalNodeRunCount: number;
   completedNodeRunCount: number;
@@ -221,6 +222,8 @@ export const IMAGE_NODE_MIN_HEIGHT = 140;
 export const IMAGE_NODE_MAX_HEIGHT = 320;
 export const VIDEO_NODE_WIDTH = 300;
 export const VIDEO_NODE_HEIGHT = 180;
+export const BATCH_RESULT_NODE_WIDTH = 320;
+export const BATCH_RESULT_NODE_HEIGHT = 220;
 export const MIN_ZOOM = 0.1;
 export const MAX_ZOOM = 4;
 export const TEXT_GENERATE_COOLDOWN_MS = 4000;
@@ -287,6 +290,29 @@ export const quickCreateOptions: QuickCreateOption[] = [
     description: "动态分镜、镜头脚本",
   },
 ];
+
+export function getBatchResultNodeBatchRunId(settingsJson: Record<string, unknown> | null | undefined) {
+  const batchRunId = settingsJson?.batchRunId;
+
+  return typeof batchRunId === "string" && batchRunId.trim().length > 0 ? batchRunId.trim() : null;
+}
+
+export function getBatchResultLinkedBatchRunId(
+  node: Pick<CanvasNode, "id" | "type" | "settingsJson">,
+  batchRuns: Array<Pick<CanvasBatchRunSummary, "id" | "resultNodeId">>,
+) {
+  if (node.type !== "batch_result") {
+    return null;
+  }
+
+  const linkedByResultNodeId = batchRuns.find((batchRun) => batchRun.resultNodeId === node.id)?.id ?? null;
+
+  if (linkedByResultNodeId) {
+    return linkedByResultNodeId;
+  }
+
+  return getBatchResultNodeBatchRunId(node.settingsJson);
+}
 
 export function getCanvasBatchRunTitle(batchRun: { selectedNodesJson: CanvasBatchRunNode[] }) {
   if (!Array.isArray(batchRun.selectedNodesJson) || batchRun.selectedNodesJson.length === 0) {
@@ -382,7 +408,13 @@ export function canCanvasNodeStartConnection(nodeType: string) {
 }
 
 export function canCanvasNodeReceiveConnection(nodeType: string) {
-  return nodeType === "text" || nodeType === "storyboard" || nodeType === "image" || nodeType === "video";
+  return (
+    nodeType === "text" ||
+    nodeType === "storyboard" ||
+    nodeType === "image" ||
+    nodeType === "video" ||
+    nodeType === "batch_result"
+  );
 }
 
 export function clampNumber(value: number, min: number, max: number) {
@@ -405,6 +437,8 @@ export function getCanvasNodeDimensions(
             ? imageNodeSize.width
             : node.type === "video"
               ? VIDEO_NODE_WIDTH
+              : node.type === "batch_result"
+                ? BATCH_RESULT_NODE_WIDTH
               : NODE_WIDTH,
     height:
       node.type === "text"
@@ -415,6 +449,8 @@ export function getCanvasNodeDimensions(
             ? imageNodeSize.height
             : node.type === "video"
               ? VIDEO_NODE_HEIGHT
+              : node.type === "batch_result"
+                ? BATCH_RESULT_NODE_HEIGHT
               : NODE_HEIGHT,
   };
 }

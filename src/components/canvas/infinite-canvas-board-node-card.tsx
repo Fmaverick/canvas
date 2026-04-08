@@ -1,7 +1,7 @@
 "use client";
 
-import { memo, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Clapperboard, ImageIcon, Play, Square, Trash2, Video } from "lucide-react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { AlertCircle, AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, ImageIcon, Play, Square, Trash2, Type, Video } from "lucide-react";
 
 import { CanvasTaskActions } from "@/components/canvas/canvas-task-actions";
 import { Badge } from "@/components/ui/badge";
@@ -9,8 +9,11 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 import {
+  BATCH_RESULT_NODE_HEIGHT,
+  BATCH_RESULT_NODE_WIDTH,
   canCanvasNodeReceiveConnection,
   canCanvasNodeStartConnection,
+  formatCanvasDateTime,
   getStoryboardPreviewText,
   getStoryboardShots,
   getStoryboardShotCount,
@@ -26,10 +29,16 @@ import {
   getReferenceAssetById,
   getTextNodeContent,
   getVideoNodeOutputSource,
+  inferImageExtension,
+  inferVideoExtension,
   normalizeStoryboardNodeSettings,
   normalizeVideoNodeSettings,
   quickCreateOptions,
   statusBadgeVariant,
+  triggerDownload,
+  type CanvasBatchRunDetail,
+  type CanvasBatchRunResult,
+  type CanvasBatchRunSummary,
   type CanvasNode,
   type CanvasTask,
 } from "@/components/canvas/infinite-canvas-board.shared";
@@ -57,6 +66,9 @@ type InfiniteCanvasBoardNodeCardProps = {
   pendingConnectionLabel: string | null;
   canAcceptPendingConnection: boolean;
   isPendingConnectionTarget: boolean;
+  linkedBatchRun?: CanvasBatchRunSummary | null;
+  linkedBatchRunDetail?: CanvasBatchRunDetail | null;
+  onExtractBatchResultToVideoNode?: (batchResultNodeId: string, run: CanvasBatchRunResult) => void;
   onRegisterVideoElement: (nodeId: string, element: HTMLVideoElement | null) => void;
   onSelectNode: (nodeId: string, options?: { additive: boolean }) => void;
   onOpenTextEditor: () => void;
@@ -221,6 +233,9 @@ function InfiniteCanvasBoardNodeCardComponent({
   pendingConnectionLabel,
   canAcceptPendingConnection,
   isPendingConnectionTarget,
+  linkedBatchRun,
+  linkedBatchRunDetail,
+  onExtractBatchResultToVideoNode,
   onRegisterVideoElement,
   onSelectNode,
   onOpenTextEditor,
@@ -245,6 +260,7 @@ function InfiniteCanvasBoardNodeCardComponent({
   const isStoryboardNode = node.type === "storyboard";
   const isImageNode = node.type === "image";
   const isVideoNode = node.type === "video";
+  const isBatchResultNode = node.type === "batch_result";
   const canStartConnection = canEdit && canCanvasNodeStartConnection(node.type);
   const canReceiveConnection = canEdit && canCanvasNodeReceiveConnection(node.type);
   const imagePreview = isImageNode ? getImageNodePreview(node.outputSnapshot, node.referenceAssets) : null;
@@ -272,6 +288,95 @@ function InfiniteCanvasBoardNodeCardComponent({
   const isEditingTitle = editingTextNodeTitleId === node.id;
   const isPendingSource = pendingConnectionSourceId === node.id;
   const isConnectionMode = Boolean(pendingConnectionSourceId);
+  const batchRunPreviewItem =
+    linkedBatchRunDetail?.runs.find((run) => run.status === "succeeded" && (Boolean(run.assetFileUrl) || Boolean(run.contentText))) ?? null;
+  const allBatchRunItems = linkedBatchRunDetail?.runs ?? [];
+  const [batchResultFilter, setBatchResultFilter] = useState<"all" | "succeeded" | "failed">("all");
+  const [selectedBatchRunResultId, setSelectedBatchRunResultId] = useState<string | null>(null);
+  const batchRunResultItems = useMemo(
+    () =>
+      allBatchRunItems.filter((run) => {
+        if (batchResultFilter === "succeeded") {
+          return run.status === "succeeded";
+        }
+
+        if (batchResultFilter === "failed") {
+          return run.status === "failed";
+        }
+
+        return true;
+      }),
+    [allBatchRunItems, batchResultFilter],
+  );
+  const batchResultPageSize = 4;
+  const [batchResultPage, setBatchResultPage] = useState(1);
+  const batchResultTotalPages = Math.max(1, Math.ceil(batchRunResultItems.length / batchResultPageSize));
+  const paginatedBatchResultItems = useMemo(() => {
+    const currentPage = Math.min(batchResultPage, batchResultTotalPages);
+    const startIndex = (currentPage - 1) * batchResultPageSize;
+
+    return batchRunResultItems.slice(startIndex, startIndex + batchResultPageSize);
+  }, [batchResultPage, batchResultTotalPages, batchRunResultItems]);
+
+  useEffect(() => {
+    setBatchResultPage(1);
+  }, [linkedBatchRun?.id]);
+
+  useEffect(() => {
+    setBatchResultFilter("all");
+    setSelectedBatchRunResultId(null);
+  }, [linkedBatchRun?.id]);
+
+  useEffect(() => {
+    setBatchResultPage((current) => Math.min(current, batchResultTotalPages));
+  }, [batchResultTotalPages]);
+
+  useEffect(() => {
+    if (batchRunResultItems.length === 0) {
+      setSelectedBatchRunResultId(null);
+
+      return;
+    }
+
+    if (!selectedBatchRunResultId || !batchRunResultItems.some((run) => run.id === selectedBatchRunResultId)) {
+      setSelectedBatchRunResultId(batchRunResultItems[0]?.id ?? null);
+    }
+  }, [batchRunResultItems, selectedBatchRunResultId]);
+
+  const selectedBatchRunResult =
+    batchRunResultItems.find((run) => run.id === selectedBatchRunResultId) ??
+    batchRunPreviewItem ??
+    batchRunResultItems[0] ??
+    null;
+  const selectedBatchRunResultIsVideo = Boolean(selectedBatchRunResult?.assetMimeType?.startsWith("video/"));
+  const selectedBatchRunResultIsImage = Boolean(selectedBatchRunResult?.assetMimeType?.startsWith("image/"));
+  const selectedBatchRunResultIsAudio = Boolean(selectedBatchRunResult?.assetMimeType?.startsWith("audio/"));
+  const selectedBatchRunResultIsFailed = selectedBatchRunResult?.status === "failed";
+  const batchRunSuccessCount = allBatchRunItems.filter((run) => run.status === "succeeded").length;
+  const batchRunFailedCount = allBatchRunItems.filter((run) => run.status === "failed").length;
+
+  const downloadBatchResultItem = (run: CanvasBatchRunResult) => {
+    if (!run.assetFileUrl) {
+      return;
+    }
+
+    const fileExtension = run.assetMimeType?.startsWith("video/")
+      ? inferVideoExtension(run.assetFileUrl, run.assetMimeType)
+      : run.assetMimeType?.startsWith("image/")
+        ? inferImageExtension(run.assetFileUrl, run.assetMimeType)
+        : run.assetMimeType?.startsWith("audio/")
+          ? (() => {
+              const subtype = run.assetMimeType?.split("/")[1]?.split(";")[0]?.trim();
+
+              return subtype && subtype.length > 0 ? subtype : "mp3";
+            })()
+        : "bin";
+
+    triggerDownload(
+      run.assetFileUrl,
+      `${node.title || "batch-result"}-run-${run.runIndex ?? 0}.${fileExtension}`,
+    );
+  };
 
   return (
     <div
@@ -279,7 +384,7 @@ function InfiniteCanvasBoardNodeCardComponent({
       data-canvas-node-id={node.id}
       className={cn(
         "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
-        isTextNode || isStoryboardNode || isImageNode || isVideoNode ? "overflow-visible" : "overflow-hidden",
+        isTextNode || isStoryboardNode || isImageNode || isVideoNode || isBatchResultNode ? "overflow-visible" : "overflow-hidden",
         isSelected ? "ring-2 ring-primary/50" : undefined,
         effectiveSelectedNodeId === node.id ? "shadow-[0_0_0_6px_rgba(59,130,246,0.12)]" : undefined,
         isPendingSource ? "ring-2 ring-primary/60" : undefined,
@@ -292,8 +397,8 @@ function InfiniteCanvasBoardNodeCardComponent({
       style={{
         left: `${screenPoint.x}px`,
         top: `${screenPoint.y}px`,
-        width: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_WIDTH : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : 248}px`,
-        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_HEIGHT : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : 132}px`,
+        width: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_WIDTH : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : isBatchResultNode ? BATCH_RESULT_NODE_WIDTH : 248}px`,
+        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_HEIGHT : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : isBatchResultNode ? BATCH_RESULT_NODE_HEIGHT : 132}px`,
         transform: `translate(-50%, -50%) scale(${zoom})`,
         transformOrigin: "center center",
       }}
@@ -723,6 +828,273 @@ function InfiniteCanvasBoardNodeCardComponent({
             </div>
           </div>
         </>
+      ) : isBatchResultNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className="absolute inset-0 bg-gradient-to-br from-sky-100 via-cyan-50 to-indigo-50 opacity-95" />
+            <div className="absolute inset-0 bg-white/40" />
+            <div className="relative flex h-full flex-col p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="inline-flex items-center gap-1 rounded-full bg-background/85 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm">
+                    <Video className="size-3.5" />
+                    批量产出
+                  </div>
+                  <p className="mt-2 text-sm font-medium text-foreground">
+                    {linkedBatchRun ? `${linkedBatchRun.requestedRunCount} 轮结果汇总` : "批量结果节点"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {linkedBatchRun
+                      ? `状态 ${linkedBatchRun.status} · ${linkedBatchRun.completedNodeRunCount}/${linkedBatchRun.totalNodeRunCount} 已完成`
+                      : "等待绑定批量运行结果。"}
+                  </p>
+                </div>
+                <div className="rounded-full bg-background/85 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                  {linkedBatchRun ? formatCanvasDateTime(linkedBatchRun.createdAt) : "未关联"}
+                </div>
+              </div>
+
+              <div className="mt-3 overflow-hidden rounded-[20px] border bg-background/70">
+                {selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsVideo ? (
+                  <video className="h-24 w-full object-cover" controls muted playsInline preload="metadata" src={selectedBatchRunResult.assetFileUrl} />
+                ) : selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsImage ? (
+                  <img alt={selectedBatchRunResult.nodeTitle} className="h-24 w-full object-cover" src={selectedBatchRunResult.assetFileUrl} />
+                ) : selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsAudio ? (
+                  <div className="flex h-24 items-center gap-3 px-4">
+                    <div className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                      <AudioLines className="size-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-medium text-foreground">
+                        {selectedBatchRunResult.nodeTitle || `第 ${selectedBatchRunResult.runIndex ?? "?"} 轮音频结果`}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">可直接播放和下载当前音频结果</p>
+                      <audio className="mt-2 w-full" controls preload="metadata" src={selectedBatchRunResult.assetFileUrl} />
+                    </div>
+                  </div>
+                ) : selectedBatchRunResultIsFailed ? (
+                  <div className="flex h-24 items-center justify-center px-5">
+                    <div className="w-full rounded-2xl border border-rose-200 bg-rose-50 p-3 text-left">
+                      <div className="flex items-center gap-2 text-rose-700">
+                        <AlertCircle className="size-4" />
+                        <span className="text-xs font-medium">第 {selectedBatchRunResult?.runIndex ?? "?"} 轮执行失败</span>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-xs text-rose-700/90">
+                        {selectedBatchRunResult?.errorMessage || selectedBatchRunResult?.errorCode || "暂无失败详情"}
+                      </p>
+                    </div>
+                  </div>
+                ) : selectedBatchRunResult?.contentText ? (
+                  <div className="flex h-24 items-center gap-3 px-4 py-3">
+                    <div className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700">
+                      <Type className="size-5" />
+                    </div>
+                    <p className="line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-foreground/80">{selectedBatchRunResult.contentText}</p>
+                  </div>
+                ) : (
+                  <div className="flex h-24 items-center justify-center px-5 text-center">
+                    <div>
+                      <div className="mx-auto mb-2 inline-flex size-11 items-center justify-center rounded-full bg-sky-100 text-sky-700">
+                        <Video className="size-4" />
+                      </div>
+                      <p className="text-sm font-medium text-foreground">结果会汇总到这里</p>
+                      <p className="mt-1 text-xs text-muted-foreground">批量执行完成后，可在节点内集中预览和下载结果。</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2" onPointerDown={(event) => event.stopPropagation()}>
+                {[
+                  { key: "all", label: "全部", count: allBatchRunItems.length },
+                  { key: "succeeded", label: "成功", count: batchRunSuccessCount },
+                  { key: "failed", label: "失败", count: batchRunFailedCount },
+                ].map((item) => (
+                  <button
+                    key={item.key}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] shadow-sm transition",
+                      batchResultFilter === item.key
+                        ? "border-sky-300 bg-sky-100 text-sky-700"
+                        : "bg-background/85 text-muted-foreground hover:text-foreground",
+                    )}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setBatchResultFilter(item.key as "all" | "succeeded" | "failed");
+                      setBatchResultPage(1);
+                    }}
+                  >
+                    <span>{item.label}</span>
+                    <span>{item.count}</span>
+                  </button>
+                ))}
+              </div>
+
+              {batchRunResultItems.length > 0 ? (
+                <div className="mt-3 space-y-2" onPointerDown={(event) => event.stopPropagation()}>
+                  {paginatedBatchResultItems.map((run) => {
+                    const isVideoResult = run.assetMimeType?.startsWith("video/");
+                    const isImageResult = run.assetMimeType?.startsWith("image/");
+                    const isAudioResult = run.assetMimeType?.startsWith("audio/");
+                    const isFailedResult = run.status === "failed";
+
+                    return (
+                      <button
+                        key={run.id}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-2xl border bg-background/80 p-2 text-left shadow-sm transition",
+                          selectedBatchRunResultId === run.id ? "border-sky-300 ring-2 ring-sky-100" : "hover:border-border/90",
+                          isFailedResult ? "border-rose-200 bg-rose-50/80" : undefined,
+                        )}
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedBatchRunResultId(run.id);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
+                        <div className="h-14 w-16 shrink-0 overflow-hidden rounded-xl border bg-muted/40">
+                          {run.assetFileUrl && isVideoResult ? (
+                            <video className="h-full w-full object-cover" muted playsInline preload="metadata" src={run.assetFileUrl} />
+                          ) : run.assetFileUrl && isImageResult ? (
+                            <img alt={run.nodeTitle} className="h-full w-full object-cover" src={run.assetFileUrl} />
+                          ) : run.assetFileUrl && isAudioResult ? (
+                            <div className="flex h-full w-full items-center justify-center bg-emerald-100 text-emerald-700">
+                              <AudioLines className="size-4" />
+                            </div>
+                          ) : isFailedResult ? (
+                            <div className="flex h-full w-full items-center justify-center bg-rose-100 text-rose-700">
+                              <AlertCircle className="size-4" />
+                            </div>
+                          ) : run.contentText ? (
+                            <div className="flex h-full w-full items-center justify-center bg-violet-100 text-violet-700">
+                              <Type className="size-4" />
+                            </div>
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                              <Video className="size-4" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-medium text-foreground">{run.nodeTitle || `第 ${run.runIndex ?? 0} 轮结果`}</p>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            第 {run.runIndex ?? "?"} 轮
+                            {run.finishedAt ? ` · ${formatCanvasDateTime(run.finishedAt)}` : ""}
+                          </p>
+                          {isFailedResult ? (
+                            <p className="mt-1 line-clamp-2 text-[11px] text-rose-700/90">
+                              {run.errorMessage || run.errorCode || "执行失败"}
+                            </p>
+                          ) : run.resultType ? (
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              类型 {run.resultType}
+                              {isAudioResult ? " · 音频" : isImageResult ? " · 图片" : isVideoResult ? " · 视频" : run.contentText ? " · 文本" : ""}
+                            </p>
+                          ) : null}
+                        </div>
+                        {isVideoResult && canEdit ? (
+                          <button
+                            aria-label={`提取${run.nodeTitle || "批量结果"}为独立视频节点`}
+                            className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onExtractBatchResultToVideoNode?.(node.id, run);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                          >
+                            提取
+                          </button>
+                        ) : null}
+                        {run.assetFileUrl ? (
+                          <button
+                            aria-label={`下载${run.nodeTitle || "批量结果"}`}
+                            className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              downloadBatchResultItem(run);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                          >
+                            <Download className="size-4" />
+                          </button>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                  <div className="flex items-center justify-between gap-2 rounded-full bg-background/85 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                    <span>
+                      第 {Math.min(batchResultPage, batchResultTotalPages)} / {batchResultTotalPages} 页 · 共 {batchRunResultItems.length} 条
+                    </span>
+                    {batchResultTotalPages > 1 ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          aria-label="查看上一页批量结果"
+                          className="inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                          disabled={batchResultPage <= 1}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setBatchResultPage((current) => Math.max(1, current - 1));
+                          }}
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
+                          <ChevronLeft className="size-3.5" />
+                        </button>
+                        <button
+                          aria-label="查看下一页批量结果"
+                          className="inline-flex size-6 items-center justify-center rounded-full border bg-background text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                          disabled={batchResultPage >= batchResultTotalPages}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setBatchResultPage((current) => Math.min(batchResultTotalPages, current + 1));
+                          }}
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
+                          <ChevronRight className="size-3.5" />
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 rounded-2xl border border-dashed bg-background/70 px-4 py-3 text-xs text-muted-foreground">
+                  当前筛选下暂无结果。
+                </div>
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                <span className="rounded-full bg-background/85 px-2.5 py-1 text-foreground shadow-sm">
+                  成功 {linkedBatchRun?.succeededNodeRunCount ?? batchRunSuccessCount}
+                </span>
+                <span className="rounded-full bg-background/85 px-2.5 py-1 text-muted-foreground shadow-sm">
+                  失败 {linkedBatchRun?.failedNodeRunCount ?? batchRunFailedCount}
+                </span>
+                <span className="rounded-full bg-background/85 px-2.5 py-1 text-muted-foreground shadow-sm">
+                  结果 {linkedBatchRunDetail?.runs.length ?? 0} 条
+                </span>
+              </div>
+            </div>
+          </div>
+        </>
       ) : (
         <>
           <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
@@ -813,7 +1185,10 @@ function areNodeCardPropsEqual(
     previousProps.pendingConnectionLabel === nextProps.pendingConnectionLabel &&
     previousProps.canAcceptPendingConnection === nextProps.canAcceptPendingConnection &&
     previousProps.isPendingConnectionTarget === nextProps.isPendingConnectionTarget &&
-    previousProps.activeStoryboardShotIndex === nextProps.activeStoryboardShotIndex
+    previousProps.activeStoryboardShotIndex === nextProps.activeStoryboardShotIndex &&
+    previousProps.linkedBatchRun === nextProps.linkedBatchRun &&
+    previousProps.linkedBatchRunDetail === nextProps.linkedBatchRunDetail &&
+    previousProps.onExtractBatchResultToVideoNode === nextProps.onExtractBatchResultToVideoNode
   );
 }
 

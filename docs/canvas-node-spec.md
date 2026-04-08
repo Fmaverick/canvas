@@ -43,6 +43,7 @@
 
 后续可扩展：
 
+- `batch_result`
 - `group`
 - `condition`
 - `template`
@@ -51,7 +52,7 @@
 ## 5. 标准节点结构
 
 ```ts
-type CanvasNodeType = "text" | "storyboard" | "image" | "video" | "audio";
+type CanvasNodeType = "text" | "storyboard" | "image" | "video" | "audio" | "batch_result";
 
 type NodeRuntimeStatus =
   | "idle"
@@ -350,6 +351,36 @@ interface AudioNodeParams {
 - 音频格式
 - 波形图资源
 - 可选转写文本
+
+### 12.6 批量产出节点
+
+#### 用途
+
+- 承接一次批量执行的结果集合
+- 集中展示同一工作流或同一节点的多轮生成结果
+- 作为批量执行后的结果汇总节点，避免在画布上直接铺开大量重复结果节点
+
+#### params 建议
+
+```ts
+interface BatchResultNodeParams {
+  batchRunId: string;
+  resultType: "image" | "video" | "audio" | "text" | "mixed";
+  itemCount?: number;
+  sourceMode: "single_node" | "group";
+  sourceNodeIds: string[];
+  terminalNodeId?: string;
+  allowExpandToStandaloneNodes?: boolean;
+}
+```
+
+#### 输出
+
+- 批量结果列表
+- 每条结果的预览资源
+- 每条结果的下载信息
+- 每条结果的状态和错误信息
+- 可选的结果拆分入口
 
 ## 14. 节点复制协议
 

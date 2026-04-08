@@ -104,6 +104,12 @@ export const getNodeRunBatchInputSchema = z.object({
   batchRunId: z.uuid(),
 });
 
+export const bindNodeRunBatchResultNodeInputSchema = z.object({
+  workspaceId: z.uuid(),
+  batchRunId: z.uuid(),
+  resultNodeId: z.uuid(),
+});
+
 const DEFAULT_STORYBOARD_TEMPLATE_FILE = "shotOutFormat.md";
 const DEFAULT_STORYBOARD_SHOT_COUNT = 6;
 const STORYBOARD_SYSTEM_PROMPT =
@@ -2946,6 +2952,65 @@ export async function getNodeRunBatch(input: z.infer<typeof getNodeRunBatchInput
     ...batchRun,
     runs,
   };
+}
+
+export async function bindNodeRunBatchResultNode(input: z.infer<typeof bindNodeRunBatchResultNodeInputSchema>) {
+  const parsed = bindNodeRunBatchResultNodeInputSchema.parse(input);
+  const [batchRun] = await db
+    .select()
+    .from(nodeRunBatches)
+    .where(
+      and(
+        eq(nodeRunBatches.id, parsed.batchRunId),
+        eq(nodeRunBatches.workspaceId, parsed.workspaceId),
+      ),
+    )
+    .limit(1);
+
+  if (!batchRun) {
+    throw new ApiError(404, "BATCH_RUN_NOT_FOUND", "批量运行记录不存在。");
+  }
+
+  const [resultNode] = await db
+    .select({
+      id: canvasNodes.id,
+      canvasId: canvasNodes.canvasId,
+      workspaceId: canvasNodes.workspaceId,
+      type: canvasNodes.type,
+    })
+    .from(canvasNodes)
+    .where(
+      and(
+        eq(canvasNodes.id, parsed.resultNodeId),
+        eq(canvasNodes.workspaceId, parsed.workspaceId),
+      ),
+    )
+    .limit(1);
+
+  if (!resultNode) {
+    throw new ApiError(404, "NODE_NOT_FOUND", "批量产出节点不存在。");
+  }
+
+  if (resultNode.canvasId !== batchRun.canvasId) {
+    throw new ApiError(409, "BATCH_RUN_CANVAS_MISMATCH", "批量产出节点不属于当前批量运行所在画布。");
+  }
+
+  if (resultNode.type !== "batch_result") {
+    throw new ApiError(409, "INVALID_RESULT_NODE_TYPE", "仅支持将 batch_result 节点绑定为批量产出节点。");
+  }
+
+  const [updatedBatchRun] = await db
+    .update(nodeRunBatches)
+    .set({
+      resultNodeId: parsed.resultNodeId,
+      updatedAt: new Date(),
+    })
+    .where(eq(nodeRunBatches.id, parsed.batchRunId))
+    .returning();
+
+  emitCanvasRuntimeEvent(parsed.workspaceId, batchRun.canvasId, "batch_run_result_node_bound");
+
+  return updatedBatchRun;
 }
 
 export async function pollDueVideoTasks(input: z.infer<typeof pollDueTasksInputSchema> = {}) {

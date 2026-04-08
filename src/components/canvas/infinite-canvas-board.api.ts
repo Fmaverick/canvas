@@ -253,6 +253,27 @@ export async function fetchCanvasBatchRunDetail(
   return parseApiEnvelope<CanvasBatchRunDetail>(response, fallbackMessage);
 }
 
+export async function bindCanvasBatchRunResultNode(
+  context: CanvasBoardApiContext,
+  batchRunId: string,
+  resultNodeId: string,
+  fallbackMessage = "批量产出节点绑定失败。",
+) {
+  const response = await requestApi(
+    `/api/tasks/batch-runs/${batchRunId}`,
+    {
+      method: "PATCH",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify({
+        result_node_id: resultNodeId,
+      }),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<{ batch_run_id: string; result_node_id: string | null }>(response, fallbackMessage);
+}
+
 export function subscribeCanvasRuntime(
   context: CanvasBoardApiContext,
   handlers: {

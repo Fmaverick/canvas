@@ -87,7 +87,7 @@ export const createNodeInputSchema = z.object({
   workspaceId: z.uuid(),
   canvasId: z.uuid(),
   createdBy: z.uuid(),
-  type: z.enum(["text", "image", "video", "audio", "storyboard"]),
+  type: z.enum(["text", "image", "video", "audio", "storyboard", "batch_result"]),
   title: z.string().min(1, "Node title is required."),
   promptInput: z.string().trim().optional(),
   outputSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),

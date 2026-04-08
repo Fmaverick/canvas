@@ -337,6 +337,7 @@ export const nodeRunBatches = pgTable(
     completedNodeRunCount: integer("completed_node_run_count").notNull().default(0),
     succeededNodeRunCount: integer("succeeded_node_run_count").notNull().default(0),
     failedNodeRunCount: integer("failed_node_run_count").notNull().default(0),
+    resultNodeId: uuid("result_node_id").references(() => canvasNodes.id),
     selectedNodesJson: jsonb("selected_nodes_json")
       .$type<Array<{ id: string; title: string; type: string }>>()
       .notNull()
@@ -347,6 +348,7 @@ export const nodeRunBatches = pgTable(
     index("node_run_batches_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
     index("node_run_batches_canvas_created_at_idx").on(table.canvasId, table.createdAt),
     index("node_run_batches_status_idx").on(table.status),
+    index("node_run_batches_result_node_idx").on(table.resultNodeId),
   ],
 );
 

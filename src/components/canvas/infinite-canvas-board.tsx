@@ -17,6 +17,7 @@ import { InfiniteCanvasBoardCreatePanel } from "@/components/canvas/infinite-can
 import { InfiniteCanvasBoardNodeCard } from "@/components/canvas/infinite-canvas-board-node-card";
 import {
   completeUpload,
+  bindCanvasBatchRunResultNode,
   createUploadPresign,
   fetchCanvasBatchRunDetail,
   fetchCanvasRuntime,
@@ -37,6 +38,8 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   TEXT_GENERATE_COOLDOWN_MS,
+  getBatchResultNodeBatchRunId,
+  getBatchResultLinkedBatchRunId,
   getCanvasConnectionLabel,
   getCanvasConnectionSemantic,
   getCanvasNodeDimensions,
@@ -128,6 +131,7 @@ export function InfiniteCanvasBoard({
   const selectedNodeDraftPatchRef = useRef<CanvasGraphNodePatch | null>(null);
   const effectiveSelectedNodeIdRef = useRef<string | null>(null);
   const previousBatchRunIdsRef = useRef(initialBatchRuns.map((batchRun) => batchRun.id));
+  const autoBoundBatchRunIdsRef = useRef<Record<string, string>>({});
   const runtimeStreamRetryTimeoutRef = useRef<number | null>(null);
   const runtimeStreamErrorCountRef = useRef(0);
 
@@ -433,6 +437,8 @@ export function InfiniteCanvasBoard({
     null;
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
   const selectedNodeDraftIdentity = selectedNode ? `${selectedNode.id}:${selectedNode.type}` : null;
+  const selectedBatchResultRunId =
+    selectedNode?.type === "batch_result" ? getBatchResultLinkedBatchRunId(selectedNode, batchRuns) : null;
   const selectedNodeDraftPatch = useMemo((): CanvasGraphNodePatch | null => {
     if (!selectedNode) {
       return null;
@@ -806,6 +812,84 @@ export function InfiniteCanvasBoard({
       cancelled = true;
     };
   }, [activeBatchRun, activeBatchRunDetail, apiContext, isBatchResultsOpen]);
+
+  useEffect(() => {
+    if (!selectedBatchResultRunId || batchRunDetailsById[selectedBatchResultRunId]) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void fetchCanvasBatchRunDetail(apiContext, selectedBatchResultRunId)
+      .then((detail) => {
+        if (cancelled) {
+          return;
+        }
+
+        setBatchRunDetailsById((current) => ({
+          ...current,
+          [detail.id]: detail,
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          toast.error("批量产出节点详情加载失败。");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiContext, batchRunDetailsById, selectedBatchResultRunId]);
+
+  useEffect(() => {
+    const batchResultNodes = nodes.filter((node) => node.type === "batch_result");
+
+    if (batchResultNodes.length === 0 || batchRuns.length === 0) {
+      return;
+    }
+
+    const legacyBindings = batchResultNodes.flatMap((node) => {
+      const legacyBatchRunId = getBatchResultNodeBatchRunId(node.settingsJson);
+
+      if (!legacyBatchRunId) {
+        return [];
+      }
+
+      const batchRun = batchRuns.find((item) => item.id === legacyBatchRunId) ?? null;
+
+      if (!batchRun || batchRun.resultNodeId || autoBoundBatchRunIdsRef.current[batchRun.id] === node.id) {
+        return [];
+      }
+
+      return [{ batchRunId: batchRun.id, nodeId: node.id }];
+    });
+
+    if (legacyBindings.length === 0) {
+      return;
+    }
+
+    for (const binding of legacyBindings) {
+      autoBoundBatchRunIdsRef.current[binding.batchRunId] = binding.nodeId;
+
+      void bindCanvasBatchRunResultNode(apiContext, binding.batchRunId, binding.nodeId)
+        .then(() => {
+          setBatchRuns((current) =>
+            current.map((batchRun) =>
+              batchRun.id === binding.batchRunId
+                ? {
+                    ...batchRun,
+                    resultNodeId: binding.nodeId,
+                  }
+                : batchRun,
+            ),
+          );
+        })
+        .catch(() => {
+          delete autoBoundBatchRunIdsRef.current[binding.batchRunId];
+        });
+    }
+  }, [apiContext, batchRuns, nodes]);
 
   useEffect(() => {
     const previousBatchRunIds = previousBatchRunIdsRef.current;
@@ -1779,9 +1863,97 @@ export function InfiniteCanvasBoard({
         },
         "批量运行失败。",
       );
+      const batchRunId = typeof result.batch_run_id === "string" ? result.batch_run_id : null;
+      const runCount = typeof result.run_count === "number" ? result.run_count : batchRunCount;
+
+      if (batchRunId && canEdit) {
+        const selectedSourceNodes = nodes.filter((node) => effectiveSelectedNodeIds.includes(node.id));
+
+        if (selectedSourceNodes.length > 0) {
+          const selectedSourceIdSet = new Set(selectedSourceNodes.map((node) => node.id));
+          const terminalNodes = selectedSourceNodes.filter(
+            (node) => !edges.some((edge) => edge.sourceNodeId === node.id && selectedSourceIdSet.has(edge.targetNodeId)),
+          );
+          const anchorNodes = terminalNodes.length > 0 ? terminalNodes : selectedSourceNodes;
+          const anchorPositions = anchorNodes.map((node) => ({
+            x: Number.parseFloat(node.positionX || "0"),
+            y: Number.parseFloat(node.positionY || "0"),
+          }));
+          const averageY = anchorPositions.reduce((sum, point) => sum + point.y, 0) / anchorPositions.length;
+          const rightMostX = Math.max(...anchorPositions.map((point) => point.x));
+          const clientId = `batch-result-${crypto.randomUUID()}`;
+          const batchResultEdgeOperations: CanvasGraphOperation[] = anchorNodes.map((node, index) => ({
+            type: "create_edge",
+            edge: {
+              sourceNodeId: node.id,
+              targetNodeId: clientId,
+              mergeMode: index === 0 ? "previous_only" : "merge_all",
+              priority: index,
+            },
+          }));
+          const graphMutationResult = await runGraphMutation(
+            [
+              {
+                type: "create_node",
+                clientId,
+                node: {
+                  type: "batch_result",
+                  title: anchorNodes.length === 1 ? `${anchorNodes[0].title} · 批量产出` : "批量产出",
+                  promptInput: "",
+                  outputSnapshot: {
+                    outputType: "json",
+                    structuredData: {
+                      batchRunId,
+                      runCount,
+                      sourceNodeIds: selectedSourceNodes.map((node) => node.id),
+                      terminalNodeIds: anchorNodes.map((node) => node.id),
+                    },
+                    generatedAt: new Date().toISOString(),
+                  },
+                  settingsJson: {
+                    batchRunId,
+                    sourceMode: selectedSourceNodes.length === 1 ? "single_node" : "group",
+                    sourceNodeIds: selectedSourceNodes.map((node) => node.id),
+                    terminalNodeIds: anchorNodes.map((node) => node.id),
+                  },
+                  resourceRefs: {
+                    subjectIds: [],
+                    sceneIds: [],
+                    instructionPresetIds: [],
+                    assetIds: [],
+                  },
+                  positionX: Math.round(rightMostX + 420),
+                  positionY: Math.round(averageY),
+                },
+              },
+              ...batchResultEdgeOperations,
+            ],
+            "批量产出节点创建失败。",
+          );
+          const createdBatchResultNodeId =
+            graphMutationResult.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ??
+            null;
+
+          if (createdBatchResultNodeId) {
+            await bindCanvasBatchRunResultNode(apiContext, batchRunId, createdBatchResultNodeId);
+            setSelectedNodeIds([createdBatchResultNodeId]);
+            setSelectedNodeId(createdBatchResultNodeId);
+          }
+        }
+      }
+
+      if (batchRunId) {
+        setSelectedBatchRunId(batchRunId);
+        setIsBatchResultsOpen(true);
+        const detail = await fetchCanvasBatchRunDetail(apiContext, batchRunId);
+        setBatchRunDetailsById((current) => ({
+          ...current,
+          [detail.id]: detail,
+        }));
+      }
 
       toast.success(
-        `已触发 ${result.node_count ?? effectiveSelectedNodeIds.length} 个节点，共 ${result.run_count ?? batchRunCount} 轮批量运行。`,
+        `已触发 ${result.node_count ?? effectiveSelectedNodeIds.length} 个节点，共 ${runCount} 轮批量运行。`,
       );
       await refreshCanvasRuntime("批量运行状态刷新失败。");
     } catch (error) {
@@ -1793,11 +1965,109 @@ export function InfiniteCanvasBoard({
     apiContext,
     batchRunCount,
     canGenerate,
+    canEdit,
+    edges,
     effectiveSelectedNodeIds,
     hasRunningSelectedNode,
     hasUnsavedCanvasChanges,
+    nodes,
     refreshCanvasRuntime,
+    runGraphMutation,
   ]);
+  const handleExtractBatchResultToVideoNode = useCallback(
+    async (batchResultNodeId: string, run: CanvasBatchRunResult) => {
+      if (!canEdit || !run.assetFileUrl) {
+        return;
+      }
+
+      const batchResultNode = nodeById.get(batchResultNodeId);
+
+      if (!batchResultNode) {
+        toast.error("批量产出节点不存在。");
+
+        return;
+      }
+
+      const sourceNode = nodeById.get(run.nodeId) ?? null;
+      const basePosition = nodePositionMap.get(batchResultNodeId) ?? {
+        x: Number.parseFloat(batchResultNode.positionX || "0"),
+        y: Number.parseFloat(batchResultNode.positionY || "0"),
+      };
+      const resultMeta =
+        run.resultMeta && typeof run.resultMeta === "object" && !Array.isArray(run.resultMeta) ? run.resultMeta : {};
+      const clientId = `extract-batch-result-${crypto.randomUUID()}`;
+      const generatedAtSource = run.finishedAt ?? run.createdAt;
+      const generatedAt =
+        generatedAtSource instanceof Date
+          ? generatedAtSource.toISOString()
+          : typeof generatedAtSource === "string" && generatedAtSource.trim().length > 0
+            ? generatedAtSource
+            : new Date().toISOString();
+      const outputSnapshot = {
+        taskId: run.taskId ?? undefined,
+        outputType: "video",
+        content: run.assetFileUrl,
+        assets: run.assetId
+          ? [
+              {
+                assetId: run.assetId,
+                assetType: "video",
+                url: run.assetFileUrl,
+                mimeType: run.assetMimeType ?? undefined,
+              },
+            ]
+          : undefined,
+        structuredData: {
+          ...resultMeta,
+          videoUrl: run.assetFileUrl,
+          assetId: run.assetId ?? (typeof resultMeta.assetId === "string" ? resultMeta.assetId : undefined),
+        },
+        generatedAt,
+      };
+
+      try {
+        const result = await runGraphMutation(
+          [
+            {
+              type: "create_node",
+              clientId,
+              node: {
+                type: "video",
+                title: `${sourceNode?.title || run.nodeTitle || "视频结果"} · 第 ${run.runIndex ?? 1} 轮`,
+                promptInput: sourceNode?.promptInput ?? "",
+                outputSnapshot,
+                modelKey: sourceNode?.modelKey ?? undefined,
+                settingsJson: sourceNode?.settingsJson ?? {},
+                resourceRefs: sourceNode?.resourceRefs ?? {
+                  subjectIds: [],
+                  sceneIds: [],
+                  instructionPresetIds: [],
+                  assetIds: [],
+                },
+                positionX: Math.round(basePosition.x + 400),
+                positionY: Math.round(basePosition.y + ((run.runIndex ?? 1) - 1) * 28),
+              },
+            },
+          ],
+          "提取独立视频节点失败。",
+        );
+        const createdNodeId =
+          result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
+
+        if (!createdNodeId) {
+          throw new Error("视频节点创建成功，但未返回节点 ID。");
+        }
+
+        await saveNodePatch(createdNodeId, { status: "succeeded" }, "独立视频节点状态更新失败。");
+        setSelectedNodeIds([createdNodeId]);
+        setSelectedNodeId(createdNodeId);
+        toast.success(`已提取第 ${run.runIndex ?? 1} 轮结果为独立视频节点。`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "提取独立视频节点失败。");
+      }
+    },
+    [canEdit, nodeById, nodePositionMap, runGraphMutation, saveNodePatch],
+  );
   const handleSaveCanvas = useCallback(async () => {
     const saved = await flushCanvasChanges();
 
@@ -3768,6 +4038,9 @@ export function InfiniteCanvasBoard({
                 pendingConnectionSourceNode.id !== node.id &&
                 getCanvasConnectionSemantic(pendingConnectionSourceNode.type, node.type),
             );
+            const linkedBatchRunId = node.type === "batch_result" ? getBatchResultLinkedBatchRunId(node, batchRuns) : null;
+            const linkedBatchRun = linkedBatchRunId ? batchRuns.find((batchRun) => batchRun.id === linkedBatchRunId) ?? null : null;
+            const linkedBatchRunDetail = linkedBatchRunId ? batchRunDetailsById[linkedBatchRunId] ?? null : null;
 
             if (!position) {
               return null;
@@ -3798,8 +4071,11 @@ export function InfiniteCanvasBoard({
                 isCoolingDown={textGenerateCooldown.nodeId === node.id && Date.now() < textGenerateCooldown.expiresAt}
                 isSelected={effectiveSelectedNodeIds.includes(node.id)}
                 isSavingTextNodeTitle={isSavingTextNodeTitle}
+                linkedBatchRun={linkedBatchRun}
+                linkedBatchRunDetail={linkedBatchRunDetail}
                 latestTask={latestTask}
                 node={node}
+                onExtractBatchResultToVideoNode={handleExtractBatchResultToVideoNode}
                 canAcceptPendingConnection={canAcceptPendingConnection}
                 isPendingConnectionTarget={canAcceptPendingConnection}
                 onCancelEditingTitle={() => {
