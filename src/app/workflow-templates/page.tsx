@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Pencil, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -45,7 +45,7 @@ function actionLinkClass(primary: boolean) {
     : "inline-flex h-9 items-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted";
 }
 
-export default function WorkflowTemplatesPage() {
+function WorkflowTemplatesPageContent() {
   const searchParams = useSearchParams();
   const workspaceId = searchParams.get("workspaceId") ?? "";
   const canvasId = searchParams.get("canvasId") ?? "";
@@ -84,11 +84,17 @@ export default function WorkflowTemplatesPage() {
     [draftTags],
   );
   const filterEffectOptions = useMemo(
-    () => Array.from(new Set(templates.map((template) => template.effectCategory).filter(Boolean))).sort(),
+    () =>
+      Array.from(
+        new Set(templates.map((template) => template.effectCategory).filter((value): value is string => Boolean(value))),
+      ).sort(),
     [templates],
   );
   const filterContentOptions = useMemo(
-    () => Array.from(new Set(templates.map((template) => template.contentCategory).filter(Boolean))).sort(),
+    () =>
+      Array.from(
+        new Set(templates.map((template) => template.contentCategory).filter((value): value is string => Boolean(value))),
+      ).sort(),
     [templates],
   );
   const filterTagOptions = useMemo(() => Array.from(new Set(templates.flatMap((template) => template.tags))).sort(), [templates]);
@@ -332,7 +338,7 @@ export default function WorkflowTemplatesPage() {
                 <div className="space-y-0.5">
                   <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">封装工作流</h1>
                   <p className="text-sm text-muted-foreground">
-                    首版支持个人模板和空间模板，从当前画布保存模板，并一键插入节点和边到目标画布。<mccoremem id="03fwojl0nvnukc12ua4m2g1a4" />
+                    首版支持个人模板和空间模板，从当前画布保存模板，并一键插入节点和边到目标画布。
                   </p>
                 </div>
               </div>
@@ -621,5 +627,25 @@ export default function WorkflowTemplatesPage() {
         </DialogContent>
       </Dialog>
     </main>
+  );
+}
+
+function WorkflowTemplatesFallback() {
+  return (
+    <main className="min-h-screen bg-[#f5f5f7] px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-[1320px]">
+        <section className="rounded-[28px] border border-black/5 bg-white px-5 py-10 text-sm text-muted-foreground shadow-[0_12px_36px_-28px_rgba(15,23,42,0.16)] sm:px-6">
+          正在加载工作流模板...
+        </section>
+      </div>
+    </main>
+  );
+}
+
+export default function WorkflowTemplatesPage() {
+  return (
+    <Suspense fallback={<WorkflowTemplatesFallback />}>
+      <WorkflowTemplatesPageContent />
+    </Suspense>
   );
 }
