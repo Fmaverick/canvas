@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useMemo, useRef, useState } from "react";
-import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
+import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ExternalLink, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -45,6 +45,29 @@ const VIDEO_MODEL_PRESET_OPTIONS = [
     label: "Kling V3 Standard",
   },
 ] as const;
+
+function getVideoAspectRatioLabel(aspectRatio: number | null) {
+  if (!aspectRatio || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return null;
+  }
+
+  const presets = [
+    { label: "16:9", value: 16 / 9 },
+    { label: "9:16", value: 9 / 16 },
+    { label: "1:1", value: 1 },
+  ];
+  const matchedPreset = presets.find((preset) => Math.abs(preset.value - aspectRatio) < 0.08);
+
+  if (matchedPreset) {
+    return matchedPreset.label;
+  }
+
+  if (aspectRatio >= 1) {
+    return `${aspectRatio.toFixed(2)}:1`;
+  }
+
+  return `1:${(1 / aspectRatio).toFixed(2)}`;
+}
 
 const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
 
@@ -1011,13 +1034,12 @@ export function VideoNodePanel({
   const selectedVideoModelPreset = draftVideoModelKey.length === 0 || hasPresetVideoModel ? draftVideoModelKey : "__custom__";
   const previewFallbackAsset =
     selectedVideoFirstFrameAsset ?? selectedVideoLastFrameAsset ?? selectedVideoReferenceAssets[0] ?? null;
-  const videoPreviewAspectClass =
-    draftVideoSettings.size === "16:9"
-      ? "aspect-video"
-      : draftVideoSettings.size === "1:1"
-        ? "aspect-square"
-        : "aspect-[9/16]";
+  const fallbackAspectRatio =
+    draftVideoSettings.size === "16:9" ? 16 / 9 : draftVideoSettings.size === "1:1" ? 1 : 9 / 16;
   const [isVideoPreviewOpen, setIsVideoPreviewOpen] = useState(false);
+  const [videoPreviewAspectRatio, setVideoPreviewAspectRatio] = useState<number | null>(null);
+  const resolvedVideoAspectRatio = videoPreviewAspectRatio ?? fallbackAspectRatio;
+  const resolvedVideoAspectLabel = getVideoAspectRatioLabel(resolvedVideoAspectRatio) ?? draftVideoSettings.size;
 
   return (
     <>
@@ -1082,16 +1104,6 @@ export function VideoNodePanel({
                     {isUploadingVideoImages ? "上传中..." : isFirstLastVideoMode ? "上传首帧" : "上传参考图"}
                   </Button>
                 ) : null}
-                <Button
-                  disabled={!selectedVideoOutputSource}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                  onClick={onDownloadVideo}
-                >
-                  <Download className="mr-1 size-4" />
-                  下载视频
-                </Button>
               </div>
             </div>
 
@@ -1399,67 +1411,75 @@ export function VideoNodePanel({
                 </p>
               </div>
               <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
-                {draftVideoSettings.size}
+                {resolvedVideoAspectLabel}
               </div>
             </div>
 
-            <div className={`overflow-hidden rounded-[20px] border bg-black ${videoPreviewAspectClass}`}>
-              {selectedVideoOutputSource ? (
-                <video
-                  key={selectedVideoOutputSource}
-                  className="h-full w-full object-contain"
-                  controls
-                  playsInline
-                  preload="metadata"
-                  src={selectedVideoOutputSource}
-                />
-              ) : previewFallbackAsset ? (
-                <div className="relative h-full w-full">
-                  <img
-                    alt={previewFallbackAsset.fileName}
-                    className="h-full w-full object-cover opacity-90"
-                    src={previewFallbackAsset.fileUrl}
-                  />
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/45">
-                    <div className="rounded-full bg-background/90 px-3 py-1 text-xs text-foreground shadow-sm">
-                      暂无生成结果，当前展示参考图
+            <div className="overflow-hidden rounded-[20px] border bg-black">
+              <div className="relative w-full" style={{ aspectRatio: `${resolvedVideoAspectRatio}` }}>
+                {selectedVideoOutputSource ? (
+                  <>
+                    <video
+                      key={selectedVideoOutputSource}
+                      className="h-full w-full object-contain"
+                      controls
+                      playsInline
+                      preload="metadata"
+                      src={selectedVideoOutputSource}
+                      onLoadedMetadata={(event) => {
+                        const { videoWidth, videoHeight } = event.currentTarget;
+
+                        if (videoWidth > 0 && videoHeight > 0) {
+                          setVideoPreviewAspectRatio(videoWidth / videoHeight);
+                        }
+                      }}
+                    />
+                    <div className="absolute right-3 top-3 z-10 flex gap-2">
+                      <Button size="sm" type="button" variant="secondary" onClick={() => setIsVideoPreviewOpen(true)}>
+                        <Expand className="mr-1 size-4" />
+                        放大
+                      </Button>
+                      <Button size="sm" type="button" variant="secondary" onClick={() => window.open(selectedVideoOutputSource, "_blank", "noopener,noreferrer")}>
+                        <ExternalLink className="mr-1 size-4" />
+                        原链接
+                      </Button>
+                      <Button size="sm" type="button" variant="secondary" onClick={onDownloadVideo}>
+                        <Download className="mr-1 size-4" />
+                        下载
+                      </Button>
+                    </div>
+                  </>
+                ) : previewFallbackAsset ? (
+                  <div className="relative h-full w-full">
+                    <img
+                      alt={previewFallbackAsset.fileName}
+                      className="h-full w-full object-contain opacity-90"
+                      src={previewFallbackAsset.fileUrl}
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/45">
+                      <div className="rounded-full bg-background/90 px-3 py-1 text-xs text-foreground shadow-sm">
+                        暂无生成结果，当前展示参考图
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="flex h-full items-center justify-center px-6 text-center">
-                  <div>
-                    <div className="mx-auto mb-3 inline-flex size-12 items-center justify-center rounded-full bg-white/10 text-white">
-                      <Video className="size-5" />
+                ) : (
+                  <div className="flex h-full items-center justify-center px-6 text-center">
+                    <div>
+                      <div className="mx-auto mb-3 inline-flex size-12 items-center justify-center rounded-full bg-white/10 text-white">
+                        <Video className="size-5" />
+                      </div>
+                      <p className="text-sm font-medium text-white">当前还没有可预览的视频结果</p>
+                      <p className="mt-1 text-xs text-white/70">左侧完成参数配置后生成，结果会直接显示在这里。</p>
                     </div>
-                    <p className="text-sm font-medium text-white">当前还没有可预览的视频结果</p>
-                    <p className="mt-1 text-xs text-white/70">左侧完成参数配置后生成，结果会直接显示在这里。</p>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                disabled={!selectedVideoOutputSource}
-                size="sm"
-                type="button"
-                variant="outline"
-                onClick={() => setIsVideoPreviewOpen(true)}
-              >
-                <Expand className="mr-1 size-4" />
-                放大预览
-              </Button>
-              <Button
-                disabled={!selectedVideoOutputSource}
-                size="sm"
-                type="button"
-                variant="outline"
-                onClick={onDownloadVideo}
-              >
-                <Download className="mr-1 size-4" />
-                下载当前结果
-              </Button>
+              <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                {selectedVideoOutputSource ? "供应商外链视频" : "等待视频结果"}
+              </div>
               <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
                 {isFirstLastVideoMode
                   ? "首尾帧"
@@ -1475,6 +1495,11 @@ export function VideoNodePanel({
               <div className="rounded-full bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
                 {draftVideoSettings.withAudio ? "带声音" : "静音视频"}
               </div>
+              {selectedVideoOutputSource ? (
+                <div className="rounded-full bg-muted px-2.5 py-1 text-[11px] text-muted-foreground">
+                  若供应商限制直下，点击“原链接”可直接打开源视频
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1491,7 +1516,34 @@ export function VideoNodePanel({
             <div className="min-h-0 overflow-auto px-6 pb-6">
               <div className="overflow-hidden rounded-[24px] border bg-black">
                 {selectedVideoOutputSource ? (
-                  <video className="max-h-[70vh] w-full object-contain" controls playsInline preload="metadata" src={selectedVideoOutputSource} />
+                  <div className="relative mx-auto w-full" style={{ aspectRatio: `${resolvedVideoAspectRatio}` }}>
+                    <video
+                      className="h-full w-full object-contain"
+                      controls
+                      playsInline
+                      preload="metadata"
+                      src={selectedVideoOutputSource}
+                      onLoadedMetadata={(event) => {
+                        const { videoWidth, videoHeight } = event.currentTarget;
+
+                        if (videoWidth > 0 && videoHeight > 0) {
+                          setVideoPreviewAspectRatio(videoWidth / videoHeight);
+                        }
+                      }}
+                    />
+                    <div className="absolute right-4 top-4 z-10">
+                      <div className="flex gap-2">
+                        <Button type="button" variant="secondary" onClick={() => window.open(selectedVideoOutputSource, "_blank", "noopener,noreferrer")}>
+                          <ExternalLink className="mr-1 size-4" />
+                          原链接
+                        </Button>
+                        <Button type="button" variant="secondary" onClick={onDownloadVideo}>
+                          <Download className="mr-1 size-4" />
+                          下载当前结果
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
                 ) : previewFallbackAsset ? (
                   <div className="relative">
                     <img alt={previewFallbackAsset.fileName} className="max-h-[70vh] w-full object-contain" src={previewFallbackAsset.fileUrl} />
@@ -1508,10 +1560,7 @@ export function VideoNodePanel({
                 )}
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
-                <Button disabled={!selectedVideoOutputSource} type="button" variant="outline" onClick={onDownloadVideo}>
-                  <Download className="mr-1 size-4" />
-                  下载当前结果
-                </Button>
+                <div className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">当前比例：{resolvedVideoAspectLabel}</div>
               </div>
             </div>
           </div>

@@ -203,6 +203,14 @@ function getNodePositionsFromNodes(nodes: CanvasNode[]) {
   ) as Record<string, { x: number; y: number }>;
 }
 
+function clampWheelDelta(delta: number, limit: number) {
+  return Math.max(-limit, Math.min(limit, delta));
+}
+
+function hasExceededPointerThreshold(start: { x: number; y: number }, current: { x: number; y: number }, threshold = 5) {
+  return Math.hypot(current.x - start.x, current.y - start.y) >= threshold;
+}
+
 function areNodePositionsEqual(
   left: Record<string, { x: number; y: number }>,
   right: Record<string, { x: number; y: number }>,
@@ -328,6 +336,7 @@ export function InfiniteCanvasBoard({
   const [runtimeSyncState, setRuntimeSyncState] = useState<"connecting" | "live" | "reconnecting" | "degraded">(
     "connecting",
   );
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
   const isStructuredValueEqual = useCallback((left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right), []);
@@ -1372,6 +1381,37 @@ export function InfiniteCanvasBoard({
     return () => window.removeEventListener("resize", syncViewportSize);
   }, []);
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || isFormFieldTarget(event.target)) {
+        return;
+      }
+
+      setIsSpacePressed(true);
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") {
+        return;
+      }
+
+      setIsSpacePressed(false);
+    };
+    const handleBlur = () => {
+      setIsSpacePressed(false);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, []);
+
   const getWorldPoint = useCallback(
     (clientX: number, clientY: number) => {
       if (!containerRef.current) {
@@ -1488,7 +1528,7 @@ export function InfiniteCanvasBoard({
           return null;
         }
 
-        const padding = 36;
+        const padding = 36 / zoom;
         const topLeft = getScreenPoint(worldBounds.left - padding, worldBounds.top - padding);
         const bottomRight = getScreenPoint(worldBounds.right + padding, worldBounds.bottom + padding);
 
@@ -1503,7 +1543,7 @@ export function InfiniteCanvasBoard({
         };
       })
       .filter((group): group is NonNullable<typeof group> => Boolean(group));
-  }, [effectiveSelectedNodeIds, getGroupedWorldBounds, getScreenPoint, groupNodeIdsMap]);
+  }, [effectiveSelectedNodeIds, getGroupedWorldBounds, getScreenPoint, groupNodeIdsMap, zoom]);
 
   const getLocalScreenPoint = useCallback((clientX: number, clientY: number) => {
     if (!containerRef.current) {
@@ -1517,6 +1557,18 @@ export function InfiniteCanvasBoard({
       y: clientY - containerRect.top,
     };
   }, []);
+  const getViewportCenterClientPoint = useCallback(() => {
+    if (!containerRef.current) {
+      return null;
+    }
+
+    const containerRect = containerRef.current.getBoundingClientRect();
+
+    return {
+      x: containerRect.left + viewportSize.width / 2,
+      y: containerRect.top + viewportSize.height / 2,
+    };
+  }, [viewportSize.height, viewportSize.width]);
 
   const updateZoom = useCallback(
     (nextZoom: number, clientX?: number, clientY?: number) => {
@@ -1551,14 +1603,16 @@ export function InfiniteCanvasBoard({
       event.preventDefault();
 
       if (event.ctrlKey || event.metaKey) {
-        updateZoom(zoom - event.deltaY * 0.0015, event.clientX, event.clientY);
+        const nextZoom = zoom * Math.exp(-clampWheelDelta(event.deltaY, 120) * 0.0018);
+
+        updateZoom(nextZoom, event.clientX, event.clientY);
 
         return;
       }
 
       setCamera((current) => ({
-        x: current.x + event.deltaX / zoom,
-        y: current.y + event.deltaY / zoom,
+        x: current.x + clampWheelDelta(event.deltaX, 80) / zoom,
+        y: current.y + clampWheelDelta(event.deltaY, 80) / zoom,
       }));
     },
     [updateZoom, zoom],
@@ -1887,6 +1941,7 @@ export function InfiniteCanvasBoard({
       setSelectedNodeIds(memberIds);
       setSelectedNodeId(nextSelectedNodeId);
       let moved = false;
+      const pointerOrigin = { x: clientX, y: clientY };
       let animationFrameId: number | null = null;
       let pendingPositions: Record<string, { x: number; y: number }> | null = null;
 
@@ -1907,6 +1962,10 @@ export function InfiniteCanvasBoard({
       };
 
       const handlePointerMove = (event: PointerEvent) => {
+        if (!moved && !hasExceededPointerThreshold(pointerOrigin, { x: event.clientX, y: event.clientY })) {
+          return;
+        }
+
         const nextPoint = getWorldPoint(event.clientX, event.clientY);
 
         if (!nextPoint) {
@@ -2268,7 +2327,7 @@ export function InfiniteCanvasBoard({
         window.removeEventListener("pointerup", handlePointerUp);
         setSelectionRect(null);
 
-        if (width < 4 && height < 4) {
+        if (width < 6 && height < 6) {
           if (!additive) {
             setSelectedNodeIds([]);
             setSelectedNodeId(null);
@@ -4014,6 +4073,7 @@ export function InfiniteCanvasBoard({
     const offsetX = boardPoint.x - position.x;
     const offsetY = boardPoint.y - position.y;
     let moved = false;
+    const pointerOrigin = { x: clientX, y: clientY };
     let animationFrameId: number | null = null;
     let pendingPosition: { x: number; y: number } | null = null;
 
@@ -4034,6 +4094,10 @@ export function InfiniteCanvasBoard({
     };
 
     const handlePointerMove = (event: PointerEvent) => {
+      if (!moved && !hasExceededPointerThreshold(pointerOrigin, { x: event.clientX, y: event.clientY })) {
+        return;
+      }
+
       const nextBoardPoint = getWorldPoint(event.clientX, event.clientY);
 
       if (!nextBoardPoint) {
@@ -4093,9 +4157,18 @@ export function InfiniteCanvasBoard({
   function startCanvasPan(clientX: number, clientY: number) {
     const initialCamera = { ...camera };
     const origin = { x: clientX, y: clientY };
-    setIsPanning(true);
+    let didPan = false;
 
     const handlePointerMove = (event: PointerEvent) => {
+      if (!didPan && !hasExceededPointerThreshold(origin, { x: event.clientX, y: event.clientY })) {
+        return;
+      }
+
+      if (!didPan) {
+        didPan = true;
+        setIsPanning(true);
+      }
+
       setCamera({
         x: initialCamera.x - (event.clientX - origin.x) / zoom,
         y: initialCamera.y - (event.clientY - origin.y) / zoom,
@@ -4105,7 +4178,9 @@ export function InfiniteCanvasBoard({
     const handlePointerUp = () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
-      setIsPanning(false);
+      if (didPan) {
+        setIsPanning(false);
+      }
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -4160,8 +4235,16 @@ export function InfiniteCanvasBoard({
           onUngroupSelectedNodes={() => {
             void handleUngroupSelectedNodes();
           }}
-          onZoomIn={() => updateZoom(zoom + 0.1)}
-          onZoomOut={() => updateZoom(zoom - 0.1)}
+          onZoomIn={() => {
+            const center = getViewportCenterClientPoint();
+
+            updateZoom(zoom * 1.12, center?.x, center?.y);
+          }}
+          onZoomOut={() => {
+            const center = getViewportCenterClientPoint();
+
+            updateZoom(zoom / 1.12, center?.x, center?.y);
+          }}
           quickType={quickType}
           runtimeSyncStatusLabel={runtimeSyncStatusLabel}
           runtimeSyncStatusTone={runtimeSyncStatusTone}
@@ -4292,7 +4375,7 @@ export function InfiniteCanvasBoard({
             clearPendingConnection();
           }
 
-          if (event.altKey || event.button === 1) {
+          if (event.altKey || event.button === 1 || isSpacePressed) {
             setSelectedNodeId(null);
             setSelectedNodeIds([]);
             startCanvasPan(event.clientX, event.clientY);
@@ -4316,11 +4399,11 @@ export function InfiniteCanvasBoard({
           <div className="pointer-events-none absolute inset-0">
             <div
               className="absolute top-0 h-full border-l border-dashed border-primary/10"
-              style={{ left: `${viewportSize.width / 2 - camera.x}px` }}
+              style={{ left: `${viewportSize.width / 2 - camera.x * zoom}px` }}
             />
             <div
               className="absolute left-0 w-full border-t border-dashed border-primary/10"
-              style={{ top: `${viewportSize.height / 2 - camera.y}px` }}
+              style={{ top: `${viewportSize.height / 2 - camera.y * zoom}px` }}
             />
           </div>
 
@@ -4348,7 +4431,8 @@ export function InfiniteCanvasBoard({
               const edgeLabel = getCanvasConnectionLabel(sourceNode.type, targetNode.type);
               const isSelectedEdge = selectedEdgeId === edge.id;
               const edgeLabelWidth = edgeLabel.length * 12 + (isSelectedEdge ? 56 : 24);
-              const edgePath = `M ${sourceScreen.x} ${sourceScreen.y} C ${sourceScreen.x + 120 * zoom} ${sourceScreen.y}, ${targetScreen.x - 120 * zoom} ${targetScreen.y}, ${targetScreen.x} ${targetScreen.y}`;
+              const controlOffset = Math.max(72, Math.min(180, Math.abs(targetScreen.x - sourceScreen.x) * 0.28));
+              const edgePath = `M ${sourceScreen.x} ${sourceScreen.y} C ${sourceScreen.x + controlOffset} ${sourceScreen.y}, ${targetScreen.x - controlOffset} ${targetScreen.y}, ${targetScreen.x} ${targetScreen.y}`;
 
               return (
                 <g key={edge.id}>
@@ -4487,6 +4571,10 @@ export function InfiniteCanvasBoard({
                   type="button"
                   onClick={() => handleSelectGroup(group.id)}
                   onPointerDown={(event) => {
+                    if (event.button !== 0) {
+                      return;
+                    }
+
                     event.stopPropagation();
                     startGroupDrag(group.id, event.clientX, event.clientY);
                   }}

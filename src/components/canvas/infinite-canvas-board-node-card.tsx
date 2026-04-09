@@ -185,7 +185,7 @@ type ConnectionHandleProps = {
 
 function ConnectionHandle({ direction, zoom, isActive, isAvailable, label, onClick }: ConnectionHandleProps) {
   const isIncoming = direction === "incoming";
-  const handleScale = zoom < 1 ? Math.min(1.65, 1 / Math.max(zoom, 0.45)) : 1;
+  const handleScale = Math.min(1.5, Math.max(0.82, 1 / Math.max(zoom, 0.45)));
 
   return (
     <button
@@ -421,6 +421,10 @@ function InfiniteCanvasBoardNodeCardComponent({
         if (isConnectionMode) {
           event.stopPropagation();
 
+          return;
+        }
+
+        if (event.button !== 0) {
           return;
         }
 
@@ -738,12 +742,12 @@ function InfiniteCanvasBoardNodeCardComponent({
             <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
             <div className="absolute inset-0 bg-white/24" />
             {videoOutputSource ? (
-              <div className="relative h-full w-full">
+              <div className="relative flex h-full w-full items-center justify-center bg-black/80">
                 <video
                   ref={(element) => {
                     onRegisterVideoElement(node.id, element);
                   }}
-                  className="h-full w-full object-cover"
+                  className="h-full w-full object-contain"
                   playsInline
                   preload="metadata"
                   src={videoOutputSource}
@@ -789,8 +793,8 @@ function InfiniteCanvasBoardNodeCardComponent({
                 )}
               </div>
             ) : videoPreviewAsset ? (
-              <div className="relative h-full w-full">
-                <img alt={node.title} className="h-full w-full object-cover" draggable={false} src={videoPreviewAsset.fileUrl} />
+              <div className="relative flex h-full w-full items-center justify-center bg-black/70">
+                <img alt={node.title} className="h-full w-full object-contain" draggable={false} src={videoPreviewAsset.fileUrl} />
                 <div className="absolute inset-0 flex items-center justify-center bg-background/10">
                   <span className="inline-flex size-14 items-center justify-center rounded-full bg-background/90 text-foreground shadow-lg">
                     <Play className="ml-1 size-6" />
@@ -870,7 +874,9 @@ function InfiniteCanvasBoardNodeCardComponent({
 
               <div className="mt-3 overflow-hidden rounded-[20px] border bg-background/70">
                 {selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsVideo ? (
-                  <video className="h-24 w-full object-cover" controls muted playsInline preload="metadata" src={selectedBatchRunResult.assetFileUrl} />
+                  <div className="flex h-24 items-center justify-center bg-black/80">
+                    <video className="h-full w-full object-contain" controls muted playsInline preload="metadata" src={selectedBatchRunResult.assetFileUrl} />
+                  </div>
                 ) : selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsImage ? (
                   <img alt={selectedBatchRunResult.nodeTitle} className="h-24 w-full object-cover" src={selectedBatchRunResult.assetFileUrl} />
                 ) : selectedBatchRunResult?.assetFileUrl && selectedBatchRunResultIsAudio ? (
@@ -970,7 +976,9 @@ function InfiniteCanvasBoardNodeCardComponent({
                       >
                         <div className="h-14 w-16 shrink-0 overflow-hidden rounded-xl border bg-muted/40">
                           {run.assetFileUrl && isVideoResult ? (
-                            <video className="h-full w-full object-cover" muted playsInline preload="metadata" src={run.assetFileUrl} />
+                            <div className="flex h-full w-full items-center justify-center bg-black/80">
+                              <video className="h-full w-full object-contain" muted playsInline preload="metadata" src={run.assetFileUrl} />
+                            </div>
                           ) : run.assetFileUrl && isImageResult ? (
                             <img alt={run.nodeTitle} className="h-full w-full object-cover" src={run.assetFileUrl} />
                           ) : run.assetFileUrl && isAudioResult ? (
