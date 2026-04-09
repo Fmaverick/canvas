@@ -168,6 +168,34 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
 }
 
+const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
+
+function getPromptMentionAssetIds(prompt: string | null | undefined) {
+  if (!prompt) {
+    return [];
+  }
+
+  const assetIds: string[] = [];
+
+  for (const match of prompt.matchAll(PROMPT_ASSET_MENTION_REGEX)) {
+    const assetId = match[2]?.trim();
+
+    if (assetId && !assetIds.includes(assetId)) {
+      assetIds.push(assetId);
+    }
+  }
+
+  return assetIds;
+}
+
+function normalizePromptForExecution(prompt: string | null | undefined) {
+  if (!prompt) {
+    return "";
+  }
+
+  return prompt.replace(PROMPT_ASSET_MENTION_REGEX, (_match, label) => `@${String(label ?? "").trim()}`);
+}
+
 function isTerminalNodeRunStatus(status: string | null | undefined) {
   return status === "succeeded" || status === "failed";
 }
@@ -953,9 +981,12 @@ async function getUpstreamNodesForExecution(
 }
 
 async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNodeForRun>>) {
-  const assetIds = uniqueStrings(
-    ((node.resourceRefs as { assetIds?: string[] } | null)?.assetIds ?? []).filter((assetId): assetId is string => typeof assetId === "string"),
-  );
+  const assetIds = uniqueStrings([
+    ...(((node.resourceRefs as { assetIds?: string[] } | null)?.assetIds ?? []).filter(
+      (assetId): assetId is string => typeof assetId === "string",
+    )),
+    ...getPromptMentionAssetIds(node.promptInput),
+  ]);
 
   if (assetIds.length === 0) {
     return [];
@@ -1168,7 +1199,7 @@ async function buildExecutionPayload(
       : [],
   );
 
-  const promptSegments = [node.promptInput?.trim() ?? ""];
+  const promptSegments = [normalizePromptForExecution(node.promptInput).trim()];
 
   if (input.useUpstreamOutputs) {
     promptSegments.push(

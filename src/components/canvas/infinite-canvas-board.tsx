@@ -77,7 +77,119 @@ import {
   type LibraryItemOption,
   type StoryboardNodeSettings,
 } from "@/components/canvas/infinite-canvas-board.shared";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
+
+function getPromptMentionAssetIds(prompt: string | null | undefined) {
+  if (!prompt) {
+    return [];
+  }
+
+  const assetIds: string[] = [];
+
+  for (const match of prompt.matchAll(PROMPT_ASSET_MENTION_REGEX)) {
+    const assetId = match[2]?.trim();
+
+    if (assetId && !assetIds.includes(assetId)) {
+      assetIds.push(assetId);
+    }
+  }
+
+  return assetIds;
+}
+
+function mergePromptMentionAssetIds(resourceRefs: CanvasNodeResourceRefs, prompt: string | null | undefined) {
+  return {
+    ...resourceRefs,
+    assetIds: Array.from(new Set([...resourceRefs.assetIds, ...getPromptMentionAssetIds(prompt)])),
+  };
+}
+
+function getPromptContextAssets(
+  node: CanvasNode | null,
+  subjects: LibraryItemOption[],
+  scenes: LibraryItemOption[],
+) {
+  if (!node) {
+    return [];
+  }
+
+  const resourceRefs = normalizeResourceRefs(node.resourceRefs);
+  const libraryItems = [
+    ...subjects.filter((item) => resourceRefs.subjectIds.includes(item.id)),
+    ...scenes.filter((item) => resourceRefs.sceneIds.includes(item.id)),
+  ];
+  const assetMap = new Map<string, CanvasNodeReferenceAsset>();
+
+  for (const asset of node.referenceAssets ?? []) {
+    assetMap.set(asset.id, asset);
+  }
+
+  for (const item of libraryItems) {
+    for (const asset of item.assets ?? []) {
+      if (!assetMap.has(asset.id)) {
+        assetMap.set(asset.id, asset);
+      }
+    }
+  }
+
+  return Array.from(assetMap.values());
+}
+
+function getBaseNameFromFileName(fileName: string) {
+  return fileName.replace(/\.[^/.]+$/, "").trim() || "未命名资源";
+}
+
+function inferLibraryPresetFromText(sourceText: string) {
+  const normalized = sourceText.trim().toLowerCase();
+  const includes = (keywords: string[]) => keywords.some((keyword) => normalized.includes(keyword));
+  const sceneKeywords = ["scene", "场景", "室内", "户外", "背景", "空间", "客厅", "studio", "outdoor", "indoor"];
+  const modelKeywords = ["模特", "model", "person", "人物", "女生", "男生", "人像"];
+  const accessoryKeywords = ["配饰", "耳环", "项链", "戒指", "包", "帽", "眼镜", "首饰", "accessory"];
+  const apparelKeywords = ["服装", "上衣", "裤", "裙", "穿搭", "卫衣", "外套", "衬衫", "shoe", "shoes"];
+  const whiteBgKeywords = ["白底", "white", "whitebg", "白背景"];
+  const ecommerceKeywords = ["电商", "ecommerce", "商品", "product", "详情页"];
+  const outdoorKeywords = ["户外", "outdoor", "街拍", "草地", "公园", "海边"];
+  const indoorKeywords = ["室内", "indoor", "棚拍", "studio", "摄影棚", "客厅"];
+
+  const kind: "subject" | "scene" = includes(sceneKeywords) ? "scene" : "subject";
+  const entityType =
+    kind === "scene"
+      ? includes(outdoorKeywords)
+        ? "outdoor"
+        : "studio"
+      : includes(modelKeywords)
+        ? "model"
+        : includes(accessoryKeywords)
+          ? "accessory"
+          : "product";
+
+  const recommendedTags = Array.from(
+    new Set(
+      [
+        includes(modelKeywords) ? "模特" : null,
+        includes(accessoryKeywords) ? "配饰" : null,
+        includes(apparelKeywords) ? "服装" : null,
+        includes(whiteBgKeywords) ? "白底" : null,
+        includes(ecommerceKeywords) ? "电商" : null,
+        kind === "scene" && includes(outdoorKeywords) ? "户外" : null,
+        kind === "scene" && includes(indoorKeywords) ? "室内" : null,
+        kind === "scene" && !includes(outdoorKeywords) && !includes(indoorKeywords) ? "场景" : null,
+        kind === "subject" && !includes(modelKeywords) && !includes(accessoryKeywords) ? "商品主体" : null,
+      ].filter((tag): tag is string => Boolean(tag)),
+    ),
+  );
+
+  return {
+    kind,
+    entityType,
+    recommendedTags,
+  };
+}
 
 function getNodePositionsFromNodes(nodes: CanvasNode[]) {
   return Object.fromEntries(
@@ -181,6 +293,19 @@ export function InfiniteCanvasBoard({
   });
   const [isExpandedEditorOpen, setIsExpandedEditorOpen] = useState(false);
   const [isCanvasDragOver, setIsCanvasDragOver] = useState(false);
+  const [pendingDroppedImages, setPendingDroppedImages] = useState<File[]>([]);
+  const [pendingDropPosition, setPendingDropPosition] = useState<{ x: number; y: number } | null>(null);
+  const [isDropImportDialogOpen, setIsDropImportDialogOpen] = useState(false);
+  const [dropImportKind, setDropImportKind] = useState<"subject" | "scene">("subject");
+  const [dropImportEntityType, setDropImportEntityType] = useState("product");
+  const [dropImportTags, setDropImportTags] = useState("");
+  const [isProcessingDropImport, setIsProcessingDropImport] = useState(false);
+  const [isSaveResultDialogOpen, setIsSaveResultDialogOpen] = useState(false);
+  const [saveResultKind, setSaveResultKind] = useState<"subject" | "scene">("subject");
+  const [saveResultEntityType, setSaveResultEntityType] = useState("product");
+  const [saveResultName, setSaveResultName] = useState("");
+  const [saveResultTags, setSaveResultTags] = useState("");
+  const [isSavingResultToLibrary, setIsSavingResultToLibrary] = useState(false);
   const [deletingNodeId, setDeletingNodeId] = useState<string | null>(null);
   const [playingVideoNodeId, setPlayingVideoNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -464,7 +589,16 @@ export function InfiniteCanvasBoard({
     }
 
     if (selectedNode.type === "image") {
-      return selectedNode.promptInput !== draftImagePrompt ? { promptInput: draftImagePrompt } : null;
+      const nextResourceRefs = mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt);
+
+      if (selectedNode.promptInput !== draftImagePrompt || !isStructuredValueEqual(normalizeResourceRefs(selectedNode.resourceRefs), nextResourceRefs)) {
+        return {
+          promptInput: draftImagePrompt,
+          resourceRefs: nextResourceRefs,
+        };
+      }
+
+      return null;
     }
 
     if (selectedNode.type === "video") {
@@ -481,12 +615,15 @@ export function InfiniteCanvasBoard({
         referenceAssetIds: persistedSettings.referenceAssetIds,
         shotPrompts: persistedSettings.shotPrompts,
       });
-      const nextResourceRefs = {
+      const nextResourceRefs = mergePromptMentionAssetIds(
+        {
         subjectIds: draftResourceRefs.subjectIds,
         sceneIds: draftResourceRefs.sceneIds,
         instructionPresetIds: draftResourceRefs.instructionPresetIds,
         assetIds: getManagedVideoAssetIds(draftVideoSettings),
-      };
+        },
+        draftVideoPrompt,
+      );
       const nextPatch: CanvasGraphNodePatch = {};
 
       if (selectedNode.promptInput !== draftVideoPrompt) {
@@ -724,6 +861,10 @@ export function InfiniteCanvasBoard({
         .map((assetId) => getReferenceAssetById(selectedNode.referenceAssets, assetId))
         .filter((asset): asset is CanvasNodeReferenceAsset => Boolean(asset))
     : [];
+  const selectedNodePromptAssets = useMemo(
+    () => getPromptContextAssets(selectedNode, subjects, scenes),
+    [scenes, selectedNode, subjects],
+  );
 
   useEffect(() => {
     const nextNodePositions = getNodePositionsFromNodes(nodes);
@@ -2878,6 +3019,297 @@ export function InfiniteCanvasBoard({
     });
   }
 
+  async function parseClientApiResponse<T>(response: Response, fallbackMessage: string) {
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok || !payload?.success) {
+      throw new Error(payload?.error?.message ?? fallbackMessage);
+    }
+
+    return payload.data as T;
+  }
+
+  async function createLibraryItemRecord(params: {
+    kind: "subject" | "scene";
+    entityType: string;
+    name: string;
+    tags: string[];
+  }) {
+    return parseClientApiResponse<LibraryItemOption>(
+      await fetch("/api/library-items", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": workspaceId,
+        },
+        body: JSON.stringify({
+          workspaceId,
+          kind: params.kind,
+          entityType: params.entityType,
+          name: params.name,
+          tags: params.tags,
+          description: "",
+          promptHints: "",
+          profileMeta: {},
+        }),
+      }),
+      "资源创建失败。",
+    );
+  }
+
+  async function uploadImageToLibraryItem(itemId: string, file: File) {
+    const { width, height } = await readImageDimensions(file);
+    const uploadTicket = await createUploadPresign(workspaceId, {
+      fileName: file.name,
+      mimeType: file.type,
+      ownerType: "library_item",
+      ownerId: itemId,
+    });
+
+    const uploadResponse = await fetch(uploadTicket.uploadUrl, {
+      method: "PUT",
+      headers: uploadTicket.headers,
+      body: file,
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`文件上传失败：${file.name}`);
+    }
+
+    return completeUpload(workspaceId, {
+      fileName: file.name,
+      mimeType: file.type,
+      ownerType: "library_item",
+      ownerId: itemId,
+      storageKey: uploadTicket.storageKey,
+      fileSize: file.size,
+      width,
+      height,
+    });
+  }
+
+  async function updateLibraryItemCover(itemId: string, coverAssetId: string) {
+    return parseClientApiResponse<LibraryItemOption>(
+      await fetch(`/api/library-items/${itemId}`, {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": workspaceId,
+        },
+        body: JSON.stringify({
+          workspaceId,
+          coverAssetId,
+        }),
+      }),
+      "资源封面更新失败。",
+    );
+  }
+
+  async function createLibraryAssetFromSourceUrl(params: {
+    ownerId: string;
+    fileName: string;
+    sourceUrl: string;
+    mimeType?: string | null;
+  }) {
+    return parseClientApiResponse<CanvasNodeReferenceAsset>(
+      await fetch("/api/assets/generated", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": workspaceId,
+        },
+        body: JSON.stringify({
+          workspaceId,
+          ownerType: "library_item",
+          ownerId: params.ownerId,
+          fileName: params.fileName,
+          sourceUrl: params.sourceUrl,
+          mimeType: params.mimeType ?? undefined,
+        }),
+      }),
+      "生成资源资产失败。",
+    );
+  }
+
+  async function createImageNodeForDroppedFile(file: File, position: { x: number; y: number }) {
+    const clientId = `dropped-image-${crypto.randomUUID()}`;
+    const result = await runGraphMutation(
+      [
+        {
+          type: "create_node",
+          clientId,
+          node: {
+            type: "image",
+            title: `${getBaseNameFromFileName(file.name)} · 图片`,
+            promptInput: "",
+            resourceRefs: {
+              subjectIds: [],
+              sceneIds: [],
+              instructionPresetIds: [],
+              assetIds: [],
+            },
+            positionX: Math.round(position.x),
+            positionY: Math.round(position.y),
+          },
+        },
+      ],
+      "图片节点创建失败。",
+    );
+    const createdNodeId =
+      result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
+
+    if (!createdNodeId) {
+      throw new Error("图片节点创建失败。");
+    }
+
+    const uploadTicket = await createUploadPresign(workspaceId, {
+      fileName: file.name,
+      mimeType: file.type,
+      ownerType: "canvas_node",
+      ownerId: createdNodeId,
+    });
+    const uploadResponse = await fetch(uploadTicket.uploadUrl, {
+      method: "PUT",
+      headers: uploadTicket.headers,
+      body: file,
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`文件上传失败：${file.name}`);
+    }
+
+    const { width, height } = await readImageDimensions(file);
+    const uploadedAsset = await completeUpload(workspaceId, {
+      fileName: file.name,
+      mimeType: file.type,
+      ownerType: "canvas_node",
+      ownerId: createdNodeId,
+      storageKey: uploadTicket.storageKey,
+      fileSize: file.size,
+      width,
+      height,
+    });
+
+    await saveNodePatch(
+      createdNodeId,
+      {
+        resourceRefs: {
+          subjectIds: [],
+          sceneIds: [],
+          instructionPresetIds: [],
+          assetIds: [uploadedAsset.id],
+        },
+      },
+      "节点图片引用保存失败。",
+    );
+
+    return createdNodeId;
+  }
+
+  async function createNodesFromDroppedFiles(files: File[], startPosition: { x: number; y: number }) {
+    let lastCreatedNodeId: string | null = null;
+
+    for (const [index, file] of files.entries()) {
+      const createdNodeId = await createImageNodeForDroppedFile(file, {
+        x: startPosition.x + index * 48,
+        y: startPosition.y + index * 48,
+      });
+      lastCreatedNodeId = createdNodeId;
+    }
+
+    if (lastCreatedNodeId) {
+      setSelectedNodeIds([lastCreatedNodeId]);
+      setSelectedNodeId(lastCreatedNodeId);
+    }
+  }
+
+  async function importDroppedFilesToLibraryAndCreateNodes(files: File[], startPosition: { x: number; y: number }) {
+    const tags = Array.from(
+      new Set(
+        dropImportTags
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+
+    for (const [index, file] of files.entries()) {
+      const createdItem = await createLibraryItemRecord({
+        kind: dropImportKind,
+        entityType: dropImportEntityType.trim() || (dropImportKind === "subject" ? "product" : "studio"),
+        name: getBaseNameFromFileName(file.name),
+        tags,
+      });
+      const uploadedAsset = await uploadImageToLibraryItem(createdItem.id, file);
+      const updatedItem = await updateLibraryItemCover(createdItem.id, uploadedAsset.id);
+
+      await createNodeFromResource(updatedItem, dropImportKind, "image", uploadedAsset.id, {
+        x: startPosition.x + index * 48,
+        y: startPosition.y + index * 48,
+      });
+    }
+  }
+
+  async function saveCurrentImageResultToLibrary() {
+    if (!selectedNode || selectedNode.type !== "image") {
+      return;
+    }
+
+    const imageUrl = getImageNodeOutputSource(selectedNode.outputSnapshot);
+
+    if (!imageUrl) {
+      toast.error("当前图片节点还没有可沉淀的结果。");
+
+      return;
+    }
+
+    setIsSavingResultToLibrary(true);
+
+    try {
+      const tags = Array.from(
+        new Set(
+          saveResultTags
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      );
+      const createdItem = await createLibraryItemRecord({
+        kind: saveResultKind,
+        entityType: saveResultEntityType.trim() || (saveResultKind === "subject" ? "product" : "studio"),
+        name: saveResultName.trim() || `${selectedNode.title} 资源`,
+        tags,
+      });
+      const generatedAsset = await createLibraryAssetFromSourceUrl({
+        ownerId: createdItem.id,
+        fileName: saveResultName.trim() || `${selectedNode.title}-result`,
+        sourceUrl: imageUrl,
+      });
+
+      await updateLibraryItemCover(createdItem.id, generatedAsset.id);
+      toast.success("当前结果已沉淀为资源。");
+      setIsSaveResultDialogOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "资源沉淀失败。");
+    } finally {
+      setIsSavingResultToLibrary(false);
+    }
+  }
+
+  function openSaveResultDialog() {
+    if (!selectedNode || selectedNode.type !== "image") {
+      return;
+    }
+
+    const inferred = inferLibraryPresetFromText(`${selectedNode.title} ${selectedNode.promptInput ?? ""}`);
+
+    setSaveResultKind(inferred.kind);
+    setSaveResultEntityType(inferred.entityType);
+    setSaveResultTags(inferred.recommendedTags.join(", "));
+    setSaveResultName(`${selectedNode.title} 资源`);
+    setIsSaveResultDialogOpen(true);
+  }
+
   async function uploadImagesToNode(targetNode: CanvasNode, imageFiles: File[]) {
     const nextAssetIds = new Set(targetNode.resourceRefs?.assetIds ?? []);
     const uploadedAssetIds: string[] = [];
@@ -3164,6 +3596,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftPrompt,
+          resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftPrompt),
           settingsJson: buildNodeSettingsPayload(selectedNode, serializeStoryboardNodeSettings(draftStoryboardSettings)),
         },
         "分镜节点配置保存失败。",
@@ -3220,6 +3653,7 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftPrompt,
+          resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftPrompt),
           settingsJson: buildNodeSettingsPayload(selectedNode, serializeStoryboardNodeSettings(draftStoryboardSettings)),
         },
         "分镜节点配置保存失败。",
@@ -3243,7 +3677,14 @@ export function InfiniteCanvasBoard({
     setIsSavingImagePrompt(true);
 
     try {
-      await saveNodePatch(selectedNode.id, { promptInput: draftImagePrompt }, "图片节点提示词保存失败。");
+      await saveNodePatch(
+        selectedNode.id,
+        {
+          promptInput: draftImagePrompt,
+          resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt),
+        },
+        "图片节点提示词保存失败。",
+      );
       toast.success("图片节点提示词已保存。");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "图片节点提示词保存失败。");
@@ -3264,7 +3705,14 @@ export function InfiniteCanvasBoard({
     setGeneratingImageNodeId(selectedNode.id);
 
     try {
-      await saveNodePatch(selectedNode.id, { promptInput: draftImagePrompt }, "图片提示词保存失败。");
+      await saveNodePatch(
+        selectedNode.id,
+        {
+          promptInput: draftImagePrompt,
+          resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt),
+        },
+        "图片提示词保存失败。",
+      );
       await runCanvasNode(apiContext, selectedNode.id, `image-node-run-${crypto.randomUUID()}`, "图片生成失败。");
       await refreshCanvasRuntime("图片任务状态刷新失败。");
 
@@ -3287,6 +3735,13 @@ export function InfiniteCanvasBoard({
     );
   }
 
+  function linkPromptAsset(asset: CanvasNodeReferenceAsset) {
+    setDraftResourceRefs((current) => ({
+      ...current,
+      assetIds: Array.from(new Set([...current.assetIds, asset.id])),
+    }));
+  }
+
   async function saveVideoNodePrompt() {
     if (!selectedNode || selectedNode.type !== "video") {
       return;
@@ -3302,12 +3757,12 @@ export function InfiniteCanvasBoard({
         {
           modelKey: draftVideoModelKey.trim() || null,
           promptInput: draftVideoPrompt,
-          resourceRefs: {
+          resourceRefs: mergePromptMentionAssetIds({
             subjectIds: draftResourceRefs.subjectIds,
             sceneIds: draftResourceRefs.sceneIds,
             instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
-          },
+          }, draftVideoPrompt),
           settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
@@ -3352,12 +3807,12 @@ export function InfiniteCanvasBoard({
         {
           modelKey: draftVideoModelKey.trim() || null,
           promptInput: draftVideoPrompt,
-          resourceRefs: {
+          resourceRefs: mergePromptMentionAssetIds({
             subjectIds: draftResourceRefs.subjectIds,
             sceneIds: draftResourceRefs.sceneIds,
             instructionPresetIds: draftResourceRefs.instructionPresetIds,
             assetIds: getManagedVideoAssetIds(draftVideoSettings),
-          },
+          }, draftVideoPrompt),
           settingsJson: buildNodeSettingsPayload(selectedNode, {
             generationMode: persistedSettings.generationMode,
             duration: persistedSettings.durationSec,
@@ -3663,6 +4118,7 @@ export function InfiniteCanvasBoard({
 
       {isHydrated ? (
         <InfiniteCanvasBoardCreatePanel
+          canvasId={canvasId}
           canEdit={canEdit}
           canGenerate={canGenerate}
           canSaveCanvas={canEdit}
@@ -3733,7 +4189,8 @@ export function InfiniteCanvasBoard({
 
           if (
             event.dataTransfer.types.includes("application/x-canvas-node-type") ||
-            event.dataTransfer.types.includes("application/x-canvas-library-item")
+            event.dataTransfer.types.includes("application/x-canvas-library-item") ||
+            Array.from(event.dataTransfer.items).some((item) => item.kind === "file" && item.type.startsWith("image/"))
           ) {
             event.preventDefault();
             event.dataTransfer.dropEffect = "copy";
@@ -3747,8 +4204,9 @@ export function InfiniteCanvasBoard({
 
           const draggedType = event.dataTransfer.getData("application/x-canvas-node-type") as CanvasNodeType | "";
           const draggedLibraryItem = event.dataTransfer.getData("application/x-canvas-library-item");
+          const droppedImageFiles = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
 
-          if (!draggedType && !draggedLibraryItem) {
+          if (!draggedType && !draggedLibraryItem && droppedImageFiles.length === 0) {
             return;
           }
 
@@ -3762,6 +4220,19 @@ export function InfiniteCanvasBoard({
 
           if (draggedType) {
             void createNodeAtPosition(draggedType, point.x, point.y);
+
+            return;
+          }
+
+          if (droppedImageFiles.length > 0) {
+            const inferred = inferLibraryPresetFromText(droppedImageFiles[0]?.name ?? "");
+
+            setPendingDroppedImages(droppedImageFiles);
+            setPendingDropPosition(point);
+            setDropImportKind(inferred.kind);
+            setDropImportEntityType(inferred.entityType);
+            setDropImportTags(inferred.recommendedTags.join(", "));
+            setIsDropImportDialogOpen(true);
 
             return;
           }
@@ -4189,6 +4660,7 @@ export function InfiniteCanvasBoard({
         <StoryboardNodePanel
           activeShotDraft={draftStoryboardShot}
           activeShotIndex={activeStoryboardShotIndex}
+          availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
           draftPrompt={draftPrompt}
@@ -4219,6 +4691,7 @@ export function InfiniteCanvasBoard({
           onGenerateVideo={() => {
             void createStoryboardVideoNode(true);
           }}
+          onLinkPromptAsset={linkPromptAsset}
           onPromptChange={setDraftPrompt}
           onSavePrompt={() => {
             void saveStoryboardNodePrompt();
@@ -4235,6 +4708,7 @@ export function InfiniteCanvasBoard({
 
       {selectedNode && isImageNodeSelected ? (
         <ImageNodePanel
+          availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
           draftImagePrompt={draftImagePrompt}
@@ -4244,12 +4718,14 @@ export function InfiniteCanvasBoard({
           isTaskActive={isImageNodeTaskActive}
           isUploadingReferenceImages={isUploadingReferenceImages}
           onDownloadImage={downloadSelectedImage}
+          onSaveToLibrary={openSaveResultDialog}
           onDownloadReferenceAsset={(asset) => {
             triggerDownload(asset.fileUrl, getReferenceAssetDownloadName(asset));
           }}
           onGenerate={() => {
             void triggerImageNodeGeneration();
           }}
+          onLinkPromptAsset={linkPromptAsset}
           onPromptChange={setDraftImagePrompt}
           onRemoveReferenceImage={(assetId) => {
             void removeReferenceImage(assetId);
@@ -4267,6 +4743,7 @@ export function InfiniteCanvasBoard({
 
       {selectedNode && isVideoNodeSelected ? (
         <VideoNodePanel
+          availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
           draftVideoModelKey={draftVideoModelKey}
@@ -4280,6 +4757,7 @@ export function InfiniteCanvasBoard({
           onGenerate={() => {
             void triggerVideoNodeGeneration();
           }}
+          onLinkPromptAsset={linkPromptAsset}
           onModelKeyChange={setDraftVideoModelKey}
           onPromptChange={setDraftVideoPrompt}
           onRemoveVideoAsset={(assetId) => {
@@ -4352,6 +4830,155 @@ export function InfiniteCanvasBoard({
           selectedNode={selectedNode}
         />
       ) : null}
+
+      <Dialog open={isDropImportDialogOpen} onOpenChange={setIsDropImportDialogOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>导入拖入图片</DialogTitle>
+            <DialogDescription>你可以只把图片作为节点加入当前画布，或者先入库再自动生成对应图片节点。</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-2xl border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+              当前共拖入 {pendingDroppedImages.length} 张图片
+            </div>
+            <div className="rounded-2xl border border-dashed bg-background px-4 py-3 text-sm text-muted-foreground">
+              已根据文件名自动推荐资源类型、`entityType` 和标签，你可以在确认前继续调整。
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span>入库类型</span>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={dropImportKind}
+                  onChange={(event) => {
+                    const nextKind = event.target.value === "scene" ? "scene" : "subject";
+                    setDropImportKind(nextKind);
+                    setDropImportEntityType(nextKind === "subject" ? "product" : "studio");
+                  }}
+                >
+                  <option value="subject">主体资源</option>
+                  <option value="scene">场景资源</option>
+                </select>
+              </label>
+              <label className="space-y-2 text-sm">
+                <span>类型</span>
+                <Input value={dropImportEntityType} onChange={(event) => setDropImportEntityType(event.target.value)} />
+              </label>
+            </div>
+            <label className="space-y-2 text-sm">
+              <span>统一标签</span>
+              <Input placeholder="多个标签用逗号分隔" value={dropImportTags} onChange={(event) => setDropImportTags(event.target.value)} />
+            </label>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsDropImportDialogOpen(false)}>
+              取消
+            </Button>
+            <Button
+              disabled={isProcessingDropImport || pendingDroppedImages.length === 0 || !pendingDropPosition}
+              variant="outline"
+              onClick={() => {
+                if (!pendingDropPosition) {
+                  return;
+                }
+
+                setIsProcessingDropImport(true);
+                void createNodesFromDroppedFiles(pendingDroppedImages, pendingDropPosition)
+                  .then(() => {
+                    toast.success("图片已作为节点加入画布。");
+                    setIsDropImportDialogOpen(false);
+                    setPendingDroppedImages([]);
+                    setPendingDropPosition(null);
+                  })
+                  .catch((error) => {
+                    toast.error(error instanceof Error ? error.message : "拖入图片创建节点失败。");
+                  })
+                  .finally(() => setIsProcessingDropImport(false));
+              }}
+            >
+              仅生成节点
+            </Button>
+            <Button
+              disabled={isProcessingDropImport || pendingDroppedImages.length === 0 || !pendingDropPosition}
+              onClick={() => {
+                if (!pendingDropPosition) {
+                  return;
+                }
+
+                setIsProcessingDropImport(true);
+                void importDroppedFilesToLibraryAndCreateNodes(pendingDroppedImages, pendingDropPosition)
+                  .then(() => {
+                    toast.success("图片已入库并生成节点。");
+                    setIsDropImportDialogOpen(false);
+                    setPendingDroppedImages([]);
+                    setPendingDropPosition(null);
+                  })
+                  .catch((error) => {
+                    toast.error(error instanceof Error ? error.message : "图片入库并生成节点失败。");
+                  })
+                  .finally(() => setIsProcessingDropImport(false));
+              }}
+            >
+              入库并生成节点
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isSaveResultDialogOpen} onOpenChange={setIsSaveResultDialogOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>沉淀为资源</DialogTitle>
+            <DialogDescription>把当前图片节点结果保存到资源库，并作为主体或场景资源复用。</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-dashed bg-background px-4 py-3 text-sm text-muted-foreground">
+              已根据当前节点标题和提示词自动推荐资源类型、`entityType` 和标签，你可以在保存前修改。
+            </div>
+            <label className="space-y-2 text-sm">
+              <span>资源名称</span>
+              <Input value={saveResultName} onChange={(event) => setSaveResultName(event.target.value)} />
+            </label>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span>资源类型</span>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={saveResultKind}
+                  onChange={(event) => {
+                    const nextKind = event.target.value === "scene" ? "scene" : "subject";
+                    setSaveResultKind(nextKind);
+                    setSaveResultEntityType(nextKind === "subject" ? "product" : "studio");
+                  }}
+                >
+                  <option value="subject">主体资源</option>
+                  <option value="scene">场景资源</option>
+                </select>
+              </label>
+              <label className="space-y-2 text-sm">
+                <span>类型</span>
+                <Input value={saveResultEntityType} onChange={(event) => setSaveResultEntityType(event.target.value)} />
+              </label>
+            </div>
+            <label className="space-y-2 text-sm">
+              <span>标签</span>
+              <Input value={saveResultTags} onChange={(event) => setSaveResultTags(event.target.value)} />
+            </label>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsSaveResultDialogOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={isSavingResultToLibrary || saveResultName.trim().length === 0} onClick={() => void saveCurrentImageResultToLibrary()}>
+              {isSavingResultToLibrary ? "保存中..." : "保存到资源库"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

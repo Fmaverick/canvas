@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -45,6 +45,188 @@ const VIDEO_MODEL_PRESET_OPTIONS = [
     label: "Kling V3 Standard",
   },
 ] as const;
+
+const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
+
+function getPromptAssetMentions(prompt: string) {
+  const mentions: Array<{ label: string; assetId: string }> = [];
+
+  for (const match of prompt.matchAll(PROMPT_ASSET_MENTION_REGEX)) {
+    const label = match[1]?.trim();
+    const assetId = match[2]?.trim();
+
+    if (!label || !assetId) {
+      continue;
+    }
+
+    if (!mentions.some((item) => item.assetId === assetId)) {
+      mentions.push({ label, assetId });
+    }
+  }
+
+  return mentions;
+}
+
+type PromptAssetTextareaProps = {
+  value: string;
+  placeholder: string;
+  linkedAssets: CanvasNodeReferenceAsset[];
+  contextAssets?: CanvasNodeReferenceAsset[];
+  onChange: (value: string) => void;
+  onLinkAsset: (asset: CanvasNodeReferenceAsset) => void;
+  onUnlinkAsset?: (assetId: string) => void;
+  onPreviewAsset?: (asset: CanvasNodeReferenceAsset) => void;
+  minHeightClassName?: string;
+};
+
+function PromptAssetTextarea({
+  value,
+  placeholder,
+  linkedAssets,
+  contextAssets = [],
+  onChange,
+  onLinkAsset,
+  onUnlinkAsset,
+  onPreviewAsset,
+  minHeightClassName = "min-h-28",
+}: PromptAssetTextareaProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [caretIndex, setCaretIndex] = useState(value.length);
+  const promptAssetMentions = useMemo(() => getPromptAssetMentions(value), [value]);
+  const promptAssetMentionIds = useMemo(() => new Set(promptAssetMentions.map((item) => item.assetId)), [promptAssetMentions]);
+  const availablePromptAssets = useMemo(() => {
+    const unique = new Map<string, CanvasNodeReferenceAsset>();
+
+    for (const asset of [...linkedAssets, ...contextAssets]) {
+      if (!asset.mimeType.startsWith("image/")) {
+        continue;
+      }
+
+      if (!unique.has(asset.id)) {
+        unique.set(asset.id, asset);
+      }
+    }
+
+    return Array.from(unique.values());
+  }, [contextAssets, linkedAssets]);
+  const prefix = value.slice(0, caretIndex);
+  const mentionMatch = /(^|\s)@([^\s@]*)$/.exec(prefix);
+  const mentionQuery = mentionMatch?.[2]?.trim().toLowerCase() ?? null;
+  const promptAssetSuggestions = useMemo(() => {
+    if (mentionQuery === null) {
+      return [];
+    }
+
+    return availablePromptAssets
+      .filter((asset) => asset.fileName.toLowerCase().includes(mentionQuery))
+      .slice(0, 6);
+  }, [availablePromptAssets, mentionQuery]);
+
+  const insertPromptAsset = (asset: CanvasNodeReferenceAsset) => {
+    const currentTextarea = textareaRef.current;
+    const currentCaretIndex = currentTextarea?.selectionStart ?? caretIndex;
+    const currentPrefix = value.slice(0, currentCaretIndex);
+    const currentMatch = /(^|\s)@([^\s@]*)$/.exec(currentPrefix);
+
+    if (!currentMatch) {
+      return;
+    }
+
+    const replaceStart = currentCaretIndex - currentMatch[2].length - 1;
+    const token = `@[${asset.fileName.replace(/\]/g, "")}]{asset:${asset.id}} `;
+    const nextValue = `${value.slice(0, replaceStart)}${token}${value.slice(currentCaretIndex)}`;
+
+    onChange(nextValue);
+    onLinkAsset(asset);
+
+    requestAnimationFrame(() => {
+      const nextCaretIndex = replaceStart + token.length;
+
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(nextCaretIndex, nextCaretIndex);
+      setCaretIndex(nextCaretIndex);
+    });
+  };
+
+  return (
+    <div className="space-y-2">
+      <Textarea
+        ref={textareaRef}
+        className={`${minHeightClassName} resize-none rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2`}
+        placeholder={placeholder}
+        value={value}
+        onChange={(event) => {
+          setCaretIndex(event.target.selectionStart ?? event.target.value.length);
+          onChange(event.target.value);
+        }}
+        onClick={(event) => setCaretIndex(event.currentTarget.selectionStart ?? value.length)}
+        onKeyUp={(event) => setCaretIndex(event.currentTarget.selectionStart ?? value.length)}
+      />
+
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+        <span className="rounded-full border bg-background px-2.5 py-1">@ 可引用已关联图片资源</span>
+        {promptAssetMentions.map((mention) => {
+          const asset = availablePromptAssets.find((item) => item.id === mention.assetId);
+
+          return (
+            <span key={mention.assetId} className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-sky-700">
+              <button
+                className="transition hover:opacity-80"
+                type="button"
+                onClick={() => {
+                  if (asset && onPreviewAsset) {
+                    onPreviewAsset(asset);
+                  }
+                }}
+              >
+                @{asset?.fileName ?? mention.label}
+              </button>
+              {onUnlinkAsset ? (
+                <button
+                  aria-label="移除图片引用"
+                  className="inline-flex size-4 items-center justify-center rounded-full border border-sky-200 bg-white/70 text-sky-700 transition hover:bg-white"
+                  type="button"
+                  onClick={() => onUnlinkAsset(mention.assetId)}
+                >
+                  <X className="size-3" />
+                </button>
+              ) : null}
+            </span>
+          );
+        })}
+      </div>
+
+      {mentionQuery !== null ? (
+        <div className="rounded-2xl border bg-background/90 p-2 shadow-sm">
+          {promptAssetSuggestions.length > 0 ? (
+            <div className="space-y-1">
+              {promptAssetSuggestions.map((asset) => (
+                <button
+                  key={asset.id}
+                  className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition hover:bg-muted/50"
+                  type="button"
+                  onClick={() => insertPromptAsset(asset)}
+                >
+                  <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg border bg-muted/40">
+                    <img alt={asset.fileName} className="h-full w-full object-cover" src={asset.fileUrl} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium text-foreground">{asset.fileName}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {promptAssetMentionIds.has(asset.id) ? "已在提示词中引用" : "点击插入到当前提示词"}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="px-2 py-1 text-xs text-muted-foreground">没有匹配的已关联图片资源。先上传或关联图片后再使用 `@` 引用。</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 type TextNodePanelProps = {
   selectedNode: CanvasNode;
@@ -142,6 +324,7 @@ type StoryboardNodePanelProps = {
   isTaskActive: boolean;
   isGenerating: boolean;
   isCreatingVideoNode: boolean;
+  availablePromptAssets: CanvasNodeReferenceAsset[];
   onPromptChange: (value: string) => void;
   onSettingsChange: (updater: (current: StoryboardNodeSettings) => StoryboardNodeSettings) => void;
   onActiveShotChange: (shotIndex: number) => void;
@@ -154,6 +337,7 @@ type StoryboardNodePanelProps = {
   onCreateAllShotVideoNodes: () => void;
   onCreateCurrentShotVideoNode: () => void;
   onGenerateCurrentShotVideo: () => void;
+  onLinkPromptAsset: (asset: CanvasNodeReferenceAsset) => void;
 };
 
 export function StoryboardNodePanel({
@@ -172,6 +356,7 @@ export function StoryboardNodePanel({
   isTaskActive,
   isGenerating,
   isCreatingVideoNode,
+  availablePromptAssets,
   onPromptChange,
   onSettingsChange,
   onActiveShotChange,
@@ -184,6 +369,7 @@ export function StoryboardNodePanel({
   onCreateAllShotVideoNodes,
   onCreateCurrentShotVideoNode,
   onGenerateCurrentShotVideo,
+  onLinkPromptAsset,
 }: StoryboardNodePanelProps) {
   const hasShots = storyboardShots.length > 0;
   const activeShotAssetNames = activeShotDraft ? getStoryboardShotAssetNames(activeShotDraft) : [];
@@ -207,11 +393,19 @@ export function StoryboardNodePanel({
 
         <div className="space-y-3 overflow-y-auto px-3 py-3">
           <div className="grid gap-3 lg:grid-cols-[1.05fr_0.95fr]">
-            <Textarea
-              className="min-h-32 max-h-48 max-w-full resize-y rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2"
-              placeholder="输入故事梗概、角色、场景、节奏、镜头风格和关键动作，系统会自动生成连续分镜。"
+            <PromptAssetTextarea
+              contextAssets={availablePromptAssets}
+              linkedAssets={selectedNode.referenceAssets ?? []}
+              minHeightClassName="min-h-32 max-h-48 max-w-full resize-y"
+              placeholder="输入故事梗概、角色、场景、节奏、镜头风格和关键动作，系统会自动生成连续分镜；输入 @ 可引用已关联图片"
               value={draftPrompt}
-              onChange={(event) => onPromptChange(event.target.value)}
+              onChange={onPromptChange}
+              onLinkAsset={onLinkPromptAsset}
+              onPreviewAsset={(asset) => window.open(asset.fileUrl, "_blank", "noopener,noreferrer")}
+              onUnlinkAsset={(assetId) => {
+                const nextValue = draftPrompt.replace(new RegExp(`@\\[[^\\]]+\\]\\{asset:${assetId}\\}\\s*`, "g"), "");
+                onPromptChange(nextValue.trim());
+              }}
             />
 
             <div className="grid min-w-0 gap-3">
@@ -596,8 +790,11 @@ type ImageNodePanelProps = {
   onSavePrompt: () => void;
   onGenerate: () => void;
   onDownloadImage: () => void;
+  onSaveToLibrary: () => void;
   onDownloadReferenceAsset: (asset: CanvasNodeReferenceAsset) => void;
   onRemoveReferenceImage: (assetId: string) => void;
+  onLinkPromptAsset: (asset: CanvasNodeReferenceAsset) => void;
+  availablePromptAssets: CanvasNodeReferenceAsset[];
 };
 
 export function ImageNodePanel({
@@ -616,8 +813,11 @@ export function ImageNodePanel({
   onSavePrompt,
   onGenerate,
   onDownloadImage,
+  onSaveToLibrary,
   onDownloadReferenceAsset,
   onRemoveReferenceImage,
+  onLinkPromptAsset,
+  availablePromptAssets,
 }: ImageNodePanelProps) {
   return (
     <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
@@ -653,6 +853,16 @@ export function ImageNodePanel({
                 size="sm"
                 type="button"
                 variant="outline"
+                onClick={onSaveToLibrary}
+              >
+                <Sparkles className="mr-1 size-4" />
+                沉淀为资源
+              </Button>
+              <Button
+                disabled={!selectedImageOutputSource}
+                size="sm"
+                type="button"
+                variant="outline"
                 onClick={onDownloadImage}
               >
                 <Download className="mr-1 size-4" />
@@ -661,11 +871,18 @@ export function ImageNodePanel({
             </div>
           </div>
 
-          <Textarea
-            className="min-h-28 resize-none rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2"
-            placeholder="描述你想生成的画面风格、主体、场景，也可以先上传参考图再做图生图"
+          <PromptAssetTextarea
+            contextAssets={availablePromptAssets}
+            linkedAssets={selectedNode.referenceAssets ?? []}
+            placeholder="描述你想生成的画面风格、主体、场景，也可以先上传参考图再做图生图；输入 @ 可引用已关联图片"
             value={draftImagePrompt}
-            onChange={(event) => onPromptChange(event.target.value)}
+            onChange={onPromptChange}
+            onLinkAsset={onLinkPromptAsset}
+            onPreviewAsset={onDownloadReferenceAsset}
+            onUnlinkAsset={(assetId) => {
+              const nextValue = draftImagePrompt.replace(new RegExp(`@\\[[^\\]]+\\]\\{asset:${assetId}\\}\\s*`, "g"), "");
+              onPromptChange(nextValue.trim());
+            }}
           />
 
           <div className="flex items-center justify-between gap-3">
@@ -752,6 +969,8 @@ type VideoNodePanelProps = {
   onSavePrompt: () => void;
   onGenerate: () => void;
   onRemoveVideoAsset: (assetId: string) => void;
+  onLinkPromptAsset: (asset: CanvasNodeReferenceAsset) => void;
+  availablePromptAssets: CanvasNodeReferenceAsset[];
 };
 
 export function VideoNodePanel({
@@ -780,6 +999,8 @@ export function VideoNodePanel({
   onSavePrompt,
   onGenerate,
   onRemoveVideoAsset,
+  onLinkPromptAsset,
+  availablePromptAssets,
 }: VideoNodePanelProps) {
   const isReferenceVideoMode = draftVideoSettings.generationMode === "reference";
   const isFirstLastVideoMode = draftVideoSettings.generationMode === "first_last";
@@ -874,11 +1095,19 @@ export function VideoNodePanel({
               </div>
             </div>
 
-            <Textarea
-              className="min-h-32 resize-none rounded-2xl border-0 bg-muted/35 shadow-none focus-visible:ring-2"
-              placeholder="描述视频内容、镜头语言、运动方式、主体和节奏，也可以结合首尾帧或参考图生成"
+            <PromptAssetTextarea
+              contextAssets={availablePromptAssets}
+              linkedAssets={selectedNode.referenceAssets ?? []}
+              minHeightClassName="min-h-32"
+              placeholder="描述视频内容、镜头语言、运动方式、主体和节奏，也可以结合首尾帧或参考图生成；输入 @ 可引用已关联图片"
               value={draftVideoPrompt}
-              onChange={(event) => onPromptChange(event.target.value)}
+              onChange={onPromptChange}
+              onLinkAsset={onLinkPromptAsset}
+              onPreviewAsset={(asset) => window.open(asset.fileUrl, "_blank", "noopener,noreferrer")}
+              onUnlinkAsset={(assetId) => {
+                const nextValue = draftVideoPrompt.replace(new RegExp(`@\\[[^\\]]+\\]\\{asset:${assetId}\\}\\s*`, "g"), "");
+                onPromptChange(nextValue.trim());
+              }}
             />
 
             <div className="grid gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-2 xl:grid-cols-3">

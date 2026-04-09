@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Download, Plus, Sparkles } from "lucide-react";
+import { Pencil, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +52,7 @@ export default function WorkflowTemplatesPage() {
   const [templates, setTemplates] = useState<WorkflowTemplateItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isEditOpen, setIsEditOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [draftDescription, setDraftDescription] = useState("");
@@ -60,6 +61,13 @@ export default function WorkflowTemplatesPage() {
   const [draftContentCategory, setDraftContentCategory] = useState("");
   const [draftTags, setDraftTags] = useState("");
   const [applyingTemplateId, setApplyingTemplateId] = useState<string | null>(null);
+  const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
+  const [filterKeyword, setFilterKeyword] = useState("");
+  const [filterScope, setFilterScope] = useState<"all" | "personal" | "workspace">("all");
+  const [filterEffectCategory, setFilterEffectCategory] = useState("all");
+  const [filterContentCategory, setFilterContentCategory] = useState("all");
+  const [filterTag, setFilterTag] = useState("all");
+  const [editingTemplate, setEditingTemplate] = useState<WorkflowTemplateItem | null>(null);
 
   const canCreateFromCanvas = workspaceId.length > 0 && canvasId.length > 0;
 
@@ -75,6 +83,50 @@ export default function WorkflowTemplatesPage() {
       ),
     [draftTags],
   );
+  const filterEffectOptions = useMemo(
+    () => Array.from(new Set(templates.map((template) => template.effectCategory).filter(Boolean))).sort(),
+    [templates],
+  );
+  const filterContentOptions = useMemo(
+    () => Array.from(new Set(templates.map((template) => template.contentCategory).filter(Boolean))).sort(),
+    [templates],
+  );
+  const filterTagOptions = useMemo(() => Array.from(new Set(templates.flatMap((template) => template.tags))).sort(), [templates]);
+  const filteredTemplates = useMemo(() => {
+    const keyword = filterKeyword.trim().toLowerCase();
+
+    return templates.filter((template) => {
+      if (filterScope !== "all" && template.scope !== filterScope) {
+        return false;
+      }
+
+      if (filterEffectCategory !== "all" && (template.effectCategory ?? "") !== filterEffectCategory) {
+        return false;
+      }
+
+      if (filterContentCategory !== "all" && (template.contentCategory ?? "") !== filterContentCategory) {
+        return false;
+      }
+
+      if (filterTag !== "all" && !template.tags.includes(filterTag)) {
+        return false;
+      }
+
+      if (!keyword) {
+        return true;
+      }
+
+      const haystacks = [
+        template.name,
+        template.description ?? "",
+        template.effectCategory ?? "",
+        template.contentCategory ?? "",
+        template.tags.join(","),
+      ].map((value) => value.toLowerCase());
+
+      return haystacks.some((value) => value.includes(keyword));
+    });
+  }, [filterContentCategory, filterEffectCategory, filterKeyword, filterScope, filterTag, templates]);
 
   async function loadTemplates() {
     if (!workspaceId) {
@@ -185,6 +237,81 @@ export default function WorkflowTemplatesPage() {
     }
   }
 
+  function openEditTemplate(template: WorkflowTemplateItem) {
+    setEditingTemplate(template);
+    setDraftName(template.name);
+    setDraftDescription(template.description?.trim() ?? "");
+    setDraftScope(template.scope);
+    setDraftEffectCategory(template.effectCategory ?? "");
+    setDraftContentCategory(template.contentCategory ?? "");
+    setDraftTags(template.tags.join(", "));
+    setIsEditOpen(true);
+  }
+
+  async function handleUpdateTemplate() {
+    if (!workspaceId || !editingTemplate) {
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      await parseResponse(
+        await fetch(`/api/workflow-templates/${editingTemplate.id}`, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": workspaceId,
+          },
+          body: JSON.stringify({
+            workspaceId,
+            scope: draftScope,
+            name: draftName,
+            description: draftDescription,
+            effectCategory: draftEffectCategory,
+            contentCategory: draftContentCategory,
+            tags: normalizedTags,
+          }),
+        }),
+        "更新工作流模板失败。",
+      );
+      toast.success("工作流模板已更新。");
+      setIsEditOpen(false);
+      setEditingTemplate(null);
+      await loadTemplates();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "更新工作流模板失败。");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleDeleteTemplate(templateId: string) {
+    if (!workspaceId) {
+      return;
+    }
+
+    setDeletingTemplateId(templateId);
+
+    try {
+      await parseResponse(
+        await fetch(`/api/workflow-templates/${templateId}`, {
+          method: "DELETE",
+          headers: {
+            "x-workspace-id": workspaceId,
+          },
+        }),
+        "删除工作流模板失败。",
+      );
+      toast.success("工作流模板已删除。");
+      await loadTemplates();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除工作流模板失败。");
+    } finally {
+      setDeletingTemplateId(null);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-[#f5f5f7] px-4 py-5 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-[1320px]">
@@ -226,17 +353,67 @@ export default function WorkflowTemplatesPage() {
 
           <div className="grid gap-0 xl:grid-cols-[minmax(0,1fr)_320px]">
             <section className="min-w-0 bg-white px-5 py-5 sm:px-6">
+              <div className="mb-4 flex flex-col gap-3 rounded-[22px] border border-black/5 bg-[#fcfcfd] p-4 md:flex-row md:items-center md:justify-between">
+                <div className="relative min-w-[220px] flex-1">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input className="pl-9" placeholder="搜索模板名称、分类或标签" value={filterKeyword} onChange={(event) => setFilterKeyword(event.target.value)} />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    className="h-10 rounded-xl border border-input bg-background px-3 text-sm"
+                    value={filterScope}
+                    onChange={(event) => setFilterScope(event.target.value as "all" | "personal" | "workspace")}
+                  >
+                    <option value="all">全部范围</option>
+                    <option value="workspace">空间模板</option>
+                    <option value="personal">个人模板</option>
+                  </select>
+                  <select
+                    className="h-10 rounded-xl border border-input bg-background px-3 text-sm"
+                    value={filterEffectCategory}
+                    onChange={(event) => setFilterEffectCategory(event.target.value)}
+                  >
+                    <option value="all">全部画面效果</option>
+                    {filterEffectOptions.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="h-10 rounded-xl border border-input bg-background px-3 text-sm"
+                    value={filterContentCategory}
+                    onChange={(event) => setFilterContentCategory(event.target.value)}
+                  >
+                    <option value="all">全部内容类型</option>
+                    {filterContentOptions.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                  <select className="h-10 rounded-xl border border-input bg-background px-3 text-sm" value={filterTag} onChange={(event) => setFilterTag(event.target.value)}>
+                    <option value="all">全部标签</option>
+                    {filterTagOptions.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               {isLoading ? (
                 <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-10 text-sm text-muted-foreground">
                   正在加载工作流模板...
                 </div>
-              ) : templates.length === 0 ? (
+              ) : filteredTemplates.length === 0 ? (
                 <div className="rounded-[20px] border border-dashed border-black/8 bg-[#fcfcfd] px-5 py-10 text-sm text-muted-foreground">
-                  当前还没有工作流模板。{canCreateFromCanvas ? "可以从当前画布保存第一个模板。" : "请从画布页进入后保存模板。"}
+                  当前没有匹配的工作流模板。{canCreateFromCanvas ? "可以从当前画布保存第一个模板。" : "请从画布页进入后保存模板。"}
                 </div>
               ) : (
                 <div className="grid gap-4 md:grid-cols-2">
-                  {templates.map((template) => (
+                  {filteredTemplates.map((template) => (
                     <article key={template.id} className="rounded-[22px] border border-black/5 bg-[#fcfcfd] p-5">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
@@ -270,6 +447,20 @@ export default function WorkflowTemplatesPage() {
                       <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
                         <p className="text-xs text-muted-foreground">已套用 {template.usageCount} 次</p>
                         <div className="flex flex-wrap gap-2">
+                          <Button size="sm" type="button" variant="outline" onClick={() => openEditTemplate(template)}>
+                            <Pencil className="size-4" />
+                            编辑
+                          </Button>
+                          <Button
+                            disabled={deletingTemplateId === template.id}
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                            onClick={() => void handleDeleteTemplate(template.id)}
+                          >
+                            <Trash2 className="size-4" />
+                            {deletingTemplateId === template.id ? "删除中..." : "删除"}
+                          </Button>
                           {canvasId ? (
                             <Button
                               disabled={applyingTemplateId === template.id}
@@ -369,6 +560,62 @@ export default function WorkflowTemplatesPage() {
             </Button>
             <Button disabled={isSubmitting || draftName.trim().length === 0 || !canCreateFromCanvas} onClick={() => void handleCreateTemplate()}>
               {isSubmitting ? "保存中..." : "保存模板"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+        <DialogContent className="max-w-2xl" showCloseButton>
+          <DialogHeader>
+            <DialogTitle>编辑工作流模板</DialogTitle>
+            <DialogDescription>更新模板名称、范围、分类和标签信息。节点和边快照不会在这里直接编辑。</DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span>模板名称</span>
+                <Input value={draftName} onChange={(event) => setDraftName(event.target.value)} />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span>模板范围</span>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={draftScope}
+                  onChange={(event) => setDraftScope(event.target.value as "personal" | "workspace")}
+                >
+                  <option value="personal">个人模板</option>
+                  <option value="workspace">空间模板</option>
+                </select>
+              </label>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span>画面效果</span>
+                <Input value={draftEffectCategory} onChange={(event) => setDraftEffectCategory(event.target.value)} />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span>内容类型</span>
+                <Input value={draftContentCategory} onChange={(event) => setDraftContentCategory(event.target.value)} />
+              </label>
+            </div>
+            <label className="space-y-2 text-sm">
+              <span>标签</span>
+              <Input value={draftTags} onChange={(event) => setDraftTags(event.target.value)} />
+            </label>
+            <label className="space-y-2 text-sm">
+              <span>模板描述</span>
+              <Textarea className="min-h-28 resize-none" value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} />
+            </label>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={isSubmitting || draftName.trim().length === 0 || !editingTemplate} onClick={() => void handleUpdateTemplate()}>
+              {isSubmitting ? "保存中..." : "保存修改"}
             </Button>
           </DialogFooter>
         </DialogContent>

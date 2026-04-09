@@ -15,6 +15,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   type CanvasNodeReferenceAsset,
@@ -23,10 +24,24 @@ import {
   type InstructionPresetOption,
   type LibraryItemOption,
 } from "@/components/canvas/infinite-canvas-board.shared";
+import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-type ResourceModalKind = "subject" | "scene" | "instruction";
+type ResourceModalKind = "subject" | "scene" | "instruction" | "workflow_template";
+
+type WorkflowTemplateOption = {
+  id: string;
+  name: string;
+  description: string | null;
+  scope: "personal" | "workspace";
+  effectCategory: string | null;
+  contentCategory: string | null;
+  tags: string[];
+  nodeCount: number;
+  edgeCount: number;
+};
 
 type InfiniteCanvasBoardCreatePanelProps = {
   canEdit: boolean;
@@ -39,6 +54,7 @@ type InfiniteCanvasBoardCreatePanelProps = {
   runtimeSyncStatusLabel: string;
   runtimeSyncStatusTone: string;
   workspaceId: string;
+  canvasId: string;
   nodeCount: number;
   edgeCount: number;
   taskCount: number;
@@ -323,6 +339,7 @@ export function InfiniteCanvasBoardCreatePanel({
   runtimeSyncStatusLabel,
   runtimeSyncStatusTone,
   workspaceId,
+  canvasId,
   nodeCount,
   edgeCount,
   taskCount,
@@ -353,6 +370,11 @@ export function InfiniteCanvasBoardCreatePanel({
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [selectedResourceAssetId, setSelectedResourceAssetId] = useState<string | null>(null);
   const [subjectPickerFilter, setSubjectPickerFilter] = useState<"all" | "model" | "product">("all");
+  const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplateOption[]>([]);
+  const [isWorkflowTemplatesLoading, setIsWorkflowTemplatesLoading] = useState(false);
+  const [workflowTemplateKeyword, setWorkflowTemplateKeyword] = useState("");
+  const [selectedWorkflowTemplateId, setSelectedWorkflowTemplateId] = useState<string | null>(null);
+  const [isApplyingWorkflowTemplate, setIsApplyingWorkflowTemplate] = useState(false);
   const filteredSubjects = useMemo(() => {
     if (subjectPickerFilter === "all") {
       return subjects;
@@ -364,6 +386,25 @@ export function InfiniteCanvasBoardCreatePanel({
 
     return subjects.filter((item) => item.entityType !== "model" && item.entityType !== "person");
   }, [subjectPickerFilter, subjects]);
+  const filteredWorkflowTemplates = useMemo(() => {
+    const keyword = workflowTemplateKeyword.trim().toLowerCase();
+
+    if (!keyword) {
+      return workflowTemplates;
+    }
+
+    return workflowTemplates.filter((template) => {
+      const haystacks = [
+        template.name,
+        template.description ?? "",
+        template.effectCategory ?? "",
+        template.contentCategory ?? "",
+        template.tags.join(","),
+      ].map((value) => value.toLowerCase());
+
+      return haystacks.some((value) => value.includes(keyword));
+    });
+  }, [workflowTemplateKeyword, workflowTemplates]);
 
   function resolveDefaultAssetId(item: LibraryItemOption | undefined) {
     if (!item) {
@@ -379,7 +420,9 @@ export function InfiniteCanvasBoardCreatePanel({
         ? filteredSubjects[0] ?? subjects[0]
         : kind === "scene"
           ? scenes[0]
-          : instructionPresets[0];
+          : kind === "instruction"
+            ? instructionPresets[0]
+            : null;
     const firstResourceId = firstResource?.id ?? null;
 
     if (kind === "subject") {
@@ -388,13 +431,46 @@ export function InfiniteCanvasBoardCreatePanel({
 
     setActiveResourceModal(kind);
     setSelectedResourceId(firstResourceId);
-    setSelectedResourceAssetId(kind === "instruction" ? null : resolveDefaultAssetId(firstResource as LibraryItemOption | undefined));
+    setSelectedResourceAssetId(kind === "instruction" || kind === "workflow_template" ? null : resolveDefaultAssetId(firstResource as LibraryItemOption | undefined));
+
+    if (kind === "workflow_template") {
+      if (!workspaceId) {
+        toast.error("缺少 workspaceId，无法加载模板。");
+
+        return;
+      }
+
+      setWorkflowTemplateKeyword("");
+      setIsWorkflowTemplatesLoading(true);
+      void fetch("/api/workflow-templates", {
+        headers: {
+          "x-workspace-id": workspaceId,
+        },
+        cache: "no-store",
+      })
+        .then(async (response) => {
+          const payload = await response.json().catch(() => null);
+
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message ?? "加载工作流模板失败。");
+          }
+
+          const nextTemplates = (payload.data as WorkflowTemplateOption[]) ?? [];
+          setWorkflowTemplates(nextTemplates);
+          setSelectedWorkflowTemplateId(nextTemplates[0]?.id ?? null);
+        })
+        .catch((error) => {
+          toast.error(error instanceof Error ? error.message : "加载工作流模板失败。");
+        })
+        .finally(() => setIsWorkflowTemplatesLoading(false));
+    }
   }
 
   function closeResourceModal() {
     setActiveResourceModal(null);
     setSelectedResourceId(null);
     setSelectedResourceAssetId(null);
+    setSelectedWorkflowTemplateId(null);
   }
 
   function confirmResourceSelection() {
@@ -431,6 +507,43 @@ export function InfiniteCanvasBoardCreatePanel({
         onCreateInstructionNode(selectedInstruction);
         closeResourceModal();
       }
+
+      return;
+    }
+
+    if (activeResourceModal === "workflow_template") {
+      if (!selectedWorkflowTemplateId) {
+        closeResourceModal();
+
+        return;
+      }
+
+      setIsApplyingWorkflowTemplate(true);
+      void fetch(`/api/workflow-templates/${selectedWorkflowTemplateId}/apply`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-workspace-id": workspaceId,
+        },
+        body: JSON.stringify({
+          workspaceId,
+          canvasId,
+        }),
+      })
+        .then(async (response) => {
+          const payload = await response.json().catch(() => null);
+
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message ?? "套用模板失败。");
+          }
+
+          toast.success("工作流模板已插入当前画布。");
+          closeResourceModal();
+        })
+        .catch((error) => {
+          toast.error(error instanceof Error ? error.message : "套用模板失败。");
+        })
+        .finally(() => setIsApplyingWorkflowTemplate(false));
     }
   }
 
@@ -613,6 +726,14 @@ export function InfiniteCanvasBoardCreatePanel({
                 title="指令入画布"
                 onClick={() => openResourceModal("instruction")}
               />
+
+              <ResourceLauncherCard
+                accentClassName="from-fuchsia-100 via-pink-50 to-white"
+                count={workflowTemplates.length}
+                icon={Sparkles}
+                title="封装工作流"
+                onClick={() => openResourceModal("workflow_template")}
+              />
             </div>
           </div>
         </div>
@@ -722,6 +843,137 @@ export function InfiniteCanvasBoardCreatePanel({
         onConfirm={confirmResourceSelection}
         onSelect={setSelectedResourceId}
       />
+
+      <Dialog
+        open={activeResourceModal === "workflow_template"}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            closeResourceModal();
+          }
+        }}
+      >
+        <DialogContent className="max-w-[calc(100%-2rem)] gap-0 overflow-hidden rounded-[28px] p-0 sm:max-w-3xl" showCloseButton={false}>
+          <div className="border-b bg-gradient-to-br from-fuchsia-100 via-pink-50 to-white px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <DialogHeader className="gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex size-9 items-center justify-center rounded-xl border border-black/5 bg-background/80 shadow-sm">
+                    <Sparkles className="size-4" />
+                  </div>
+                  <div>
+                    <DialogTitle>选择工作流模板</DialogTitle>
+                    <DialogDescription className="mt-1 max-w-xl text-xs leading-5">左侧资源区可直接一键插入模板节点和连线到当前画布。</DialogDescription>
+                  </div>
+                </div>
+              </DialogHeader>
+              <button
+                className="rounded-full border border-black/5 bg-background/80 p-2 text-muted-foreground transition hover:bg-background"
+                type="button"
+                onClick={closeResourceModal}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative min-w-[220px] flex-1">
+                <ScanSearch className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  className="h-10 rounded-xl bg-background/80 pl-9 text-sm"
+                  placeholder="搜索模板名称、分类或标签"
+                  value={workflowTemplateKeyword}
+                  onChange={(event) => setWorkflowTemplateKeyword(event.target.value)}
+                />
+              </div>
+              <Link
+                className="text-xs text-muted-foreground underline-offset-4 transition hover:text-foreground hover:underline"
+                href={`/workflow-templates?workspaceId=${workspaceId}&canvasId=${canvasId}`}
+              >
+                管理工作流模板
+              </Link>
+            </div>
+          </div>
+
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto p-5">
+            {isWorkflowTemplatesLoading ? (
+              <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">
+                正在加载工作流模板...
+              </div>
+            ) : filteredWorkflowTemplates.length > 0 ? (
+              filteredWorkflowTemplates.map((template) => {
+                const isSelected = selectedWorkflowTemplateId === template.id;
+
+                return (
+                  <button
+                    key={template.id}
+                    className={cn(
+                      "w-full rounded-2xl border p-4 text-left transition",
+                      isSelected ? "border-primary/40 bg-primary/5 shadow-sm" : "bg-background hover:border-primary/20 hover:bg-muted/30",
+                    )}
+                    type="button"
+                    onClick={() => setSelectedWorkflowTemplateId(template.id)}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-medium text-foreground">{template.name}</p>
+                          <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground">
+                            {template.scope === "workspace" ? "空间模板" : "个人模板"}
+                          </span>
+                          {template.effectCategory ? (
+                            <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground">画面效果：{template.effectCategory}</span>
+                          ) : null}
+                          {template.contentCategory ? (
+                            <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground">内容类型：{template.contentCategory}</span>
+                          ) : null}
+                        </div>
+                        <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{template.description?.trim() || "该模板由工作流快照生成，可重复套用。"}</p>
+                        <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                          <span className="rounded-full bg-muted/25 px-2 py-0.5">{template.nodeCount} 节点</span>
+                          <span className="rounded-full bg-muted/25 px-2 py-0.5">{template.edgeCount} 连线</span>
+                          {template.tags.slice(0, 4).map((tag) => (
+                            <span key={tag} className="rounded-full bg-muted/25 px-2 py-0.5">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <span
+                        className={cn(
+                          "rounded-full border px-2.5 py-1 text-[11px] font-medium",
+                          isSelected ? "border-primary/20 bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground",
+                        )}
+                      >
+                        {isSelected ? "已选中" : "点击选择"}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-12 text-center text-sm text-muted-foreground">
+                当前没有匹配的工作流模板。可以先从画布保存一个模板再来套用。
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between gap-3 border-t bg-background px-5 py-4">
+            <p className="text-xs text-muted-foreground">选择后将直接插入节点和连线到当前画布。</p>
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="outline" onClick={closeResourceModal}>
+                取消
+              </Button>
+              <Button
+                disabled={!selectedWorkflowTemplateId || isApplyingWorkflowTemplate || isWorkflowTemplatesLoading}
+                type="button"
+                onClick={confirmResourceSelection}
+              >
+                {isApplyingWorkflowTemplate ? "插入中..." : "插入到画布"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <div className="absolute bottom-5 left-5 z-20 flex items-center gap-2 rounded-full border bg-background px-3 py-2 text-xs text-muted-foreground shadow-sm">
         <span>节点 {nodeCount}</span>

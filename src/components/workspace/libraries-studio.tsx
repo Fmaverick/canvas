@@ -442,6 +442,7 @@ export function LibrariesStudio({
   const [sceneItems, setSceneItems] = useState(scenes);
   const [instructionItems, setInstructionItems] = useState(instructionPresets);
   const [subjectViewMode, setSubjectViewMode] = useState<SubjectViewMode>("all");
+  const [selectedModelTags, setSelectedModelTags] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(subjects[0]?.id ?? null);
   const [keyword, setKeyword] = useState("");
   const [libraryDraft, setLibraryDraft] = useState<LibraryDraft>(
@@ -513,6 +514,19 @@ export function LibrariesStudio({
 
     return subjectItems.filter((item) => !isModelEntityType(item.entityType));
   }, [subjectItems, subjectViewMode]);
+  const availableModelTags = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          subjectItems
+            .filter((item) => isModelEntityType(item.entityType))
+            .flatMap((item) => item.tags)
+            .map((tag) => tag.trim())
+            .filter(Boolean),
+        ),
+      ),
+    [subjectItems],
+  );
 
   const currentItems = useMemo(() => {
     if (activeSection === "subject") {
@@ -528,12 +542,9 @@ export function LibrariesStudio({
 
   const filteredItems = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
-
-    if (!normalizedKeyword) {
-      return currentItems;
-    }
-
-    return currentItems.filter((item) => {
+    const keywordFilteredItems = !normalizedKeyword
+      ? currentItems
+      : currentItems.filter((item) => {
       const haystacks =
         "promptTemplate" in item
           ? [
@@ -554,7 +565,19 @@ export function LibrariesStudio({
 
       return haystacks.some((field) => field.toLowerCase().includes(normalizedKeyword));
     });
-  }, [currentItems, keyword]);
+
+    if (activeSection !== "subject" || subjectViewMode !== "model" || selectedModelTags.length === 0) {
+      return keywordFilteredItems;
+    }
+
+    return keywordFilteredItems.filter((item) => {
+      if ("promptTemplate" in item) {
+        return false;
+      }
+
+      return selectedModelTags.every((tag) => item.tags.includes(tag));
+    });
+  }, [activeSection, currentItems, keyword, selectedModelTags, subjectViewMode]);
 
   const selectedItem = useMemo(
     () => currentItems.find((item) => item.id === selectedId) ?? null,
@@ -768,6 +791,7 @@ export function LibrariesStudio({
     setKeyword("");
     if (section !== "subject") {
       setSubjectViewMode("all");
+      setSelectedModelTags([]);
     }
     setSelectedId(items[0]?.id ?? null);
     setIsDetailModalOpen(false);
@@ -1961,26 +1985,60 @@ export function LibrariesStudio({
                     </div>
                     <p className="text-sm text-muted-foreground">{activeMeta.description}</p>
                     {activeSection === "subject" ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {[
-                          { key: "all", label: "全部主体", count: subjectItems.length },
-                          { key: "model", label: "模特主体", count: subjectItems.filter((item) => isModelEntityType(item.entityType)).length },
-                          { key: "product", label: "商品主体", count: subjectItems.filter((item) => !isModelEntityType(item.entityType)).length },
-                        ].map((option) => (
-                          <button
-                            key={option.key}
-                            className={cn(
-                              "rounded-full border px-3 py-1 text-xs transition",
-                              subjectViewMode === option.key
-                                ? "border-black/10 bg-white text-foreground shadow-sm"
-                                : "border-transparent bg-transparent text-muted-foreground hover:border-black/8 hover:bg-white",
-                            )}
-                            type="button"
-                            onClick={() => setSubjectViewMode(option.key as SubjectViewMode)}
-                          >
-                            {option.label} · {option.count}
-                          </button>
-                        ))}
+                      <div className="mt-3 space-y-2">
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            { key: "all", label: "全部主体", count: subjectItems.length },
+                            { key: "model", label: "模特主体", count: subjectItems.filter((item) => isModelEntityType(item.entityType)).length },
+                            { key: "product", label: "商品主体", count: subjectItems.filter((item) => !isModelEntityType(item.entityType)).length },
+                          ].map((option) => (
+                            <button
+                              key={option.key}
+                              className={cn(
+                                "rounded-full border px-3 py-1 text-xs transition",
+                                subjectViewMode === option.key
+                                  ? "border-black/10 bg-white text-foreground shadow-sm"
+                                  : "border-transparent bg-transparent text-muted-foreground hover:border-black/8 hover:bg-white",
+                              )}
+                              type="button"
+                              onClick={() => {
+                                setSubjectViewMode(option.key as SubjectViewMode);
+                                if (option.key !== "model") {
+                                  setSelectedModelTags([]);
+                                }
+                              }}
+                            >
+                              {option.label} · {option.count}
+                            </button>
+                          ))}
+                        </div>
+                        {subjectViewMode === "model" && availableModelTags.length > 0 ? (
+                          <div className="flex flex-wrap gap-2">
+                            {availableModelTags.map((tag) => {
+                              const isActive = selectedModelTags.includes(tag);
+
+                              return (
+                                <button
+                                  key={tag}
+                                  className={cn(
+                                    "rounded-full border px-3 py-1 text-[11px] transition",
+                                    isActive
+                                      ? "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700"
+                                      : "border-black/8 bg-white text-muted-foreground hover:text-foreground",
+                                  )}
+                                  type="button"
+                                  onClick={() =>
+                                    setSelectedModelTags((current) =>
+                                      current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag],
+                                    )
+                                  }
+                                >
+                                  {tag}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
