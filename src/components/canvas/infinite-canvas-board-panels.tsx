@@ -1,26 +1,57 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, Expand, ExternalLink, ImageIcon, Sparkles, Type, Upload, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  cancelCanvasCombinationPlan,
+  createCanvasCombinationPlan,
+  fetchCanvasInputNodeItems,
+  pauseCanvasCombinationPlan,
+  patchCanvasNode,
+  previewCanvasCombinationPlan,
+  reorderCanvasInputNodeItems,
+  resumeCanvasCombinationPlan,
+  runCanvasCombinationPlan,
+  saveCanvasInputNodeItems,
+  setCanvasInputNodeItemEnabled,
+  type CanvasCombinationPlanApiDetail,
+  type CanvasCombinationPlanPreview,
+  type CanvasInputNodeItem,
+} from "@/components/canvas/infinite-canvas-board.api";
 
 import {
   formatCanvasDateTime,
+  getCombinationPlanDetail,
+  getInputNodeOutputSummary,
   DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
+  DEFAULT_INPUT_NODE_SETTINGS,
+  DEFAULT_COMBINATION_NODE_SETTINGS,
   clampNumber,
+  formatBatchRunBindingSummary,
   getCanvasBatchRunTitle,
+  getPrimaryBatchRunResultIndex,
   inferImageExtension,
   getStoryboardShotAssetNames,
+  type CanvasInputNodeSettings,
+  type CanvasCombinationNodeSettings,
+  type CanvasInputSourceType,
+  type CanvasBatchRunDetail,
+  type CanvasBatchRunResultIndex,
   type CanvasBatchRunSummary,
+  type CanvasBatchRunCombinationItem,
   type CanvasBatchRunResult,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
+  type InstructionPresetOption,
+  type LibraryItemOption,
   type StoryboardShot,
   type StoryboardNodeSettings,
   type VideoGenerationMode,
@@ -251,9 +282,923 @@ function PromptAssetTextarea({
   );
 }
 
+function getInputNodeSettings(settingsJson: CanvasNode["settingsJson"]): CanvasInputNodeSettings {
+  const sourceType = settingsJson?.sourceType;
+
+  return {
+    sourceType: sourceType === "image" || sourceType === "video" || sourceType === "text" ? sourceType : DEFAULT_INPUT_NODE_SETTINGS.sourceType,
+    allowMixedSources: Boolean(settingsJson?.allowMixedSources),
+  };
+}
+
+function getCombinationNodeSettings(settingsJson: CanvasNode["settingsJson"]): CanvasCombinationNodeSettings {
+  const mode = settingsJson?.mode;
+  const sampleSize =
+    typeof settingsJson?.sampleSize === "number" && Number.isFinite(settingsJson.sampleSize)
+      ? Math.max(1, Math.min(12, Math.round(settingsJson.sampleSize)))
+      : DEFAULT_COMBINATION_NODE_SETTINGS.sampleSize;
+
+  return {
+    mode: mode === "cartesian" || mode === "anchor" || mode === "custom_mapping" || mode === "zip" ? mode : DEFAULT_COMBINATION_NODE_SETTINGS.mode,
+    anchorInputNodeId: typeof settingsJson?.anchorInputNodeId === "string" ? settingsJson.anchorInputNodeId : null,
+    sampleSize,
+  };
+}
+
+type InputNodePanelProps = {
+  selectedNode: CanvasNode;
+  workspaceId: string;
+  canvasId: string;
+  canEdit: boolean;
+  subjects: LibraryItemOption[];
+  scenes: LibraryItemOption[];
+  instructionPresets: InstructionPresetOption[];
+  onRefreshRuntime: (fallbackMessage?: string) => Promise<unknown>;
+};
+
+export function InputNodePanel({
+  selectedNode,
+  workspaceId,
+  canvasId,
+  canEdit,
+  subjects,
+  scenes,
+  instructionPresets,
+  onRefreshRuntime,
+}: InputNodePanelProps) {
+  const apiContext = useMemo(() => ({ workspaceId, canvasId }), [canvasId, workspaceId]);
+  const [items, setItems] = useState<CanvasInputNodeItem[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [settings, setSettings] = useState<CanvasInputNodeSettings>(() => getInputNodeSettings(selectedNode.settingsJson));
+  const inputSummary = useMemo(() => getInputNodeOutputSummary(selectedNode.outputSnapshot), [selectedNode.outputSnapshot]);
+
+  const assetOptions = useMemo(() => {
+    const items = [...subjects, ...scenes];
+
+    return items.flatMap((libraryItem) =>
+      (libraryItem.assets ?? [])
+        .filter((asset) => {
+          if (settings.sourceType === "image") {
+            return asset.mimeType.startsWith("image/");
+          }
+
+          if (settings.sourceType === "video") {
+            return asset.mimeType.startsWith("video/");
+          }
+
+          return false;
+        })
+        .map((asset) => ({
+          id: asset.id,
+          label: `${libraryItem.name} / ${asset.fileName}`,
+          fileName: asset.fileName,
+          fileUrl: asset.fileUrl,
+          mimeType: asset.mimeType,
+          libraryItemId: libraryItem.id,
+          libraryItemName: libraryItem.name,
+        })),
+    );
+  }, [scenes, settings.sourceType, subjects]);
+
+  const filteredAssetOptions = useMemo(() => {
+    const query = libraryQuery.trim().toLowerCase();
+
+    if (!query) {
+      return assetOptions.slice(0, 12);
+    }
+
+    return assetOptions
+      .filter((asset) => asset.label.toLowerCase().includes(query) || asset.fileName.toLowerCase().includes(query))
+      .slice(0, 12);
+  }, [assetOptions, libraryQuery]);
+
+  useEffect(() => {
+    setSettings(getInputNodeSettings(selectedNode.settingsJson));
+  }, [selectedNode.id, selectedNode.settingsJson]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+
+    void fetchCanvasInputNodeItems(apiContext, selectedNode.id)
+      .then((result) => {
+        if (!cancelled) {
+          setItems(result.items);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : "输入源加载失败。");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiContext, selectedNode.id]);
+
+  const persistItems = async (
+    nextItems: Array<{
+      source_type: CanvasInputSourceType;
+      label: string;
+      content_text?: string | null;
+      asset_id?: string | null;
+      enabled: boolean;
+      source_ref?: Record<string, unknown> | null;
+    }>,
+    successMessage: string,
+  ) => {
+    setIsSaving(true);
+
+    try {
+      const result = await saveCanvasInputNodeItems(
+        apiContext,
+        selectedNode.id,
+        {
+          items: nextItems.map((item) => ({
+            sourceType: item.source_type,
+            displayLabel: item.label,
+            contentText: item.content_text ?? null,
+            assetId: item.asset_id ?? null,
+            enabled: item.enabled,
+            sourceRefJson: item.source_ref ?? {},
+          })),
+        },
+        "输入源保存失败。",
+      );
+      setItems(result.items);
+      await onRefreshRuntime("输入源摘要刷新失败。");
+      toast.success(successMessage);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "输入源保存失败。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const saveSettings = async (nextSettings: CanvasInputNodeSettings) => {
+    setSettings(nextSettings);
+
+    try {
+      await patchCanvasNode(
+        apiContext,
+        selectedNode.id,
+        {
+          settingsJson: nextSettings,
+        },
+        "输入源配置保存失败。",
+      );
+      await onRefreshRuntime("输入源状态刷新失败。");
+      toast.success("输入源配置已保存。");
+    } catch (error) {
+      setSettings(getInputNodeSettings(selectedNode.settingsJson));
+      toast.error(error instanceof Error ? error.message : "输入源配置保存失败。");
+    }
+  };
+
+  const addBulkTextItems = async () => {
+    const lines = bulkText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      toast.error("先输入至少一条文本内容。");
+      return;
+    }
+
+    await persistItems(
+      [
+        ...items.map((item) => ({
+          source_type: item.source_type,
+          label: item.label,
+          content_text: item.content_text,
+          asset_id: item.asset_id,
+          enabled: item.enabled,
+          source_ref: item.source_ref,
+        })),
+        ...lines.map((line) => ({
+          source_type: "text" as const,
+          label: line.length > 24 ? `${line.slice(0, 24)}...` : line,
+          content_text: line,
+          enabled: true,
+          source_ref: {
+            kind: "manual_text",
+          },
+        })),
+      ],
+      `已添加 ${lines.length} 条文本输入。`,
+    );
+    setBulkText("");
+  };
+
+  const addPresetItem = async () => {
+    const preset = instructionPresets.find((item) => item.id === selectedPresetId);
+
+    if (!preset) {
+      toast.error("先选择一条文本资源模板。");
+      return;
+    }
+
+    await persistItems(
+      [
+        ...items.map((item) => ({
+          source_type: item.source_type,
+          label: item.label,
+          content_text: item.content_text,
+          asset_id: item.asset_id,
+          enabled: item.enabled,
+          source_ref: item.source_ref,
+        })),
+        {
+          source_type: "text" as const,
+          label: preset.name,
+          content_text: preset.promptTemplate,
+          enabled: true,
+          source_ref: {
+            kind: "instruction_preset",
+            presetId: preset.id,
+            presetName: preset.name,
+          },
+        },
+      ],
+      "已加入文本资源。",
+    );
+    setSelectedPresetId("");
+  };
+
+  const addAssetItem = async (asset: (typeof filteredAssetOptions)[number]) => {
+    await persistItems(
+      [
+        ...items.map((item) => ({
+          source_type: item.source_type,
+          label: item.label,
+          content_text: item.content_text,
+          asset_id: item.asset_id,
+          enabled: item.enabled,
+          source_ref: item.source_ref,
+        })),
+        {
+          source_type: settings.sourceType,
+          label: asset.label,
+          asset_id: asset.id,
+          enabled: true,
+          source_ref: {
+            kind: "library_asset",
+            libraryItemId: asset.libraryItemId,
+            libraryItemName: asset.libraryItemName,
+          },
+        },
+      ],
+      `已加入 1 条${settings.sourceType === "image" ? "图片" : "视频"}输入。`,
+    );
+  };
+
+  const toggleItemEnabled = async (item: CanvasInputNodeItem) => {
+    setIsSaving(true);
+
+    try {
+      await setCanvasInputNodeItemEnabled(apiContext, selectedNode.id, item.id, {
+        enabled: !item.enabled,
+      });
+      setItems((current) => current.map((entry) => (entry.id === item.id ? { ...entry, enabled: !entry.enabled } : entry)));
+      await onRefreshRuntime("输入源状态刷新失败。");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "输入项更新失败。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const removeItem = async (itemId: string) => {
+    await persistItems(
+      items
+        .filter((item) => item.id !== itemId)
+        .map((item) => ({
+          source_type: item.source_type,
+          label: item.label,
+          content_text: item.content_text,
+          asset_id: item.asset_id,
+          enabled: item.enabled,
+          source_ref: item.source_ref,
+        })),
+      "输入项已移除。",
+    );
+  };
+
+  const moveItem = async (itemId: string, direction: -1 | 1) => {
+    const currentIndex = items.findIndex((item) => item.id === itemId);
+    const nextIndex = currentIndex + direction;
+
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= items.length) {
+      return;
+    }
+
+    const nextItems = [...items];
+    const [movedItem] = nextItems.splice(currentIndex, 1);
+    nextItems.splice(nextIndex, 0, movedItem);
+
+    setItems(nextItems);
+    setIsSaving(true);
+
+    try {
+      const result = await reorderCanvasInputNodeItems(
+        apiContext,
+        selectedNode.id,
+        {
+          itemIds: nextItems.map((item) => item.id),
+        },
+        "输入源排序失败。",
+      );
+      setItems(result.items);
+      await onRefreshRuntime("输入源状态刷新失败。");
+    } catch (error) {
+      setItems(items);
+      toast.error(error instanceof Error ? error.message : "输入源排序失败。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
+      <div className="w-full max-w-5xl rounded-[24px] border bg-background/96 p-3 shadow-lg">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{selectedNode.title}</p>
+              <p className="text-xs text-muted-foreground">输入源节点只负责维护输入集合，不直接生成内容；把它连到组合节点，再由下游生成节点逐条消费。</p>
+            </div>
+            <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
+              {inputSummary ? `${inputSummary.enabledItems}/${inputSummary.totalItems} 项启用中` : "等待配置"}
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-[0.96fr_1.04fr]">
+            <div className="min-w-0 space-y-3 rounded-[22px] border bg-muted/20 p-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>输入类型</span>
+                  <select
+                    className="flex h-10 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                    disabled={!canEdit || isSaving}
+                    value={settings.sourceType}
+                    onChange={(event) =>
+                      void saveSettings({
+                        ...settings,
+                        sourceType: event.target.value === "image" || event.target.value === "video" ? event.target.value : "text",
+                      })
+                    }
+                  >
+                    <option value="text">文本输入</option>
+                    <option value="image">图片输入</option>
+                    <option value="video">视频输入</option>
+                  </select>
+                </label>
+                <div className="min-w-0 space-y-1 text-xs text-muted-foreground">
+                  <span>当前摘要</span>
+                  <div
+                    className="flex h-10 min-w-0 items-center overflow-hidden rounded-xl border bg-background px-3 text-sm text-foreground"
+                    title={inputSummary?.sampleLabels?.length ? inputSummary.sampleLabels.slice(0, 2).join(" / ") : "还没有输入项"}
+                  >
+                    <span className="block w-full truncate">
+                      {inputSummary?.sampleLabels?.length ? inputSummary.sampleLabels.slice(0, 2).join(" / ") : "还没有输入项"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {settings.sourceType === "text" ? (
+                <div className="space-y-3">
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    <span>批量文本</span>
+                    <Textarea
+                      className="min-h-28 resize-none rounded-2xl bg-background"
+                      disabled={!canEdit || isSaving}
+                      placeholder="一行一条输入内容，例如三条标题、三段脚本、三组镜头描述。"
+                      value={bulkText}
+                      onChange={(event) => setBulkText(event.target.value)}
+                    />
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <Button disabled={!canEdit || isSaving} size="sm" type="button" onClick={() => void addBulkTextItems()}>
+                      添加文本输入
+                    </Button>
+                  </div>
+                  <div className="space-y-2 rounded-2xl border bg-background/70 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium text-foreground">从文本资源模板导入</p>
+                      <p className="text-[11px] text-muted-foreground">适合把资源库里的指令模板作为批量输入。</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <select
+                        className="flex h-10 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                        disabled={!canEdit || isSaving}
+                        value={selectedPresetId}
+                        onChange={(event) => setSelectedPresetId(event.target.value)}
+                      >
+                        <option value="">选择文本资源</option>
+                        {instructionPresets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <Button disabled={!canEdit || isSaving || !selectedPresetId} size="sm" type="button" variant="outline" onClick={() => void addPresetItem()}>
+                        导入
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    <span>从资源库筛选 {settings.sourceType === "image" ? "图片" : "视频"}</span>
+                    <Input
+                      disabled={!canEdit || isSaving}
+                      placeholder={`搜索${settings.sourceType === "image" ? "图片" : "视频"}资源名`}
+                      value={libraryQuery}
+                      onChange={(event) => setLibraryQuery(event.target.value)}
+                    />
+                  </label>
+                  <div className="grid max-h-72 min-h-0 gap-2 overflow-y-auto rounded-2xl border bg-background/70 p-2 md:grid-cols-2">
+                    {filteredAssetOptions.length > 0 ? (
+                      filteredAssetOptions.map((asset) => (
+                        <button
+                          key={asset.id}
+                          className="flex items-center gap-3 rounded-2xl border bg-background px-3 py-3 text-left transition hover:border-foreground/20 hover:bg-muted/40"
+                          disabled={!canEdit || isSaving}
+                          type="button"
+                          onClick={() => void addAssetItem(asset)}
+                        >
+                          <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted/50">
+                            {asset.mimeType.startsWith("image/") ? (
+                              <img alt={asset.fileName} className="h-full w-full object-cover" src={asset.fileUrl} />
+                            ) : (
+                              <Video className="size-5 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{asset.libraryItemName}</p>
+                            <p className="truncate text-[11px] text-muted-foreground">{asset.fileName}</p>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="col-span-full rounded-2xl border border-dashed bg-muted/20 px-4 py-8 text-center text-xs text-muted-foreground">
+                        资源库里暂时没有匹配的{settings.sourceType === "image" ? "图片" : "视频"}资产。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="min-w-0 space-y-3 rounded-[22px] border bg-background/70 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">输入项</p>
+                  <p className="text-xs text-muted-foreground">启用项才会被组合节点纳入预估和实际执行。</p>
+                </div>
+                <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
+                  {isLoading ? "加载中..." : `${items.length} 项`}
+                </div>
+              </div>
+
+              <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                {items.length > 0 ? (
+                  items.map((item, index) => (
+                    <div key={item.id} className="rounded-2xl border bg-background px-3 py-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full border bg-muted/30 px-2.5 py-0.5 text-[11px] text-muted-foreground">#{index + 1}</span>
+                            <span className="rounded-full border bg-muted/30 px-2.5 py-0.5 text-[11px] text-muted-foreground">
+                              {item.source_type.toUpperCase()}
+                            </span>
+                            <span className={`rounded-full px-2.5 py-0.5 text-[11px] ${item.enabled ? "bg-emerald-50 text-emerald-700" : "bg-muted text-muted-foreground"}`}>
+                              {item.enabled ? "启用" : "停用"}
+                            </span>
+                          </div>
+                          <p className="mt-2 truncate text-sm font-medium">{item.label}</p>
+                          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                            {item.content_text ?? item.asset?.file_name ?? item.asset_id ?? "资源型输入"}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 flex-col gap-2">
+                          <Button disabled={!canEdit || isSaving || index === 0} size="sm" type="button" variant="outline" onClick={() => void moveItem(item.id, -1)}>
+                            上移
+                          </Button>
+                          <Button
+                            disabled={!canEdit || isSaving || index === items.length - 1}
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                            onClick={() => void moveItem(item.id, 1)}
+                          >
+                            下移
+                          </Button>
+                          <Button disabled={!canEdit || isSaving} size="sm" type="button" variant="outline" onClick={() => void toggleItemEnabled(item)}>
+                            {item.enabled ? "停用" : "启用"}
+                          </Button>
+                          <Button disabled={!canEdit || isSaving} size="sm" type="button" variant="outline" onClick={() => void removeItem(item.id)}>
+                            删除
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
+                    还没有输入项。先在左侧添加文本，或从资源库选择图片/视频。
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type CombinationNodePanelProps = {
+  selectedNode: CanvasNode;
+  workspaceId: string;
+  canvasId: string;
+  canEdit: boolean;
+  onRefreshRuntime: (fallbackMessage?: string) => Promise<unknown>;
+};
+
+export function CombinationNodePanel({
+  selectedNode,
+  workspaceId,
+  canvasId,
+  canEdit,
+  onRefreshRuntime,
+}: CombinationNodePanelProps) {
+  const apiContext = useMemo(() => ({ workspaceId, canvasId }), [canvasId, workspaceId]);
+  const snapshotDetail = useMemo(() => getCombinationPlanDetail(selectedNode.outputSnapshot), [selectedNode.outputSnapshot]);
+  const [settings, setSettings] = useState<CanvasCombinationNodeSettings>(() => getCombinationNodeSettings(selectedNode.settingsJson));
+  const [preview, setPreview] = useState<CanvasCombinationPlanPreview | null>(null);
+  const [activePlan, setActivePlan] = useState<CanvasCombinationPlanApiDetail | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isPlanBusy, setIsPlanBusy] = useState(false);
+  const [shardSize, setShardSize] = useState(20);
+  const [allowHighCost, setAllowHighCost] = useState(false);
+
+  useEffect(() => {
+    setSettings(getCombinationNodeSettings(selectedNode.settingsJson));
+  }, [selectedNode.id, selectedNode.settingsJson]);
+
+  const sourceSummaries = useMemo(
+    () =>
+      preview?.sources
+        ? preview.sources.map((source) => ({
+            inputNodeId: source.input_node_id,
+            inputNodeTitle: source.input_node_title,
+            sourceType: source.source_type,
+            totalItems: source.total_items,
+            enabledItems: source.enabled_items,
+          }))
+        : (snapshotDetail?.sources ?? []),
+    [preview?.sources, snapshotDetail?.sources],
+  );
+  const sampleLabels = preview?.sample_labels ?? snapshotDetail?.sampleLabels ?? [];
+  const governanceSignals = preview?.governance_signals ?? snapshotDetail?.governanceSignals ?? [];
+  const governanceAction = preview?.governance_action ?? activePlan?.governance_action ?? null;
+
+  const saveSettings = async (nextSettings: CanvasCombinationNodeSettings) => {
+    setSettings(nextSettings);
+    setIsSavingSettings(true);
+
+    try {
+      await patchCanvasNode(
+        apiContext,
+        selectedNode.id,
+        {
+          settingsJson: nextSettings,
+        },
+        "组合配置保存失败。",
+      );
+      await onRefreshRuntime("组合节点摘要刷新失败。");
+      toast.success("组合配置已保存。");
+    } catch (error) {
+      setSettings(getCombinationNodeSettings(selectedNode.settingsJson));
+      toast.error(error instanceof Error ? error.message : "组合配置保存失败。");
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const runPreview = async () => {
+    setIsPreviewLoading(true);
+
+    try {
+      const result = await previewCanvasCombinationPlan(
+        apiContext,
+        selectedNode.id,
+        {
+          mode: settings.mode,
+          anchorInputNodeId: settings.anchorInputNodeId,
+          sampleSize: settings.sampleSize,
+        },
+        "组合预估失败。",
+      );
+      setPreview(result);
+      await onRefreshRuntime("组合节点摘要刷新失败。");
+      toast.success("组合预估已刷新。");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "组合预估失败。");
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
+
+  const createPlan = async () => {
+    setIsPlanBusy(true);
+
+    try {
+      const plan = await createCanvasCombinationPlan(
+        apiContext,
+        selectedNode.id,
+        {
+          mode: settings.mode,
+          anchorInputNodeId: settings.anchorInputNodeId,
+          sampleSize: settings.sampleSize,
+          shardSize,
+        },
+        "创建组合计划失败。",
+      );
+      setActivePlan(plan);
+      await onRefreshRuntime("组合计划摘要刷新失败。");
+      toast.success("组合计划已创建。");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "创建组合计划失败。");
+    } finally {
+      setIsPlanBusy(false);
+    }
+  };
+
+  const handlePlanAction = async (action: "run" | "pause" | "resume" | "cancel") => {
+    if (!activePlan?.id) {
+      toast.error("先创建组合计划。");
+      return;
+    }
+
+    setIsPlanBusy(true);
+
+    try {
+      const plan =
+        action === "run"
+          ? await runCanvasCombinationPlan(apiContext, activePlan.id, { allowHighCost }, "启动组合计划失败。")
+          : action === "pause"
+            ? await pauseCanvasCombinationPlan(apiContext, activePlan.id, "暂停组合计划失败。")
+            : action === "resume"
+              ? await resumeCanvasCombinationPlan(apiContext, activePlan.id, { allowHighCost }, "恢复组合计划失败。")
+              : await cancelCanvasCombinationPlan(apiContext, activePlan.id, "取消组合计划失败。");
+      setActivePlan(plan);
+      await onRefreshRuntime("组合计划状态刷新失败。");
+      toast.success(
+        action === "run"
+          ? "组合计划已启动。"
+          : action === "pause"
+            ? "组合计划已暂停。"
+            : action === "resume"
+              ? "组合计划已恢复。"
+              : "组合计划已取消。",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "组合计划操作失败。");
+    } finally {
+      setIsPlanBusy(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
+      <div className="w-full max-w-5xl rounded-[24px] border bg-background/96 p-3 shadow-lg">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{selectedNode.title}</p>
+              <p className="text-xs text-muted-foreground">组合节点只负责编排输入组合。真正执行生成的仍然是它下游连接的文本、图片或视频节点。</p>
+            </div>
+            <div className="rounded-full border bg-muted/30 px-3 py-1 text-xs text-muted-foreground">
+              {activePlan ? `计划 ${activePlan.status}` : "尚未创建计划"}
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-[0.98fr_1.02fr]">
+            <div className="space-y-3 rounded-[22px] border bg-muted/20 p-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>组合模式</span>
+                  <select
+                    className="flex h-10 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                    disabled={!canEdit || isSavingSettings || isPlanBusy}
+                    value={settings.mode}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        mode:
+                          event.target.value === "cartesian" || event.target.value === "anchor" || event.target.value === "custom_mapping"
+                            ? event.target.value
+                            : "zip",
+                      }))
+                    }
+                  >
+                    <option value="zip">zip 一一配对</option>
+                    <option value="cartesian">cartesian 全组合</option>
+                    <option value="anchor">anchor 主输入扩展</option>
+                    <option value="custom_mapping">custom 自定义映射</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>样例数量</span>
+                  <Input
+                    disabled={!canEdit || isSavingSettings || isPlanBusy}
+                    max={12}
+                    min={1}
+                    type="number"
+                    value={settings.sampleSize}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        sampleSize: clampNumber(Number(event.target.value) || DEFAULT_COMBINATION_NODE_SETTINGS.sampleSize, 1, 12),
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+
+              {settings.mode === "anchor" ? (
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>主输入源</span>
+                  <select
+                    className="flex h-10 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                    disabled={!canEdit || isSavingSettings || isPlanBusy || sourceSummaries.length === 0}
+                    value={settings.anchorInputNodeId ?? ""}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        anchorInputNodeId: event.target.value || null,
+                      }))
+                    }
+                  >
+                    <option value="">自动使用第一个输入源</option>
+                    {sourceSummaries.map((source) => (
+                      <option key={source.inputNodeId} value={source.inputNodeId}>
+                        {source.inputNodeTitle}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">输入源</div>
+                  <div className="mt-1 text-lg font-semibold">{preview?.input_source_count ?? snapshotDetail?.inputSourceCount ?? 0}</div>
+                </div>
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">预计组合</div>
+                  <div className="mt-1 text-lg font-semibold">{preview?.estimated_combination_count ?? snapshotDetail?.estimatedCombinationCount ?? 0}</div>
+                </div>
+                <div className="rounded-2xl border bg-background/70 px-3 py-3">
+                  <div className="text-[11px] text-muted-foreground">治理信号</div>
+                  <div className="mt-1 text-sm font-semibold">{governanceSignals.length > 0 ? governanceSignals.join(" / ") : "none"}</div>
+                </div>
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>分片大小</span>
+                  <Input
+                    disabled={!canEdit || isPlanBusy}
+                    min={1}
+                    type="number"
+                    value={shardSize}
+                    onChange={(event) => setShardSize(clampNumber(Number(event.target.value) || 20, 1, 50))}
+                  />
+                </label>
+                <Button disabled={!canEdit || isSavingSettings || isPlanBusy} size="sm" type="button" variant="outline" onClick={() => void saveSettings(settings)}>
+                  {isSavingSettings ? "保存中..." : "保存组合配置"}
+                </Button>
+                <Button disabled={isPreviewLoading || isPlanBusy} size="sm" type="button" onClick={() => void runPreview()}>
+                  {isPreviewLoading ? "预估中..." : "预估组合"}
+                </Button>
+              </div>
+
+              {(governanceAction === "confirm" || governanceAction === "manual_approval") ? (
+                <label className="flex items-center gap-2 rounded-2xl border bg-amber-50 px-3 py-3 text-xs text-amber-800">
+                  <input checked={allowHighCost} type="checkbox" onChange={(event) => setAllowHighCost(event.target.checked)} />
+                  我确认按高成本组合计划继续执行
+                </label>
+              ) : null}
+
+              <div className="rounded-2xl border bg-background/70 px-3 py-3 text-xs text-muted-foreground">
+                推荐用法：先点“预估组合”，确认数量后创建计划。最终生成仍然由下游文本/图片/视频节点执行，组合节点本身不直接产出内容。
+              </div>
+            </div>
+
+            <div className="space-y-3 rounded-[22px] border bg-background/70 p-3">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium">输入源摘要</p>
+                  <Button disabled={!canEdit || isPlanBusy} size="sm" type="button" variant="outline" onClick={() => void createPlan()}>
+                    {isPlanBusy ? "处理中..." : "创建计划"}
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  {sourceSummaries.length > 0 ? (
+                    sourceSummaries.map((source) => (
+                      <div key={source.inputNodeId} className="rounded-2xl border bg-background px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{source.inputNodeTitle}</p>
+                            <p className="text-[11px] text-muted-foreground">{source.sourceType.toUpperCase()}</p>
+                          </div>
+                          <div className="text-right text-xs text-muted-foreground">
+                            <div>{source.enabledItems} 启用</div>
+                            <div>{source.totalItems} 总项</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                      先把至少两个输入源节点连接到当前组合节点，再点击“预估组合”。
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium">组合样例</p>
+                <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                  {sampleLabels.length > 0 ? (
+                    sampleLabels.map((label, index) => (
+                      <div key={`${label}-${index}`} className="rounded-2xl border bg-background px-3 py-3 text-sm">
+                        <span className="mr-2 rounded-full border bg-muted/30 px-2 py-0.5 text-[11px] text-muted-foreground">#{index + 1}</span>
+                        {label}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                      预估后会在这里显示前几组样例。
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {activePlan ? (
+                <div className="space-y-3 rounded-2xl border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">当前计划</p>
+                      <p className="text-[11px] text-muted-foreground">状态 {activePlan.status} · 预计 {activePlan.estimated_combination_count} 组</p>
+                    </div>
+                    <div className="rounded-full border bg-background px-3 py-1 text-[11px] text-muted-foreground">{activePlan.id.slice(0, 8)}</div>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-4">
+                    <Button disabled={isPlanBusy || activePlan.status === "queued" || activePlan.status === "running"} size="sm" type="button" onClick={() => void handlePlanAction("run")}>
+                      启动
+                    </Button>
+                    <Button disabled={isPlanBusy || (activePlan.status !== "queued" && activePlan.status !== "running")} size="sm" type="button" variant="outline" onClick={() => void handlePlanAction("pause")}>
+                      暂停
+                    </Button>
+                    <Button disabled={isPlanBusy || activePlan.status !== "paused"} size="sm" type="button" variant="outline" onClick={() => void handlePlanAction("resume")}>
+                      恢复
+                    </Button>
+                    <Button disabled={isPlanBusy || activePlan.status === "canceled"} size="sm" type="button" variant="outline" onClick={() => void handlePlanAction("cancel")}>
+                      取消
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type TextNodePanelProps = {
   selectedNode: CanvasNode;
   canGenerate: boolean;
+  generateLabel?: string;
   draftPrompt: string;
   isSavingPrompt: boolean;
   isTaskActive: boolean;
@@ -268,6 +1213,7 @@ type TextNodePanelProps = {
 export function TextNodePanel({
   selectedNode,
   canGenerate,
+  generateLabel,
   draftPrompt,
   isSavingPrompt,
   isTaskActive,
@@ -322,7 +1268,7 @@ export function TextNodePanel({
                   ? "生成中..."
                   : isCoolingDown
                     ? "已提交"
-                    : "AI 生成内容"}
+                    : (generateLabel ?? "AI 生成内容")}
             </Button>
           </div>
         </div>
@@ -335,6 +1281,7 @@ type StoryboardNodePanelProps = {
   selectedNode: CanvasNode;
   canEdit: boolean;
   canGenerate: boolean;
+  generateLabel?: string;
   draftPrompt: string;
   draftSettings: StoryboardNodeSettings;
   storyboardShots: StoryboardShot[];
@@ -367,6 +1314,7 @@ export function StoryboardNodePanel({
   selectedNode,
   canEdit,
   canGenerate,
+  generateLabel,
   draftPrompt,
   draftSettings,
   storyboardShots,
@@ -758,7 +1706,7 @@ export function StoryboardNodePanel({
                     ? "生成中..."
                     : draftSettings.generationMode === "smart_storyboard"
                       ? "AI 智能分镜"
-                      : "AI 生成分镜"}
+                      : (generateLabel ?? "AI 生成分镜")}
               </Button>
               <Button
                 disabled={!hasShots || isCreatingVideoNode || !canEdit}
@@ -801,6 +1749,7 @@ type ImageNodePanelProps = {
   selectedNode: CanvasNode;
   canEdit: boolean;
   canGenerate: boolean;
+  generateLabel?: string;
   imageUploadInputRef: React.RefObject<HTMLInputElement | null>;
   draftImagePrompt: string;
   isSavingImagePrompt: boolean;
@@ -824,6 +1773,7 @@ export function ImageNodePanel({
   selectedNode,
   canEdit,
   canGenerate,
+  generateLabel,
   imageUploadInputRef,
   draftImagePrompt,
   isSavingImagePrompt,
@@ -931,7 +1881,7 @@ export function ImageNodePanel({
                 type="button"
                 onClick={onGenerate}
               >
-                {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成图片"}
+                {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : (generateLabel ?? "AI 生成图片")}
               </Button>
             </div>
           </div>
@@ -970,6 +1920,7 @@ type VideoNodePanelProps = {
   selectedNode: CanvasNode;
   canEdit: boolean;
   canGenerate: boolean;
+  generateLabel?: string;
   videoFirstFrameInputRef: React.RefObject<HTMLInputElement | null>;
   videoLastFrameInputRef: React.RefObject<HTMLInputElement | null>;
   videoReferenceInputRef: React.RefObject<HTMLInputElement | null>;
@@ -1000,6 +1951,7 @@ export function VideoNodePanel({
   selectedNode,
   canEdit,
   canGenerate,
+  generateLabel,
   videoFirstFrameInputRef,
   videoLastFrameInputRef,
   videoReferenceInputRef,
@@ -1279,7 +2231,7 @@ export function VideoNodePanel({
                   type="button"
                   onClick={onGenerate}
                 >
-                  {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : "AI 生成视频"}
+                  {isGenerating ? "提交中..." : isTaskActive ? "生成中..." : (generateLabel ?? "AI 生成视频")}
                 </Button>
               </div>
             </div>
@@ -1633,16 +2585,21 @@ type BatchRunResultsPanelProps = {
   canvasId: string;
   batchRuns: CanvasBatchRunSummary[];
   activeBatchRunId: string | null;
+  activeBatchRunDetail: CanvasBatchRunDetail | null;
   filteredBySelection: boolean;
   selectedNodeCount: number;
   currentPage: number;
   totalPages: number;
   paginatedRuns: CanvasBatchRunResult[];
+  currentFilter: "all" | "succeeded" | "failed";
   isLoadingRuns: boolean;
   onSelectBatchRun: (batchRunId: string) => void;
+  onChangeFilter: (filter: "all" | "succeeded" | "failed") => void;
   onPreviousPage: () => void;
   onNextPage: () => void;
   onDownloadRun: (run: CanvasBatchRunResult) => void;
+  onRetryItem: (batchRunId: string, itemId: string) => void;
+  onExtractResult: (resultNodeId: string, run: CanvasBatchRunResult | CanvasBatchRunResultIndex) => void;
   onClose: () => void;
 };
 
@@ -1720,24 +2677,43 @@ function getRunMeta(run: CanvasBatchRunResult) {
   return `创建于 ${formatCanvasDateTime(run.createdAt)}`;
 }
 
+function getCombinationItemMeta(item: CanvasBatchRunCombinationItem) {
+  if (item.finishedAt) {
+    return `完成于 ${formatCanvasDateTime(item.finishedAt)}`;
+  }
+
+  if (item.startedAt) {
+    return `开始于 ${formatCanvasDateTime(item.startedAt)}`;
+  }
+
+  return `创建于 ${formatCanvasDateTime(item.createdAt)}`;
+}
+
 export function BatchRunResultsPanel({
   workspaceId,
   canvasId,
   batchRuns,
   activeBatchRunId,
+  activeBatchRunDetail,
   filteredBySelection,
   selectedNodeCount,
   currentPage,
   totalPages,
   paginatedRuns,
+  currentFilter,
   isLoadingRuns,
   onSelectBatchRun,
+  onChangeFilter,
   onPreviousPage,
   onNextPage,
   onDownloadRun,
+  onRetryItem,
+  onExtractResult,
   onClose,
 }: BatchRunResultsPanelProps) {
   const activeBatchRun = batchRuns.find((batchRun) => batchRun.id === activeBatchRunId) ?? batchRuns[0] ?? null;
+  const isPlanBatchRun = Boolean(activeBatchRunDetail?.itemsPage);
+  const paginatedCombinationItems = activeBatchRunDetail?.itemsPage?.items ?? [];
 
   if (!activeBatchRun) {
     return null;
@@ -1819,6 +2795,23 @@ export function BatchRunResultsPanel({
               </p>
             </div>
 
+            {activeBatchRun.combinationPlanSummary ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                  组合模式 {activeBatchRun.combinationPlanSummary.mode}
+                </span>
+                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                  输入源 {activeBatchRun.combinationPlanSummary.inputSourceCount}
+                </span>
+                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                  预计组合 {activeBatchRun.combinationPlanSummary.estimatedCombinationCount}
+                </span>
+                <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                  治理信号 {activeBatchRun.combinationPlanSummary.governanceSignals.length}
+                </span>
+              </div>
+            ) : null}
+
             <div className="mt-4 flex flex-wrap gap-2">
               <a
                 className={batchActionLinkClass(true)}
@@ -1839,17 +2832,150 @@ export function BatchRunResultsPanel({
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium text-foreground">结果预览</p>
-                <p className="text-xs text-muted-foreground">按分页查看当前批量输出，并直接下载单条结果。</p>
+                <p className="text-xs text-muted-foreground">
+                  {isPlanBatchRun ? "按组合实例分页查看结果索引，并执行单实例操作。" : "按分页查看当前批量输出，并直接下载单条结果。"}
+                </p>
               </div>
               <div className="rounded-full border border-black/8 bg-[#fcfcfd] px-2.5 py-1 text-xs text-muted-foreground">
                 第 {currentPage} / {Math.max(totalPages, 1)} 页
               </div>
             </div>
 
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {[
+                {
+                  key: "all",
+                  label: "全部",
+                  count: isPlanBatchRun ? activeBatchRunDetail?.itemsPage?.total ?? 0 : activeBatchRun.totalNodeRunCount,
+                },
+                {
+                  key: "succeeded",
+                  label: "成功",
+                  count: isPlanBatchRun ? activeBatchRun.succeededCombinationCount ?? 0 : activeBatchRun.succeededNodeRunCount,
+                },
+                {
+                  key: "failed",
+                  label: "失败",
+                  count: isPlanBatchRun ? activeBatchRun.failedCombinationCount ?? 0 : activeBatchRun.failedNodeRunCount,
+                },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
+                    currentFilter === item.key ? "border-primary/20 bg-primary/5 text-foreground" : "bg-[#fcfcfd] text-muted-foreground"
+                  }`}
+                  type="button"
+                  onClick={() => onChangeFilter(item.key as "all" | "succeeded" | "failed")}
+                >
+                  {item.label} {item.count}
+                </button>
+              ))}
+            </div>
+
             {isLoadingRuns ? (
               <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
                 正在加载当前批量运行详情。
               </div>
+            ) : isPlanBatchRun ? (
+              paginatedCombinationItems.length === 0 ? (
+                <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
+                  当前筛选范围下还没有可预览的组合实例。
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {paginatedCombinationItems.map((item) => {
+                    const primaryResult = getPrimaryBatchRunResultIndex(item);
+                    const previewKind = primaryResult ? getRunPreviewKind(primaryResult) : "text";
+
+                    return (
+                      <div key={item.id} className="rounded-[18px] border border-black/5 bg-[#fcfcfd] p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full px-2.5 py-1 text-[11px] ${statusTone(item.status)}`}>
+                            {getRunStatusLabel(item.status)}
+                          </span>
+                          <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                            实例 #{item.itemIndex + 1}
+                          </span>
+                          <span className="rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                            索引 {item.resultIndexes.length}
+                          </span>
+                        </div>
+
+                        <p className="mt-3 text-sm font-medium text-foreground">{item.label || `组合实例 ${item.itemIndex + 1}`}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">{formatBatchRunBindingSummary(item.bindingSummary)}</p>
+                        <p className="mt-2 text-xs text-muted-foreground">{getCombinationItemMeta(item)}</p>
+
+                        {primaryResult?.status === "succeeded" && previewKind === "image" && primaryResult.assetFileUrl ? (
+                          <div className="relative mt-3 h-48 overflow-hidden rounded-[18px] border border-black/5 bg-white">
+                            <Image alt={primaryResult.nodeTitle} className="object-cover" fill sizes="420px" src={primaryResult.assetFileUrl} />
+                          </div>
+                        ) : null}
+
+                        {primaryResult?.status === "succeeded" && previewKind === "video" && primaryResult.assetFileUrl ? (
+                          <div className="mt-3 overflow-hidden rounded-[18px] border border-black/5 bg-white">
+                            <video className="h-48 w-full object-cover" controls playsInline preload="metadata" src={primaryResult.assetFileUrl} />
+                          </div>
+                        ) : null}
+
+                        {primaryResult?.status === "succeeded" && previewKind === "audio" && primaryResult.assetFileUrl ? (
+                          <div className="mt-3 rounded-[18px] border border-black/5 bg-white p-3">
+                            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                              <AudioLines className="size-4" />
+                              音频结果
+                            </div>
+                            <audio className="w-full" controls preload="metadata" src={primaryResult.assetFileUrl} />
+                          </div>
+                        ) : null}
+
+                        {primaryResult?.status === "succeeded" && !primaryResult.assetFileUrl && primaryResult.contentText ? (
+                          <div className="mt-3 rounded-[18px] border border-black/5 bg-white p-3">
+                            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                              {previewKind === "json" ? <Clapperboard className="size-4" /> : <Type className="size-4" />}
+                              {previewKind === "json" ? "JSON 结果" : "文本结果"}
+                            </div>
+                            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-6 text-muted-foreground">
+                              {primaryResult.contentText}
+                            </pre>
+                          </div>
+                        ) : null}
+
+                        {item.status === "failed" ? (
+                          <div className="mt-3 rounded-[18px] border border-[#f0c7c7] bg-[#fff6f6] px-3 py-3 text-xs leading-6 text-[#b42318]">
+                            {item.lastErrorCode ? `${item.lastErrorCode} · ` : ""}
+                            {item.lastErrorMessage || "当前组合实例失败，但没有返回额外错误信息。"}
+                          </div>
+                        ) : null}
+
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button className={batchActionLinkClass(false)} type="button" onClick={() => onRetryItem(activeBatchRun.id, item.id)}>
+                            重试实例
+                          </button>
+                          {activeBatchRun.resultNodeId && primaryResult ? (
+                            <button
+                              className={batchActionLinkClass(false)}
+                              type="button"
+                              onClick={() => onExtractResult(activeBatchRun.resultNodeId!, primaryResult)}
+                            >
+                              提取结果
+                            </button>
+                          ) : null}
+                          <a
+                            className={batchActionLinkClass(false)}
+                            href={`/api/tasks/batch-runs/${activeBatchRun.id}/items/${item.id}/download?workspaceId=${workspaceId}`}
+                          >
+                            导出实例
+                          </a>
+                          {primaryResult?.requestId ? (
+                            <span className="truncate rounded-full bg-[#f4f4f5] px-2.5 py-1 text-[11px] text-muted-foreground">
+                              {primaryResult.requestId}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
             ) : paginatedRuns.length === 0 ? (
               <div className="mt-4 rounded-[18px] border border-dashed border-black/8 bg-[#fcfcfd] px-4 py-8 text-center text-sm text-muted-foreground">
                 当前筛选范围下还没有可预览的结果。

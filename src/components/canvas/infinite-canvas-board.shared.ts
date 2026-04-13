@@ -1,7 +1,114 @@
-import { AudioLines, Clapperboard, ImageIcon, Type, Video } from "lucide-react";
+import { AudioLines, Boxes, Clapperboard, GitBranch, ImageIcon, Type, Video } from "lucide-react";
 
-export type CanvasNodeType = "text" | "image" | "video" | "audio" | "storyboard" | "batch_result";
-export type CanvasConnectionSemantic = "prompt" | "reference_image";
+export type CanvasNodeType =
+  | "text"
+  | "image"
+  | "video"
+  | "audio"
+  | "storyboard"
+  | "input"
+  | "combination"
+  | "batch_result";
+export type CanvasGenerationNodeType = "text" | "image" | "video" | "audio" | "storyboard";
+export type CanvasRunnableNodeType = "text" | "image" | "video" | "storyboard";
+export type CanvasConnectionSemantic =
+  | "prompt"
+  | "reference_image"
+  | "input_source"
+  | "combination_context"
+  | "result_stream";
+export type NodeRuntimeStatus = "idle" | "queued" | "processing" | "succeeded" | "failed";
+export type CanvasInputSourceType = "text" | "image" | "video";
+export type CanvasCombinationMode = "zip" | "cartesian" | "anchor" | "custom_mapping";
+export type CanvasCombinationGovernanceAction = "warn" | "confirm" | "manual_approval" | "reject";
+
+export type CanvasInputNodeSettings = {
+  sourceType: CanvasInputSourceType;
+  allowMixedSources: boolean;
+};
+
+export type CanvasCombinationNodeSettings = {
+  mode: CanvasCombinationMode;
+  anchorInputNodeId: string | null;
+  sampleSize: number;
+};
+
+export type CanvasInputNodeItemSummary = {
+  id: string;
+  label: string;
+  sourceType: CanvasInputSourceType;
+  enabled: boolean;
+  sortOrder: number;
+};
+
+export type CanvasCombinationSourceSummary = {
+  inputNodeId: string;
+  inputNodeTitle: string;
+  sourceType: CanvasInputSourceType;
+  totalItems: number;
+  enabledItems: number;
+};
+
+export type CanvasCombinationSample = {
+  id: string;
+  label: string;
+  bindings: Array<{
+    inputNodeId: string;
+    itemId: string;
+    itemLabel: string;
+    sourceType: CanvasInputSourceType;
+  }>;
+};
+
+export type CanvasCombinationPlanSummary = {
+  mode: CanvasCombinationMode;
+  inputSourceCount: number;
+  estimatedCombinationCount: number;
+  governanceSignals: CanvasCombinationGovernanceAction[];
+  sampleLabels: string[];
+};
+
+export type CanvasCombinationPlanDetail = CanvasCombinationPlanSummary & {
+  sources: CanvasCombinationSourceSummary[];
+  samples: CanvasCombinationSample[];
+};
+
+export type CanvasNodeOutputSummary =
+  | {
+      kind: "input_collection";
+      sourceType: CanvasInputSourceType;
+      totalItems: number;
+      enabledItems: number;
+      sampleLabels: string[];
+    }
+  | ({
+      kind: "combination_plan";
+    } & CanvasCombinationPlanSummary)
+  | {
+      kind: "generic";
+      label: string;
+      description?: string;
+    };
+
+export type CanvasNodeOutputSnapshot = {
+  taskId?: string;
+  outputType?: "text" | "image" | "video" | "audio" | "json" | "input_summary" | "combination_summary";
+  content?: string;
+  assets?: Array<{
+    assetId: string;
+    assetType: "image" | "video" | "audio";
+    url: string;
+    mimeType?: string;
+    durationMs?: number;
+    width?: number;
+    height?: number;
+  }>;
+  structuredData?: Record<string, unknown>;
+  summary?: CanvasNodeOutputSummary | null;
+  detail?: CanvasCombinationPlanDetail | Record<string, unknown> | null;
+  generatedAt?: string;
+  [key: string]: unknown;
+};
 
 export type CanvasNodeReferenceAsset = {
   id: string;
@@ -44,14 +151,14 @@ export type InstructionPresetOption = {
 
 export type CanvasNode = {
   id: string;
-  type: string;
+  type: CanvasNodeType;
   title: string;
-  status: string;
+  status: NodeRuntimeStatus;
   modelKey: string | null;
   promptInput: string | null;
   positionX: string;
   positionY: string;
-  outputSnapshot: Record<string, unknown> | null;
+  outputSnapshot: CanvasNodeOutputSnapshot | null;
   settingsJson: Record<string, unknown> | null;
   resourceRefs: CanvasNodeResourceRefs | null;
   referenceAssets?: CanvasNodeReferenceAsset[];
@@ -110,6 +217,52 @@ export type CanvasBatchRunResult = {
   assetMimeType: string | null;
 };
 
+export type CanvasBatchRunResultIndex = CanvasBatchRunResult & {
+  nodeRunId: string;
+  combinationItemId: string | null;
+  retryCount: number;
+  providerTaskId: string | null;
+};
+
+export type CanvasBatchRunBindingSummary = {
+  inputNodeId: string;
+  inputNodeTitle: string;
+  itemId: string;
+  itemLabel: string;
+  sourceType: CanvasInputSourceType;
+};
+
+export type CanvasBatchRunCombinationItem = {
+  id: string;
+  shardId: string | null;
+  itemIndex: number;
+  stableKey: string;
+  label: string;
+  status: string;
+  bindingSummary: CanvasBatchRunBindingSummary[];
+  inputBindings: Record<string, unknown>[];
+  sourceBatchItemKey: string | null;
+  displayOrder: number | null;
+  attemptCount: number;
+  lastErrorNodeId: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  startedAt: string | Date | null;
+  finishedAt: string | Date | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+  resultIndexes: CanvasBatchRunResultIndex[];
+};
+
+export type CanvasBatchRunItemsPage = {
+  offset: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+  status: string | null;
+  items: CanvasBatchRunCombinationItem[];
+};
+
 export type CanvasBatchRunSummary = {
   id: string;
   mode: string;
@@ -120,12 +273,20 @@ export type CanvasBatchRunSummary = {
   completedNodeRunCount: number;
   succeededNodeRunCount: number;
   failedNodeRunCount: number;
+  totalCombinationCount?: number | null;
+  completedCombinationCount?: number | null;
+  succeededCombinationCount?: number | null;
+  failedCombinationCount?: number | null;
   selectedNodesJson: CanvasBatchRunNode[];
+  combinationPlanSummary?: CanvasCombinationPlanSummary | null;
   createdAt: string | Date;
   updatedAt: string | Date;
 };
 
 export type CanvasBatchRunDetail = CanvasBatchRunSummary & {
+  planId?: string | null;
+  combinationPlanDetail?: CanvasCombinationPlanDetail | null;
+  itemsPage?: CanvasBatchRunItemsPage | null;
   runs: CanvasBatchRunResult[];
 };
 
@@ -192,6 +353,17 @@ export type StoryboardShot = {
   suggestedAssets: StoryboardShotSuggestedAssets;
 };
 
+export const DEFAULT_INPUT_NODE_SETTINGS: CanvasInputNodeSettings = {
+  sourceType: "text",
+  allowMixedSources: false,
+};
+
+export const DEFAULT_COMBINATION_NODE_SETTINGS: CanvasCombinationNodeSettings = {
+  mode: "zip",
+  anchorInputNodeId: null,
+  sampleSize: 3,
+};
+
 export type QuickCreateOption = {
   label: string;
   value: CanvasNodeType;
@@ -223,7 +395,7 @@ export const IMAGE_NODE_MAX_HEIGHT = 320;
 export const VIDEO_NODE_WIDTH = 300;
 export const VIDEO_NODE_HEIGHT = 180;
 export const BATCH_RESULT_NODE_WIDTH = 320;
-export const BATCH_RESULT_NODE_HEIGHT = 220;
+export const BATCH_RESULT_NODE_HEIGHT = 360;
 export const MIN_ZOOM = 0.1;
 export const MAX_ZOOM = 4;
 export const TEXT_GENERATE_COOLDOWN_MS = 4000;
@@ -249,6 +421,22 @@ export const DEFAULT_STORYBOARD_NODE_SETTINGS: StoryboardNodeSettings = {
 };
 
 export const quickCreateOptions: QuickCreateOption[] = [
+  {
+    label: "输入源",
+    value: "input",
+    icon: Boxes,
+    tint: "from-sky-100 to-cyan-50",
+    lightTint: "from-sky-100 to-cyan-50",
+    description: "文本、图片、视频集合",
+  },
+  {
+    label: "组合",
+    value: "combination",
+    icon: GitBranch,
+    tint: "from-indigo-100 to-blue-50",
+    lightTint: "from-indigo-100 to-blue-50",
+    description: "组合模式、估算与计划",
+  },
   {
     label: "文本",
     value: "text",
@@ -324,6 +512,39 @@ export function getCanvasBatchRunTitle(batchRun: { selectedNodesJson: CanvasBatc
   return labels.length > 0 ? labels.join("、") : "未命名节点组";
 }
 
+export function getPrimaryBatchRunResultIndex(item: CanvasBatchRunCombinationItem | null | undefined) {
+  if (!item || item.resultIndexes.length === 0) {
+    return null;
+  }
+
+  const succeededWithPreview =
+    item.resultIndexes.find(
+      (result) => result.status === "succeeded" && (Boolean(result.assetFileUrl) || Boolean(result.contentText)),
+    ) ?? null;
+
+  if (succeededWithPreview) {
+    return succeededWithPreview;
+  }
+
+  return item.resultIndexes.find((result) => result.status === "failed") ?? item.resultIndexes[0] ?? null;
+}
+
+export function formatBatchRunBindingSummary(bindings: CanvasBatchRunBindingSummary[] | null | undefined, limit = 3) {
+  if (!bindings || bindings.length === 0) {
+    return "未绑定输入";
+  }
+
+  const labels = bindings
+    .map((binding) => `${binding.inputNodeTitle || "输入源"}: ${binding.itemLabel || binding.itemId}`)
+    .filter(Boolean);
+
+  if (labels.length <= limit) {
+    return labels.join(" / ");
+  }
+
+  return `${labels.slice(0, limit).join(" / ")} 等 ${labels.length} 项`;
+}
+
 export function formatCanvasDateTime(value: string | Date | null) {
   if (!value) {
     return "—";
@@ -367,10 +588,141 @@ export function normalizeResourceRefs(value: Partial<CanvasNodeResourceRefs> | n
   };
 }
 
+export function isCanvasGenerationNodeType(nodeType: string): nodeType is CanvasGenerationNodeType {
+  return (
+    nodeType === "text" ||
+    nodeType === "image" ||
+    nodeType === "video" ||
+    nodeType === "audio" ||
+    nodeType === "storyboard"
+  );
+}
+
+export function canCanvasNodeRun(nodeType: string): nodeType is CanvasRunnableNodeType {
+  return nodeType === "text" || nodeType === "image" || nodeType === "video" || nodeType === "storyboard";
+}
+
+export function getDefaultCanvasNodeSettings(type: CanvasNodeType): Record<string, unknown> | undefined {
+  if (type === "storyboard") {
+    return serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
+  }
+
+  if (type === "input") {
+    return {
+      ...DEFAULT_INPUT_NODE_SETTINGS,
+    };
+  }
+
+  if (type === "combination") {
+    return {
+      ...DEFAULT_COMBINATION_NODE_SETTINGS,
+    };
+  }
+
+  return undefined;
+}
+
+export function createInitialCanvasNodeOutputSnapshot(type: CanvasNodeType): CanvasNodeOutputSnapshot | undefined {
+  if (type === "input") {
+    return {
+      outputType: "input_summary",
+      summary: {
+        kind: "input_collection",
+        sourceType: DEFAULT_INPUT_NODE_SETTINGS.sourceType,
+        totalItems: 0,
+        enabledItems: 0,
+        sampleLabels: [],
+      },
+      detail: {
+        items: [] as CanvasInputNodeItemSummary[],
+      },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (type === "combination") {
+    return {
+      outputType: "combination_summary",
+      summary: {
+        kind: "combination_plan",
+        mode: DEFAULT_COMBINATION_NODE_SETTINGS.mode,
+        inputSourceCount: 0,
+        estimatedCombinationCount: 0,
+        governanceSignals: [],
+        sampleLabels: [],
+      },
+      detail: {
+        mode: DEFAULT_COMBINATION_NODE_SETTINGS.mode,
+        inputSourceCount: 0,
+        estimatedCombinationCount: 0,
+        governanceSignals: [],
+        sampleLabels: [],
+        sources: [],
+        samples: [],
+      },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  return undefined;
+}
+
+export function getInputNodeOutputSummary(outputSnapshot: CanvasNodeOutputSnapshot | null | undefined) {
+  const summary = outputSnapshot?.summary;
+
+  if (!summary || summary.kind !== "input_collection") {
+    return null;
+  }
+
+  return summary;
+}
+
+export function getCombinationPlanSummary(outputSnapshot: CanvasNodeOutputSnapshot | null | undefined) {
+  const summary = outputSnapshot?.summary;
+
+  if (!summary || summary.kind !== "combination_plan") {
+    return null;
+  }
+
+  return summary;
+}
+
+export function getCombinationPlanDetail(outputSnapshot: CanvasNodeOutputSnapshot | null | undefined) {
+  const detail = outputSnapshot?.detail;
+
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+
+  const detailRecord = detail as Partial<CanvasCombinationPlanDetail>;
+
+  if (
+    typeof detailRecord.mode !== "string" ||
+    typeof detailRecord.inputSourceCount !== "number" ||
+    typeof detailRecord.estimatedCombinationCount !== "number"
+  ) {
+    return null;
+  }
+
+  return detailRecord as CanvasCombinationPlanDetail;
+}
+
 export function getCanvasConnectionSemantic(
   sourceType: string,
   targetType: string,
 ): CanvasConnectionSemantic | null {
+  if (sourceType === "input" && targetType === "combination") {
+    return "input_source";
+  }
+
+  if (sourceType === "combination" && isCanvasGenerationNodeType(targetType)) {
+    return "combination_context";
+  }
+
+  if (isCanvasGenerationNodeType(sourceType) && targetType === "batch_result") {
+    return "result_stream";
+  }
+
   if (sourceType === "image" && targetType === "storyboard") {
     return "prompt";
   }
@@ -400,19 +752,41 @@ export function getCanvasConnectionLabel(sourceType: string, targetType: string)
     return "参考图";
   }
 
+  if (semantic === "input_source") {
+    return "输入源";
+  }
+
+  if (semantic === "combination_context") {
+    return "组合上下文";
+  }
+
+  if (semantic === "result_stream") {
+    return "结果汇总";
+  }
+
   return "连线";
 }
 
 export function canCanvasNodeStartConnection(nodeType: string) {
-  return nodeType === "text" || nodeType === "storyboard" || nodeType === "image";
-}
-
-export function canCanvasNodeReceiveConnection(nodeType: string) {
   return (
+    nodeType === "input" ||
+    nodeType === "combination" ||
     nodeType === "text" ||
     nodeType === "storyboard" ||
     nodeType === "image" ||
     nodeType === "video" ||
+    nodeType === "audio"
+  );
+}
+
+export function canCanvasNodeReceiveConnection(nodeType: string) {
+  return (
+    nodeType === "combination" ||
+    nodeType === "text" ||
+    nodeType === "storyboard" ||
+    nodeType === "image" ||
+    nodeType === "video" ||
+    nodeType === "audio" ||
     nodeType === "batch_result"
   );
 }

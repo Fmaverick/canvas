@@ -1,5 +1,8 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -375,6 +378,147 @@ export const workflowTemplates = pgTable(
   ],
 );
 
+export const tableNodeRows = pgTable(
+  "table_node_rows",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    rowOrder: integer("row_order").notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("idle"),
+    sourceType: varchar("source_type", { length: 20 }).notNull().default("manual"),
+    metaJson: jsonb("meta_json").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("table_node_rows_node_order_unique").on(table.nodeId, table.rowOrder),
+    uniqueIndex("table_node_rows_workspace_canvas_node_id_unique").on(table.workspaceId, table.canvasId, table.nodeId, table.id),
+    index("table_node_rows_node_order_idx").on(table.nodeId, table.rowOrder),
+    index("table_node_rows_workspace_node_status_idx").on(table.workspaceId, table.nodeId, table.status),
+    check("table_node_rows_order_non_negative", sql`${table.rowOrder} >= 0`),
+  ],
+);
+
+export const tableNodeColumns = pgTable(
+  "table_node_columns",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    key: varchar("key", { length: 100 }).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    kind: varchar("kind", { length: 30 }).notNull(),
+    columnOrder: integer("column_order").notNull(),
+    required: boolean("required").notNull().default(false),
+    dependencyColumnIds: jsonb("dependency_column_ids").$type<string[]>().notNull().default([]),
+    configJson: jsonb("config_json").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("table_node_columns_node_key_unique").on(table.nodeId, table.key),
+    uniqueIndex("table_node_columns_node_order_unique").on(table.nodeId, table.columnOrder),
+    uniqueIndex("table_node_columns_workspace_canvas_node_id_unique").on(table.workspaceId, table.canvasId, table.nodeId, table.id),
+    index("table_node_columns_node_order_idx").on(table.nodeId, table.columnOrder),
+    index("table_node_columns_workspace_node_kind_idx").on(table.workspaceId, table.nodeId, table.kind),
+    check("table_node_columns_order_non_negative", sql`${table.columnOrder} >= 0`),
+    check("table_node_columns_dependency_ids_array", sql`jsonb_typeof(${table.dependencyColumnIds}) = 'array'`),
+  ],
+);
+
+export const tableNodeCells = pgTable(
+  "table_node_cells",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    rowId: uuid("row_id").notNull(),
+    columnId: uuid("column_id").notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("idle"),
+    inputSnapshot: jsonb("input_snapshot").$type<Record<string, unknown>>().notNull().default({}),
+    contentText: text("content_text"),
+    assetId: uuid("asset_id").references(() => assets.id),
+    resultType: varchar("result_type", { length: 20 }),
+    resultMeta: jsonb("result_meta").$type<Record<string, unknown>>().notNull().default({}),
+    latestTaskId: uuid("latest_task_id"),
+    lastErrorCode: varchar("last_error_code", { length: 100 }),
+    lastErrorMessage: text("last_error_message"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("table_node_cells_row_column_unique").on(table.rowId, table.columnId),
+    uniqueIndex("table_node_cells_workspace_canvas_node_id_unique").on(table.workspaceId, table.canvasId, table.nodeId, table.id),
+    index("table_node_cells_node_row_idx").on(table.nodeId, table.rowId),
+    index("table_node_cells_node_column_idx").on(table.nodeId, table.columnId),
+    index("table_node_cells_workspace_node_status_idx").on(table.workspaceId, table.nodeId, table.status),
+    index("table_node_cells_latest_task_idx").on(table.latestTaskId),
+    foreignKey({
+      columns: [table.workspaceId, table.canvasId, table.nodeId, table.rowId],
+      foreignColumns: [tableNodeRows.workspaceId, tableNodeRows.canvasId, tableNodeRows.nodeId, tableNodeRows.id],
+      name: "table_node_cells_row_scope_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.canvasId, table.nodeId, table.columnId],
+      foreignColumns: [tableNodeColumns.workspaceId, tableNodeColumns.canvasId, tableNodeColumns.nodeId, tableNodeColumns.id],
+      name: "table_node_cells_column_scope_fk",
+    }),
+  ],
+);
+
+export const inputNodeItems = pgTable(
+  "input_node_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    stableKey: varchar("stable_key", { length: 160 }).notNull(),
+    sourceType: varchar("source_type", { length: 20 }).notNull(),
+    displayLabel: varchar("display_label", { length: 255 }).notNull(),
+    contentText: text("content_text"),
+    assetId: uuid("asset_id").references(() => assets.id),
+    sourceRefJson: jsonb("source_ref_json").$type<Record<string, unknown>>().notNull().default({}),
+    snapshotJson: jsonb("snapshot_json").$type<Record<string, unknown>>().notNull().default({}),
+    enabled: boolean("enabled").notNull().default(true),
+    sortOrder: integer("sort_order").notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("input_node_items_node_stable_key_unique").on(table.nodeId, table.stableKey),
+    uniqueIndex("input_node_items_node_sort_order_unique").on(table.nodeId, table.sortOrder),
+    index("input_node_items_workspace_node_enabled_idx").on(table.workspaceId, table.nodeId, table.enabled),
+    index("input_node_items_node_source_type_idx").on(table.nodeId, table.sourceType),
+    index("input_node_items_asset_id_idx").on(table.assetId),
+    check("input_node_items_sort_order_non_negative", sql`${table.sortOrder} >= 0`),
+  ],
+);
+
 export const nodeRunBatches = pgTable(
   "node_run_batches",
   {
@@ -389,8 +533,18 @@ export const nodeRunBatches = pgTable(
       .notNull()
       .references(() => users.id),
     mode: varchar("mode", { length: 20 }).notNull(),
+    batchMode: varchar("batch_mode", { length: 30 }).notNull().default("repeat"),
     status: varchar("status", { length: 30 }).notNull().default("processing"),
     requestedRunCount: integer("requested_run_count").notNull().default(1),
+    targetNodeType: varchar("target_node_type", { length: 20 }),
+    deriveStrategy: varchar("derive_strategy", { length: 30 }),
+    templateSnapshotJson: jsonb("template_snapshot_json").$type<Record<string, unknown>>().notNull().default({}),
+    totalCombinationCount: integer("total_combination_count").notNull().default(0),
+    completedCombinationCount: integer("completed_combination_count").notNull().default(0),
+    succeededCombinationCount: integer("succeeded_combination_count").notNull().default(0),
+    failedCombinationCount: integer("failed_combination_count").notNull().default(0),
+    totalShardCount: integer("total_shard_count").notNull().default(0),
+    completedShardCount: integer("completed_shard_count").notNull().default(0),
     totalNodeRunCount: integer("total_node_run_count").notNull().default(0),
     completedNodeRunCount: integer("completed_node_run_count").notNull().default(0),
     succeededNodeRunCount: integer("succeeded_node_run_count").notNull().default(0),
@@ -405,8 +559,137 @@ export const nodeRunBatches = pgTable(
   (table) => [
     index("node_run_batches_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
     index("node_run_batches_canvas_created_at_idx").on(table.canvasId, table.createdAt),
+    index("node_run_batches_batch_mode_status_idx").on(table.batchMode, table.status),
     index("node_run_batches_status_idx").on(table.status),
     index("node_run_batches_result_node_idx").on(table.resultNodeId),
+  ],
+);
+
+export const combinationPlans = pgTable(
+  "combination_plans",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    combinationNodeId: uuid("combination_node_id")
+      .notNull()
+      .references(() => canvasNodes.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    createdBy: uuid("created_by")
+      .notNull()
+      .references(() => users.id),
+    mode: varchar("mode", { length: 30 }).notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("draft"),
+    governanceAction: varchar("governance_action", { length: 30 }),
+    governanceSignalsJson: jsonb("governance_signals_json").$type<string[]>().notNull().default([]),
+    inputNodeIdsJson: jsonb("input_node_ids_json").$type<string[]>().notNull().default([]),
+    inputSnapshotJson: jsonb("input_snapshot_json").$type<Record<string, unknown>>().notNull().default({}),
+    samplePreviewJson: jsonb("sample_preview_json").$type<Record<string, unknown>[]>().notNull().default([]),
+    estimatedCombinationCount: integer("estimated_combination_count").notNull().default(0),
+    totalItemCount: integer("total_item_count").notNull().default(0),
+    completedItemCount: integer("completed_item_count").notNull().default(0),
+    succeededItemCount: integer("succeeded_item_count").notNull().default(0),
+    failedItemCount: integer("failed_item_count").notNull().default(0),
+    totalShardCount: integer("total_shard_count").notNull().default(0),
+    completedShardCount: integer("completed_shard_count").notNull().default(0),
+    succeededShardCount: integer("succeeded_shard_count").notNull().default(0),
+    failedShardCount: integer("failed_shard_count").notNull().default(0),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    lastErrorCode: varchar("last_error_code", { length: 100 }),
+    lastErrorMessage: text("last_error_message"),
+    ...timestamps,
+  },
+  (table) => [
+    index("combination_plans_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
+    index("combination_plans_batch_run_idx").on(table.batchRunId),
+    index("combination_plans_node_status_idx").on(table.combinationNodeId, table.status),
+    index("combination_plans_status_idx").on(table.status),
+  ],
+);
+
+export const combinationShards = pgTable(
+  "combination_shards",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    planId: uuid("plan_id")
+      .notNull()
+      .references(() => combinationPlans.id),
+    shardIndex: integer("shard_index").notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("queued"),
+    itemStartIndex: integer("item_start_index").notNull().default(0),
+    itemEndIndex: integer("item_end_index").notNull().default(0),
+    itemCount: integer("item_count").notNull().default(0),
+    completedItemCount: integer("completed_item_count").notNull().default(0),
+    succeededItemCount: integer("succeeded_item_count").notNull().default(0),
+    failedItemCount: integer("failed_item_count").notNull().default(0),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    lastErrorCode: varchar("last_error_code", { length: 100 }),
+    lastErrorMessage: text("last_error_message"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("combination_shards_plan_shard_index_unique").on(table.planId, table.shardIndex),
+    index("combination_shards_batch_status_idx").on(table.batchRunId, table.status),
+    index("combination_shards_plan_status_idx").on(table.planId, table.status),
+    check("combination_shards_shard_index_non_negative", sql`${table.shardIndex} >= 0`),
+    check("combination_shards_item_start_index_non_negative", sql`${table.itemStartIndex} >= 0`),
+    check("combination_shards_item_end_index_non_negative", sql`${table.itemEndIndex} >= 0`),
+    check("combination_shards_item_count_non_negative", sql`${table.itemCount} >= 0`),
+  ],
+);
+
+export const combinationItems = pgTable(
+  "combination_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id),
+    canvasId: uuid("canvas_id")
+      .notNull()
+      .references(() => canvases.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    planId: uuid("plan_id")
+      .notNull()
+      .references(() => combinationPlans.id),
+    shardId: uuid("shard_id").references(() => combinationShards.id),
+    itemIndex: integer("item_index").notNull(),
+    stableKey: varchar("stable_key", { length: 160 }).notNull(),
+    displayLabel: varchar("display_label", { length: 255 }).notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("queued"),
+    bindingSummaryJson: jsonb("binding_summary_json").$type<Record<string, unknown>[]>().notNull().default([]),
+    inputBindingsJson: jsonb("input_bindings_json").$type<Record<string, unknown>[]>().notNull().default([]),
+    sourceBatchItemKey: varchar("source_batch_item_key", { length: 160 }),
+    displayOrder: integer("display_order"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastErrorNodeId: uuid("last_error_node_id").references(() => canvasNodes.id),
+    lastErrorCode: varchar("last_error_code", { length: 100 }),
+    lastErrorMessage: text("last_error_message"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("combination_items_plan_item_index_unique").on(table.planId, table.itemIndex),
+    uniqueIndex("combination_items_plan_stable_key_unique").on(table.planId, table.stableKey),
+    index("combination_items_batch_status_idx").on(table.batchRunId, table.status),
+    index("combination_items_plan_status_idx").on(table.planId, table.status),
+    index("combination_items_shard_display_order_idx").on(table.shardId, table.displayOrder),
+    check("combination_items_item_index_non_negative", sql`${table.itemIndex} >= 0`),
   ],
 );
 
@@ -424,9 +707,15 @@ export const nodeRuns = pgTable(
       .notNull()
       .references(() => canvasNodes.id),
     batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    combinationPlanId: uuid("combination_plan_id").references(() => combinationPlans.id),
+    combinationItemId: uuid("combination_item_id").references(() => combinationItems.id),
+    combinationShardId: uuid("combination_shard_id").references(() => combinationShards.id),
     taskId: uuid("task_id"),
     requestId: varchar("request_id", { length: 100 }).notNull(),
     runIndex: integer("run_index"),
+    derivedTargetNodeId: uuid("derived_target_node_id").references(() => canvasNodes.id),
+    sourceBatchItemKey: varchar("source_batch_item_key", { length: 160 }),
+    displayOrder: integer("display_order"),
     nodeType: varchar("node_type", { length: 20 }).notNull(),
     nodeTitle: varchar("node_title", { length: 255 }).notNull(),
     status: varchar("status", { length: 20 }).notNull().default("queued"),
@@ -444,6 +733,8 @@ export const nodeRuns = pgTable(
     uniqueIndex("node_runs_request_id_unique").on(table.requestId),
     index("node_runs_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
     index("node_runs_batch_run_idx").on(table.batchRunId, table.runIndex),
+    index("node_runs_combination_item_idx").on(table.combinationItemId, table.nodeId, table.createdAt),
+    index("node_runs_combination_shard_idx").on(table.combinationShardId, table.displayOrder),
     index("node_runs_node_created_at_idx").on(table.nodeId, table.createdAt),
     index("node_runs_status_idx").on(table.status),
   ],
@@ -460,7 +751,15 @@ export const generationTasks = pgTable(
     nodeId: uuid("node_id").references(() => canvasNodes.id),
     nodeRunId: uuid("node_run_id").references(() => nodeRuns.id),
     batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    combinationPlanId: uuid("combination_plan_id").references(() => combinationPlans.id),
+    combinationItemId: uuid("combination_item_id").references(() => combinationItems.id),
+    combinationShardId: uuid("combination_shard_id").references(() => combinationShards.id),
     batchRunIndex: integer("batch_run_index"),
+    sourceBatchItemKey: varchar("source_batch_item_key", { length: 160 }),
+    displayOrder: integer("display_order"),
+    tableRowId: uuid("table_row_id"),
+    tableColumnId: uuid("table_column_id"),
+    tableCellId: uuid("table_cell_id"),
     requestId: varchar("request_id", { length: 100 }).notNull(),
     taskType: varchar("task_type", { length: 20 }).notNull(),
     provider: varchar("provider", { length: 50 }).notNull(),
@@ -483,7 +782,31 @@ export const generationTasks = pgTable(
     index("generation_tasks_workspace_created_at_idx").on(table.workspaceId, table.createdAt),
     index("generation_tasks_status_next_poll_idx").on(table.status, table.nextPollAt),
     index("generation_tasks_provider_task_idx").on(table.provider, table.providerTaskId),
+    index("generation_tasks_combination_item_created_at_idx").on(table.combinationItemId, table.createdAt),
+    index("generation_tasks_combination_shard_created_at_idx").on(table.combinationShardId, table.createdAt),
     index("generation_tasks_node_created_at_idx").on(table.nodeId, table.createdAt),
+    index("generation_tasks_table_cell_created_at_idx").on(table.tableCellId, table.createdAt),
+    index("generation_tasks_table_row_created_at_idx").on(table.tableRowId, table.createdAt),
+    index("generation_tasks_table_column_created_at_idx").on(table.tableColumnId, table.createdAt),
+    foreignKey({
+      columns: [table.workspaceId, table.canvasId, table.nodeId, table.tableRowId],
+      foreignColumns: [tableNodeRows.workspaceId, tableNodeRows.canvasId, tableNodeRows.nodeId, tableNodeRows.id],
+      name: "generation_tasks_table_row_scope_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.canvasId, table.nodeId, table.tableColumnId],
+      foreignColumns: [tableNodeColumns.workspaceId, tableNodeColumns.canvasId, tableNodeColumns.nodeId, tableNodeColumns.id],
+      name: "generation_tasks_table_column_scope_fk",
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.canvasId, table.nodeId, table.tableCellId],
+      foreignColumns: [tableNodeCells.workspaceId, tableNodeCells.canvasId, tableNodeCells.nodeId, tableNodeCells.id],
+      name: "generation_tasks_table_cell_scope_fk",
+    }),
+    check(
+      "generation_tasks_table_cell_requires_scope",
+      sql`${table.tableCellId} is null or (${table.canvasId} is not null and ${table.nodeId} is not null and ${table.tableRowId} is not null and ${table.tableColumnId} is not null)`,
+    ),
   ],
 );
 
@@ -497,13 +820,33 @@ export const taskResults = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id),
+    batchRunId: uuid("batch_run_id").references(() => nodeRunBatches.id),
+    nodeRunId: uuid("node_run_id").references(() => nodeRuns.id),
+    nodeId: uuid("node_id").references(() => canvasNodes.id),
+    combinationPlanId: uuid("combination_plan_id").references(() => combinationPlans.id),
+    combinationItemId: uuid("combination_item_id").references(() => combinationItems.id),
+    combinationShardId: uuid("combination_shard_id").references(() => combinationShards.id),
+    tableCellId: uuid("table_cell_id"),
     resultType: varchar("result_type", { length: 20 }).notNull(),
     contentText: text("content_text"),
     assetId: uuid("asset_id"),
+    sourceBatchItemKey: varchar("source_batch_item_key", { length: 160 }),
+    displayOrder: integer("display_order"),
+    inputBindingSummaryJson: jsonb("input_binding_summary_json").$type<Record<string, unknown>[]>().notNull().default([]),
     meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("task_results_task_id_idx").on(table.taskId), index("task_results_workspace_type_idx").on(table.workspaceId, table.resultType)],
+  (table) => [
+    index("task_results_task_id_idx").on(table.taskId),
+    index("task_results_workspace_type_idx").on(table.workspaceId, table.resultType),
+    index("task_results_combination_item_idx").on(table.combinationItemId, table.nodeId, table.createdAt),
+    index("task_results_table_cell_idx").on(table.tableCellId),
+    foreignKey({
+      columns: [table.workspaceId, table.tableCellId],
+      foreignColumns: [tableNodeCells.workspaceId, tableNodeCells.id],
+      name: "task_results_table_cell_scope_fk",
+    }),
+  ],
 );
 
 export const providerConfigs = pgTable("provider_configs", {
@@ -554,7 +897,15 @@ export const schema = {
   canvasNodes,
   canvasEdges,
   nodeTemplates,
+  workflowTemplates,
+  tableNodeRows,
+  tableNodeColumns,
+  tableNodeCells,
+  inputNodeItems,
   nodeRunBatches,
+  combinationPlans,
+  combinationItems,
+  combinationShards,
   nodeRuns,
   generationTasks,
   taskResults,

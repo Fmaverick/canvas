@@ -1,6 +1,6 @@
 {
-  "id": "1befdbb5-048f-4013-b614-e03aff43af28",
-  "prevId": "3f610f62-3495-43d2-ac2f-874b68b31962",
+  "id": "ddc712b0-1d10-48f5-b6f4-29c6970505d4",
+  "prevId": "1befdbb5-048f-4013-b614-e03aff43af28",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -854,6 +854,962 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.combination_items": {
+      "name": "combination_items",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canvas_id": {
+          "name": "canvas_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_run_id": {
+          "name": "batch_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "plan_id": {
+          "name": "plan_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shard_id": {
+          "name": "shard_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "item_index": {
+          "name": "item_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stable_key": {
+          "name": "stable_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "display_label": {
+          "name": "display_label",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "binding_summary_json": {
+          "name": "binding_summary_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "input_bindings_json": {
+          "name": "input_bindings_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "source_batch_item_key": {
+          "name": "source_batch_item_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "display_order": {
+          "name": "display_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempt_count": {
+          "name": "attempt_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_error_node_id": {
+          "name": "last_error_node_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_code": {
+          "name": "last_error_code",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_message": {
+          "name": "last_error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "combination_items_plan_item_index_unique": {
+          "name": "combination_items_plan_item_index_unique",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "item_index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_items_plan_stable_key_unique": {
+          "name": "combination_items_plan_stable_key_unique",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "stable_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_items_batch_status_idx": {
+          "name": "combination_items_batch_status_idx",
+          "columns": [
+            {
+              "expression": "batch_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_items_plan_status_idx": {
+          "name": "combination_items_plan_status_idx",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_items_shard_display_order_idx": {
+          "name": "combination_items_shard_display_order_idx",
+          "columns": [
+            {
+              "expression": "shard_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "display_order",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "combination_items_workspace_id_workspaces_id_fk": {
+          "name": "combination_items_workspace_id_workspaces_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "workspaces",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_items_canvas_id_canvases_id_fk": {
+          "name": "combination_items_canvas_id_canvases_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "canvases",
+          "columnsFrom": [
+            "canvas_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_items_batch_run_id_node_run_batches_id_fk": {
+          "name": "combination_items_batch_run_id_node_run_batches_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "node_run_batches",
+          "columnsFrom": [
+            "batch_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_items_plan_id_combination_plans_id_fk": {
+          "name": "combination_items_plan_id_combination_plans_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "combination_plans",
+          "columnsFrom": [
+            "plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_items_shard_id_combination_shards_id_fk": {
+          "name": "combination_items_shard_id_combination_shards_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "combination_shards",
+          "columnsFrom": [
+            "shard_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_items_last_error_node_id_canvas_nodes_id_fk": {
+          "name": "combination_items_last_error_node_id_canvas_nodes_id_fk",
+          "tableFrom": "combination_items",
+          "tableTo": "canvas_nodes",
+          "columnsFrom": [
+            "last_error_node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "combination_items_item_index_non_negative": {
+          "name": "combination_items_item_index_non_negative",
+          "value": "\"combination_items\".\"item_index\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.combination_plans": {
+      "name": "combination_plans",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canvas_id": {
+          "name": "canvas_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "combination_node_id": {
+          "name": "combination_node_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_run_id": {
+          "name": "batch_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mode": {
+          "name": "mode",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'draft'"
+        },
+        "governance_action": {
+          "name": "governance_action",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "governance_signals_json": {
+          "name": "governance_signals_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "input_node_ids_json": {
+          "name": "input_node_ids_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "input_snapshot_json": {
+          "name": "input_snapshot_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "sample_preview_json": {
+          "name": "sample_preview_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "estimated_combination_count": {
+          "name": "estimated_combination_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "total_item_count": {
+          "name": "total_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_item_count": {
+          "name": "completed_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "succeeded_item_count": {
+          "name": "succeeded_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_item_count": {
+          "name": "failed_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "total_shard_count": {
+          "name": "total_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_shard_count": {
+          "name": "completed_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "succeeded_shard_count": {
+          "name": "succeeded_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_shard_count": {
+          "name": "failed_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_code": {
+          "name": "last_error_code",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_message": {
+          "name": "last_error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "combination_plans_workspace_created_at_idx": {
+          "name": "combination_plans_workspace_created_at_idx",
+          "columns": [
+            {
+              "expression": "workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_plans_batch_run_idx": {
+          "name": "combination_plans_batch_run_idx",
+          "columns": [
+            {
+              "expression": "batch_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_plans_node_status_idx": {
+          "name": "combination_plans_node_status_idx",
+          "columns": [
+            {
+              "expression": "combination_node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_plans_status_idx": {
+          "name": "combination_plans_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "combination_plans_workspace_id_workspaces_id_fk": {
+          "name": "combination_plans_workspace_id_workspaces_id_fk",
+          "tableFrom": "combination_plans",
+          "tableTo": "workspaces",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_plans_canvas_id_canvases_id_fk": {
+          "name": "combination_plans_canvas_id_canvases_id_fk",
+          "tableFrom": "combination_plans",
+          "tableTo": "canvases",
+          "columnsFrom": [
+            "canvas_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_plans_combination_node_id_canvas_nodes_id_fk": {
+          "name": "combination_plans_combination_node_id_canvas_nodes_id_fk",
+          "tableFrom": "combination_plans",
+          "tableTo": "canvas_nodes",
+          "columnsFrom": [
+            "combination_node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_plans_batch_run_id_node_run_batches_id_fk": {
+          "name": "combination_plans_batch_run_id_node_run_batches_id_fk",
+          "tableFrom": "combination_plans",
+          "tableTo": "node_run_batches",
+          "columnsFrom": [
+            "batch_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_plans_created_by_users_id_fk": {
+          "name": "combination_plans_created_by_users_id_fk",
+          "tableFrom": "combination_plans",
+          "tableTo": "users",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.combination_shards": {
+      "name": "combination_shards",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canvas_id": {
+          "name": "canvas_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_run_id": {
+          "name": "batch_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "plan_id": {
+          "name": "plan_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shard_index": {
+          "name": "shard_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "item_start_index": {
+          "name": "item_start_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "item_end_index": {
+          "name": "item_end_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "item_count": {
+          "name": "item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_item_count": {
+          "name": "completed_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "succeeded_item_count": {
+          "name": "succeeded_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_item_count": {
+          "name": "failed_item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "scheduled_at": {
+          "name": "scheduled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_code": {
+          "name": "last_error_code",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error_message": {
+          "name": "last_error_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "combination_shards_plan_shard_index_unique": {
+          "name": "combination_shards_plan_shard_index_unique",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "shard_index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_shards_batch_status_idx": {
+          "name": "combination_shards_batch_status_idx",
+          "columns": [
+            {
+              "expression": "batch_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "combination_shards_plan_status_idx": {
+          "name": "combination_shards_plan_status_idx",
+          "columns": [
+            {
+              "expression": "plan_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "combination_shards_workspace_id_workspaces_id_fk": {
+          "name": "combination_shards_workspace_id_workspaces_id_fk",
+          "tableFrom": "combination_shards",
+          "tableTo": "workspaces",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_shards_canvas_id_canvases_id_fk": {
+          "name": "combination_shards_canvas_id_canvases_id_fk",
+          "tableFrom": "combination_shards",
+          "tableTo": "canvases",
+          "columnsFrom": [
+            "canvas_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_shards_batch_run_id_node_run_batches_id_fk": {
+          "name": "combination_shards_batch_run_id_node_run_batches_id_fk",
+          "tableFrom": "combination_shards",
+          "tableTo": "node_run_batches",
+          "columnsFrom": [
+            "batch_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "combination_shards_plan_id_combination_plans_id_fk": {
+          "name": "combination_shards_plan_id_combination_plans_id_fk",
+          "tableFrom": "combination_shards",
+          "tableTo": "combination_plans",
+          "columnsFrom": [
+            "plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "combination_shards_shard_index_non_negative": {
+          "name": "combination_shards_shard_index_non_negative",
+          "value": "\"combination_shards\".\"shard_index\" >= 0"
+        },
+        "combination_shards_item_start_index_non_negative": {
+          "name": "combination_shards_item_start_index_non_negative",
+          "value": "\"combination_shards\".\"item_start_index\" >= 0"
+        },
+        "combination_shards_item_end_index_non_negative": {
+          "name": "combination_shards_item_end_index_non_negative",
+          "value": "\"combination_shards\".\"item_end_index\" >= 0"
+        },
+        "combination_shards_item_count_non_negative": {
+          "name": "combination_shards_item_count_non_negative",
+          "value": "\"combination_shards\".\"item_count\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.generation_tasks": {
       "name": "generation_tasks",
       "schema": "",
@@ -895,8 +1851,38 @@
           "primaryKey": false,
           "notNull": false
         },
+        "combination_plan_id": {
+          "name": "combination_plan_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_item_id": {
+          "name": "combination_item_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_shard_id": {
+          "name": "combination_shard_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "batch_run_index": {
           "name": "batch_run_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_batch_item_key": {
+          "name": "source_batch_item_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "display_order": {
+          "name": "display_order",
           "type": "integer",
           "primaryKey": false,
           "notNull": false
@@ -1108,6 +2094,48 @@
           "method": "btree",
           "with": {}
         },
+        "generation_tasks_combination_item_created_at_idx": {
+          "name": "generation_tasks_combination_item_created_at_idx",
+          "columns": [
+            {
+              "expression": "combination_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "generation_tasks_combination_shard_created_at_idx": {
+          "name": "generation_tasks_combination_shard_created_at_idx",
+          "columns": [
+            {
+              "expression": "combination_shard_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "generation_tasks_node_created_at_idx": {
           "name": "generation_tasks_node_created_at_idx",
           "columns": [
@@ -1259,6 +2287,45 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
+        "generation_tasks_combination_plan_id_combination_plans_id_fk": {
+          "name": "generation_tasks_combination_plan_id_combination_plans_id_fk",
+          "tableFrom": "generation_tasks",
+          "tableTo": "combination_plans",
+          "columnsFrom": [
+            "combination_plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "generation_tasks_combination_item_id_combination_items_id_fk": {
+          "name": "generation_tasks_combination_item_id_combination_items_id_fk",
+          "tableFrom": "generation_tasks",
+          "tableTo": "combination_items",
+          "columnsFrom": [
+            "combination_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "generation_tasks_combination_shard_id_combination_shards_id_fk": {
+          "name": "generation_tasks_combination_shard_id_combination_shards_id_fk",
+          "tableFrom": "generation_tasks",
+          "tableTo": "combination_shards",
+          "columnsFrom": [
+            "combination_shard_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "generation_tasks_table_row_scope_fk": {
           "name": "generation_tasks_table_row_scope_fk",
           "tableFrom": "generation_tasks",
@@ -1324,6 +2391,279 @@
         "generation_tasks_table_cell_requires_scope": {
           "name": "generation_tasks_table_cell_requires_scope",
           "value": "\"generation_tasks\".\"table_cell_id\" is null or (\"generation_tasks\".\"canvas_id\" is not null and \"generation_tasks\".\"node_id\" is not null and \"generation_tasks\".\"table_row_id\" is not null and \"generation_tasks\".\"table_column_id\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.input_node_items": {
+      "name": "input_node_items",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canvas_id": {
+          "name": "canvas_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "node_id": {
+          "name": "node_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stable_key": {
+          "name": "stable_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_type": {
+          "name": "source_type",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "display_label": {
+          "name": "display_label",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_text": {
+          "name": "content_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_ref_json": {
+          "name": "source_ref_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "snapshot_json": {
+          "name": "snapshot_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "sort_order": {
+          "name": "sort_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "input_node_items_node_stable_key_unique": {
+          "name": "input_node_items_node_stable_key_unique",
+          "columns": [
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "stable_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "input_node_items_node_sort_order_unique": {
+          "name": "input_node_items_node_sort_order_unique",
+          "columns": [
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sort_order",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "input_node_items_workspace_node_enabled_idx": {
+          "name": "input_node_items_workspace_node_enabled_idx",
+          "columns": [
+            {
+              "expression": "workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "enabled",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "input_node_items_node_source_type_idx": {
+          "name": "input_node_items_node_source_type_idx",
+          "columns": [
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "input_node_items_asset_id_idx": {
+          "name": "input_node_items_asset_id_idx",
+          "columns": [
+            {
+              "expression": "asset_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "input_node_items_workspace_id_workspaces_id_fk": {
+          "name": "input_node_items_workspace_id_workspaces_id_fk",
+          "tableFrom": "input_node_items",
+          "tableTo": "workspaces",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "input_node_items_canvas_id_canvases_id_fk": {
+          "name": "input_node_items_canvas_id_canvases_id_fk",
+          "tableFrom": "input_node_items",
+          "tableTo": "canvases",
+          "columnsFrom": [
+            "canvas_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "input_node_items_node_id_canvas_nodes_id_fk": {
+          "name": "input_node_items_node_id_canvas_nodes_id_fk",
+          "tableFrom": "input_node_items",
+          "tableTo": "canvas_nodes",
+          "columnsFrom": [
+            "node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "input_node_items_asset_id_assets_id_fk": {
+          "name": "input_node_items_asset_id_assets_id_fk",
+          "tableFrom": "input_node_items",
+          "tableTo": "assets",
+          "columnsFrom": [
+            "asset_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "input_node_items_sort_order_non_negative": {
+          "name": "input_node_items_sort_order_non_negative",
+          "value": "\"input_node_items\".\"sort_order\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -1862,6 +3202,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "batch_mode": {
+          "name": "batch_mode",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'repeat'"
+        },
         "status": {
           "name": "status",
           "type": "varchar(30)",
@@ -1875,6 +3222,67 @@
           "primaryKey": false,
           "notNull": true,
           "default": 1
+        },
+        "target_node_type": {
+          "name": "target_node_type",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "derive_strategy": {
+          "name": "derive_strategy",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "template_snapshot_json": {
+          "name": "template_snapshot_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "total_combination_count": {
+          "name": "total_combination_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_combination_count": {
+          "name": "completed_combination_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "succeeded_combination_count": {
+          "name": "succeeded_combination_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_combination_count": {
+          "name": "failed_combination_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "total_shard_count": {
+          "name": "total_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_shard_count": {
+          "name": "completed_shard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "total_node_run_count": {
           "name": "total_node_run_count",
@@ -1965,6 +3373,27 @@
             },
             {
               "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "node_run_batches_batch_mode_status_idx": {
+          "name": "node_run_batches_batch_mode_status_idx",
+          "columns": [
+            {
+              "expression": "batch_mode",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2101,6 +3530,24 @@
           "primaryKey": false,
           "notNull": false
         },
+        "combination_plan_id": {
+          "name": "combination_plan_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_item_id": {
+          "name": "combination_item_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_shard_id": {
+          "name": "combination_shard_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "task_id": {
           "name": "task_id",
           "type": "uuid",
@@ -2115,6 +3562,24 @@
         },
         "run_index": {
           "name": "run_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "derived_target_node_id": {
+          "name": "derived_target_node_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_batch_item_key": {
+          "name": "source_batch_item_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "display_order": {
+          "name": "display_order",
           "type": "integer",
           "primaryKey": false,
           "notNull": false
@@ -2260,6 +3725,54 @@
           "method": "btree",
           "with": {}
         },
+        "node_runs_combination_item_idx": {
+          "name": "node_runs_combination_item_idx",
+          "columns": [
+            {
+              "expression": "combination_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "node_runs_combination_shard_idx": {
+          "name": "node_runs_combination_shard_idx",
+          "columns": [
+            {
+              "expression": "combination_shard_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "display_order",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "node_runs_node_created_at_idx": {
           "name": "node_runs_node_created_at_idx",
           "columns": [
@@ -2343,6 +3856,58 @@
           "tableTo": "node_run_batches",
           "columnsFrom": [
             "batch_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "node_runs_combination_plan_id_combination_plans_id_fk": {
+          "name": "node_runs_combination_plan_id_combination_plans_id_fk",
+          "tableFrom": "node_runs",
+          "tableTo": "combination_plans",
+          "columnsFrom": [
+            "combination_plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "node_runs_combination_item_id_combination_items_id_fk": {
+          "name": "node_runs_combination_item_id_combination_items_id_fk",
+          "tableFrom": "node_runs",
+          "tableTo": "combination_items",
+          "columnsFrom": [
+            "combination_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "node_runs_combination_shard_id_combination_shards_id_fk": {
+          "name": "node_runs_combination_shard_id_combination_shards_id_fk",
+          "tableFrom": "node_runs",
+          "tableTo": "combination_shards",
+          "columnsFrom": [
+            "combination_shard_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "node_runs_derived_target_node_id_canvas_nodes_id_fk": {
+          "name": "node_runs_derived_target_node_id_canvas_nodes_id_fk",
+          "tableFrom": "node_runs",
+          "tableTo": "canvas_nodes",
+          "columnsFrom": [
+            "derived_target_node_id"
           ],
           "columnsTo": [
             "id"
@@ -3714,6 +5279,42 @@
           "primaryKey": false,
           "notNull": true
         },
+        "batch_run_id": {
+          "name": "batch_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "node_run_id": {
+          "name": "node_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "node_id": {
+          "name": "node_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_plan_id": {
+          "name": "combination_plan_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_item_id": {
+          "name": "combination_item_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "combination_shard_id": {
+          "name": "combination_shard_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "table_cell_id": {
           "name": "table_cell_id",
           "type": "uuid",
@@ -3737,6 +5338,25 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "source_batch_item_key": {
+          "name": "source_batch_item_key",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "display_order": {
+          "name": "display_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_binding_summary_json": {
+          "name": "input_binding_summary_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
         },
         "meta": {
           "name": "meta",
@@ -3790,6 +5410,33 @@
           "method": "btree",
           "with": {}
         },
+        "task_results_combination_item_idx": {
+          "name": "task_results_combination_item_idx",
+          "columns": [
+            {
+              "expression": "combination_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "node_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "task_results_table_cell_idx": {
           "name": "task_results_table_cell_idx",
           "columns": [
@@ -3826,6 +5473,84 @@
           "tableTo": "workspaces",
           "columnsFrom": [
             "workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_batch_run_id_node_run_batches_id_fk": {
+          "name": "task_results_batch_run_id_node_run_batches_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "node_run_batches",
+          "columnsFrom": [
+            "batch_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_node_run_id_node_runs_id_fk": {
+          "name": "task_results_node_run_id_node_runs_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "node_runs",
+          "columnsFrom": [
+            "node_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_node_id_canvas_nodes_id_fk": {
+          "name": "task_results_node_id_canvas_nodes_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "canvas_nodes",
+          "columnsFrom": [
+            "node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_combination_plan_id_combination_plans_id_fk": {
+          "name": "task_results_combination_plan_id_combination_plans_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "combination_plans",
+          "columnsFrom": [
+            "combination_plan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_combination_item_id_combination_items_id_fk": {
+          "name": "task_results_combination_item_id_combination_items_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "combination_items",
+          "columnsFrom": [
+            "combination_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "task_results_combination_shard_id_combination_shards_id_fk": {
+          "name": "task_results_combination_shard_id_combination_shards_id_fk",
+          "tableFrom": "task_results",
+          "tableTo": "combination_shards",
+          "columnsFrom": [
+            "combination_shard_id"
           ],
           "columnsTo": [
             "id"

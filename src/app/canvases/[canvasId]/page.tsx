@@ -8,7 +8,11 @@ import { listInstructionPresets } from "@/application/services/instruction-prese
 import { listLibraryItems } from "@/application/services/library-item-service";
 import { listNodeRunBatches, listTasks } from "@/application/services/task-service";
 import { InfiniteCanvasBoard } from "@/components/canvas/infinite-canvas-board";
-import { normalizeResourceRefs } from "@/components/canvas/infinite-canvas-board.shared";
+import {
+  normalizeResourceRefs,
+  type CanvasBatchRunSummary,
+  type CanvasNode,
+} from "@/components/canvas/infinite-canvas-board.shared";
 import { Badge } from "@/components/ui/badge";
 
 type CanvasDetailPageProps = {
@@ -190,7 +194,8 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
   const normalizedNodes = canvas.nodes.map((node) => ({
     ...node,
     resourceRefs: normalizeResourceRefs(node.resourceRefs),
-  }));
+  })) as CanvasNode[];
+  const normalizedBatchRuns = batchRunSummaries as CanvasBatchRunSummary[];
 
   return (
     <main className="min-h-screen bg-muted/30 text-foreground">
@@ -203,7 +208,7 @@ export default async function CanvasDetailPage({ params, searchParams }: CanvasD
         </Link>
       </div>
       <InfiniteCanvasBoard
-        batchRuns={batchRunSummaries}
+        batchRuns={normalizedBatchRuns}
         canEdit={canEdit}
         canGenerate={canGenerate}
         canvasId={canvas.id}

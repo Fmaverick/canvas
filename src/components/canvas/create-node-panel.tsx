@@ -4,6 +4,11 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import {
+  createInitialCanvasNodeOutputSnapshot,
+  getDefaultCanvasNodeSettings,
+  type CanvasNodeType,
+} from "@/components/canvas/infinite-canvas-board.shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,7 +20,7 @@ type CreateNodePanelProps = {
   canvasId: string;
   defaultPositionX?: number;
   defaultPositionY?: number;
-  defaultType?: "text" | "image" | "video" | "audio" | "storyboard";
+  defaultType?: CanvasNodeType;
   compact?: boolean;
   tone?: "light" | "dark";
   onCreated?: () => void;
@@ -32,7 +37,7 @@ export function CreateNodePanel({
   onCreated,
 }: CreateNodePanelProps) {
   const router = useRouter();
-  const [type, setType] = useState<"text" | "image" | "video" | "audio" | "storyboard">(defaultType);
+  const [type, setType] = useState<CanvasNodeType>(defaultType);
   const [title, setTitle] = useState("");
   const [promptInput, setPromptInput] = useState("");
   const [modelKey, setModelKey] = useState("");
@@ -61,6 +66,8 @@ export function CreateNodePanel({
           title: title.trim(),
           promptInput: promptInput.trim() || undefined,
           modelKey: modelKey.trim() || undefined,
+          settingsJson: getDefaultCanvasNodeSettings(type),
+          outputSnapshot: createInitialCanvasNodeOutputSnapshot(type),
           positionX: Number(positionX),
           positionY: Number(positionY),
         }),
@@ -102,6 +109,8 @@ export function CreateNodePanel({
           value={type}
           onChange={(event) => setType(event.target.value as typeof type)}
         >
+          <option value="input">Input</option>
+          <option value="combination">Combination</option>
           <option value="text">Text</option>
           <option value="storyboard">Storyboard</option>
           <option value="image">Image</option>

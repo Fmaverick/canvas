@@ -83,11 +83,148 @@ const resourceRefsSchema = z.object({
   assetIds: z.array(z.uuid()).default([]),
 });
 
+const generationNodeTypes = new Set(["text", "image", "video", "audio", "storyboard"]);
+
+function getDefaultNodeSettings(type: string) {
+  if (type === "storyboard") {
+    return {
+      generationMode: "smart_storyboard",
+      shotCount: 6,
+      responseFormat: "json",
+      templateFile: "shotOutFormat.md",
+    };
+  }
+
+  if (type === "input") {
+    return {
+      sourceType: "text",
+      allowMixedSources: false,
+    };
+  }
+
+  if (type === "combination") {
+    return {
+      mode: "zip",
+      anchorInputNodeId: null,
+      sampleSize: 3,
+    };
+  }
+
+  return {};
+}
+
+function getInitialNodeOutputSnapshot(type: string) {
+  if (type === "input") {
+    return {
+      outputType: "input_summary",
+      summary: {
+        kind: "input_collection",
+        sourceType: "text",
+        totalItems: 0,
+        enabledItems: 0,
+        sampleLabels: [],
+      },
+      detail: {
+        items: [],
+      },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (type === "combination") {
+    return {
+      outputType: "combination_summary",
+      summary: {
+        kind: "combination_plan",
+        mode: "zip",
+        inputSourceCount: 0,
+        estimatedCombinationCount: 0,
+        governanceSignals: [],
+        sampleLabels: [],
+      },
+      detail: {
+        mode: "zip",
+        inputSourceCount: 0,
+        estimatedCombinationCount: 0,
+        governanceSignals: [],
+        sampleLabels: [],
+        sources: [],
+        samples: [],
+      },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  return null;
+}
+
+function normalizeNodeSettingsForCreate(type: string, settingsJson: Record<string, unknown> | null | undefined) {
+  if (settingsJson && Object.keys(settingsJson).length > 0) {
+    return settingsJson;
+  }
+
+  return getDefaultNodeSettings(type);
+}
+
+function normalizeNodeOutputSnapshotForCreate(
+  type: string,
+  outputSnapshot: Record<string, unknown> | null | undefined,
+) {
+  if (outputSnapshot && Object.keys(outputSnapshot).length > 0) {
+    return outputSnapshot;
+  }
+
+  return getInitialNodeOutputSnapshot(type);
+}
+
+function getCanvasConnectionSemantic(sourceType: string, targetType: string) {
+  if (sourceType === "input" && targetType === "combination") {
+    return "input_source";
+  }
+
+  if (sourceType === "combination" && generationNodeTypes.has(targetType)) {
+    return "combination_context";
+  }
+
+  if (generationNodeTypes.has(sourceType) && targetType === "batch_result") {
+    return "result_stream";
+  }
+
+  if (sourceType === "image" && targetType === "storyboard") {
+    return "prompt";
+  }
+
+  if (
+    (sourceType === "text" || sourceType === "storyboard") &&
+    (targetType === "text" || targetType === "storyboard" || targetType === "image" || targetType === "video")
+  ) {
+    return "prompt";
+  }
+
+  if (sourceType === "image" && (targetType === "image" || targetType === "video")) {
+    return "reference_image";
+  }
+
+  return null;
+}
+
+function assertSupportedConnection(sourceType: string, targetType: string) {
+  if (getCanvasConnectionSemantic(sourceType, targetType)) {
+    return;
+  }
+
+  throw new ApiError(
+    409,
+    "NODE_GRAPH_INVALID",
+    "Unsupported edge. Allowed flows are input -> combination, combination -> generation node, generation -> batch_result, text/storyboard -> text/storyboard/image/video, and image -> storyboard/image/video.",
+  );
+}
+
 export const createNodeInputSchema = z.object({
   workspaceId: z.uuid(),
   canvasId: z.uuid(),
   createdBy: z.uuid(),
-  type: z.enum(["text", "image", "video", "audio", "storyboard", "batch_result"]),
+  type: z.enum(["text", "image", "video", "audio", "storyboard", "input", "combination", "batch_result"]),
   title: z.string().min(1, "Node title is required."),
   promptInput: z.string().trim().optional(),
   outputSnapshot: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -491,9 +628,9 @@ export async function createNode(input: z.infer<typeof createNodeInputSchema>) {
       title: parsed.title,
       createdBy: parsed.createdBy,
       promptInput: parsed.promptInput,
-      outputSnapshot: parsed.outputSnapshot,
+      outputSnapshot: normalizeNodeOutputSnapshotForCreate(parsed.type, parsed.outputSnapshot),
       modelKey: parsed.modelKey,
-      settingsJson: parsed.settingsJson,
+      settingsJson: normalizeNodeSettingsForCreate(parsed.type, parsed.settingsJson),
       resourceRefs: parsed.resourceRefs,
       status: "idle",
       positionX: String(parsed.positionX),
@@ -598,10 +735,12 @@ export async function deleteNode(input: z.infer<typeof deleteNodeInputSchema>) {
 export async function createEdge(input: z.infer<typeof createEdgeInputSchema>) {
   const parsed = createEdgeInputSchema.parse(input);
   await assertCanvasExists(parsed.workspaceId, parsed.canvasId);
-  await Promise.all([
+  const [sourceNode, targetNode] = await Promise.all([
     assertNodeExists(parsed.workspaceId, parsed.canvasId, parsed.sourceNodeId),
     assertNodeExists(parsed.workspaceId, parsed.canvasId, parsed.targetNodeId),
   ]);
+
+  assertSupportedConnection(sourceNode.type, targetNode.type);
 
   const existingEdge = await db
     .select()
@@ -792,9 +931,9 @@ export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInp
             title: operation.node.title,
             createdBy: parsed.actorId,
             promptInput: operation.node.promptInput,
-            outputSnapshot: operation.node.outputSnapshot,
+            outputSnapshot: normalizeNodeOutputSnapshotForCreate(operation.node.type, operation.node.outputSnapshot),
             modelKey: operation.node.modelKey,
-            settingsJson: operation.node.settingsJson ?? {},
+            settingsJson: normalizeNodeSettingsForCreate(operation.node.type, operation.node.settingsJson ?? null),
             resourceRefs: operation.node.resourceRefs ?? {
               subjectIds: [],
               sceneIds: [],
@@ -888,6 +1027,14 @@ export async function patchCanvasGraph(input: z.infer<typeof patchCanvasGraphInp
       if (operation.type === "create_edge") {
         const sourceNodeId = resolveNodeReference(operation.edge.sourceNodeId, nodeById, createdNodeByClientId);
         const targetNodeId = resolveNodeReference(operation.edge.targetNodeId, nodeById, createdNodeByClientId);
+        const sourceNode = nodeById.get(sourceNodeId);
+        const targetNode = nodeById.get(targetNodeId);
+
+        if (!sourceNode || !targetNode) {
+          throw new ApiError(404, "NODE_NOT_FOUND", "Canvas node not found.");
+        }
+
+        assertSupportedConnection(sourceNode.type, targetNode.type);
 
         if (
           Array.from(edgeById.values()).some(

@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
-import { AlertCircle, AudioLines, ChevronLeft, ChevronRight, Clapperboard, Download, ImageIcon, Play, Square, Trash2, Type, Video } from "lucide-react";
+import { AlertCircle, AudioLines, Boxes, ChevronLeft, ChevronRight, Clapperboard, GitBranch, ImageIcon, Play, Square, Trash2, Type, Video } from "lucide-react";
 
 import { CanvasTaskActions } from "@/components/canvas/canvas-task-actions";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,12 @@ import {
   BATCH_RESULT_NODE_WIDTH,
   canCanvasNodeReceiveConnection,
   canCanvasNodeStartConnection,
+  formatBatchRunBindingSummary,
   formatCanvasDateTime,
+  getCombinationPlanDetail,
+  getCombinationPlanSummary,
+  getInputNodeOutputSummary,
+  getPrimaryBatchRunResultIndex,
   getStoryboardPreviewText,
   getStoryboardShots,
   getStoryboardShotCount,
@@ -38,6 +43,7 @@ import {
   triggerDownload,
   type CanvasBatchRunDetail,
   type CanvasBatchRunResult,
+  type CanvasBatchRunResultIndex,
   type CanvasBatchRunSummary,
   type CanvasNode,
   type CanvasTask,
@@ -68,7 +74,16 @@ type InfiniteCanvasBoardNodeCardProps = {
   isPendingConnectionTarget: boolean;
   linkedBatchRun?: CanvasBatchRunSummary | null;
   linkedBatchRunDetail?: CanvasBatchRunDetail | null;
-  onExtractBatchResultToVideoNode?: (batchResultNodeId: string, run: CanvasBatchRunResult) => void;
+  isBatchResultDetailLoading?: boolean;
+  batchResultFilter?: "all" | "succeeded" | "failed";
+  batchResultPage?: number;
+  batchResultTotalPages?: number;
+  onBatchResultFilterChange?: (filter: "all" | "succeeded" | "failed") => void;
+  onBatchResultPageChange?: (page: number) => void;
+  onRetryBatchResultItem?: (itemId: string) => void;
+  onExtractBatchResultToStandaloneNode?: (batchResultNodeId: string, run: CanvasBatchRunResult | CanvasBatchRunResultIndex) => void;
+  hasCombinationContext?: boolean;
+  onRunNode?: (nodeId: string) => Promise<void> | void;
   onRegisterVideoElement: (nodeId: string, element: HTMLVideoElement | null) => void;
   onSelectNode: (nodeId: string, options?: { additive: boolean }) => void;
   onOpenTextEditor: () => void;
@@ -235,7 +250,16 @@ function InfiniteCanvasBoardNodeCardComponent({
   isPendingConnectionTarget,
   linkedBatchRun,
   linkedBatchRunDetail,
-  onExtractBatchResultToVideoNode,
+  isBatchResultDetailLoading = false,
+  batchResultFilter = "all",
+  batchResultPage = 1,
+  batchResultTotalPages = 1,
+  onBatchResultFilterChange,
+  onBatchResultPageChange,
+  onRetryBatchResultItem,
+  onExtractBatchResultToStandaloneNode,
+  hasCombinationContext,
+  onRunNode,
   onRegisterVideoElement,
   onSelectNode,
   onOpenTextEditor,
@@ -260,6 +284,8 @@ function InfiniteCanvasBoardNodeCardComponent({
   const isStoryboardNode = node.type === "storyboard";
   const isImageNode = node.type === "image";
   const isVideoNode = node.type === "video";
+  const isInputNode = node.type === "input";
+  const isCombinationNode = node.type === "combination";
   const isBatchResultNode = node.type === "batch_result";
   const canStartConnection = canEdit && canCanvasNodeStartConnection(node.type);
   const canReceiveConnection = canEdit && canCanvasNodeReceiveConnection(node.type);
@@ -288,11 +314,16 @@ function InfiniteCanvasBoardNodeCardComponent({
   const isEditingTitle = editingTextNodeTitleId === node.id;
   const isPendingSource = pendingConnectionSourceId === node.id;
   const isConnectionMode = Boolean(pendingConnectionSourceId);
+  const isPlanBatchRun = Boolean(linkedBatchRunDetail?.itemsPage);
   const batchRunPreviewItem =
     linkedBatchRunDetail?.runs.find((run) => run.status === "succeeded" && (Boolean(run.assetFileUrl) || Boolean(run.contentText))) ?? null;
-  const allBatchRunItems = linkedBatchRunDetail?.runs ?? [];
-  const [batchResultFilter, setBatchResultFilter] = useState<"all" | "succeeded" | "failed">("all");
+  const allBatchRunItems = useMemo(() => linkedBatchRunDetail?.runs ?? [], [linkedBatchRunDetail?.runs]);
+  const paginatedCombinationItems = useMemo(
+    () => linkedBatchRunDetail?.itemsPage?.items ?? [],
+    [linkedBatchRunDetail?.itemsPage?.items],
+  );
   const [selectedBatchRunResultId, setSelectedBatchRunResultId] = useState<string | null>(null);
+  const [selectedBatchCombinationItemId, setSelectedBatchCombinationItemId] = useState<string | null>(null);
   const batchRunResultItems = useMemo(
     () =>
       allBatchRunItems.filter((run) => {
@@ -308,42 +339,56 @@ function InfiniteCanvasBoardNodeCardComponent({
       }),
     [allBatchRunItems, batchResultFilter],
   );
-  const batchResultPageSize = 4;
-  const [batchResultPage, setBatchResultPage] = useState(1);
-  const batchResultTotalPages = Math.max(1, Math.ceil(batchRunResultItems.length / batchResultPageSize));
-  const paginatedBatchResultItems = useMemo(() => {
+  const paginatedBatchRunResults = useMemo(() => {
     const currentPage = Math.min(batchResultPage, batchResultTotalPages);
-    const startIndex = (currentPage - 1) * batchResultPageSize;
+    const startIndex = (currentPage - 1) * 4;
 
-    return batchRunResultItems.slice(startIndex, startIndex + batchResultPageSize);
+    return batchRunResultItems.slice(startIndex, startIndex + 4);
   }, [batchResultPage, batchResultTotalPages, batchRunResultItems]);
+  const currentBatchPreviewItems = isPlanBatchRun ? paginatedCombinationItems : paginatedBatchRunResults;
 
   useEffect(() => {
-    setBatchResultPage(1);
-  }, [linkedBatchRun?.id]);
+    if (isPlanBatchRun) {
+      if (paginatedCombinationItems.length === 0) {
+        if (selectedBatchCombinationItemId !== null) {
+          setSelectedBatchCombinationItemId(null);
+        }
+        return;
+      }
 
-  useEffect(() => {
-    setBatchResultFilter("all");
-    setSelectedBatchRunResultId(null);
-  }, [linkedBatchRun?.id]);
+      const hasSelectedItem = paginatedCombinationItems.some((item) => item.id === selectedBatchCombinationItemId);
 
-  useEffect(() => {
-    setBatchResultPage((current) => Math.min(current, batchResultTotalPages));
-  }, [batchResultTotalPages]);
-
-  useEffect(() => {
-    if (batchRunResultItems.length === 0) {
-      setSelectedBatchRunResultId(null);
+      if (!hasSelectedItem) {
+        setSelectedBatchCombinationItemId(paginatedCombinationItems[0]?.id ?? null);
+      }
 
       return;
     }
 
-    if (!selectedBatchRunResultId || !batchRunResultItems.some((run) => run.id === selectedBatchRunResultId)) {
-      setSelectedBatchRunResultId(batchRunResultItems[0]?.id ?? null);
+    if (paginatedBatchRunResults.length === 0) {
+      if (selectedBatchRunResultId !== null) {
+        setSelectedBatchRunResultId(null);
+      }
+      return;
     }
-  }, [batchRunResultItems, selectedBatchRunResultId]);
 
+    const hasSelectedResult = paginatedBatchRunResults.some((run) => run.id === selectedBatchRunResultId);
+
+    if (!hasSelectedResult) {
+      setSelectedBatchRunResultId(paginatedBatchRunResults[0]?.id ?? null);
+    }
+  }, [
+    isPlanBatchRun,
+    paginatedBatchRunResults,
+    paginatedCombinationItems,
+    selectedBatchCombinationItemId,
+    selectedBatchRunResultId,
+  ]);
+
+  const selectedBatchCombinationItem =
+    paginatedCombinationItems.find((item) => item.id === selectedBatchCombinationItemId) ?? paginatedCombinationItems[0] ?? null;
   const selectedBatchRunResult =
+    (isPlanBatchRun ? getPrimaryBatchRunResultIndex(selectedBatchCombinationItem) : null) ??
     batchRunResultItems.find((run) => run.id === selectedBatchRunResultId) ??
     batchRunPreviewItem ??
     batchRunResultItems[0] ??
@@ -354,6 +399,37 @@ function InfiniteCanvasBoardNodeCardComponent({
   const selectedBatchRunResultIsFailed = selectedBatchRunResult?.status === "failed";
   const batchRunSuccessCount = allBatchRunItems.filter((run) => run.status === "succeeded").length;
   const batchRunFailedCount = allBatchRunItems.filter((run) => run.status === "failed").length;
+  const combinationItemSuccessCount = linkedBatchRun?.succeededCombinationCount ?? 0;
+  const combinationItemFailedCount = linkedBatchRun?.failedCombinationCount ?? 0;
+  const inputNodeSummary = isInputNode ? getInputNodeOutputSummary(node.outputSnapshot) : null;
+  const combinationPlanSummary = isCombinationNode ? getCombinationPlanSummary(node.outputSnapshot) : null;
+  const combinationPlanDetail = isCombinationNode ? getCombinationPlanDetail(node.outputSnapshot) : null;
+  const metaNodeWidth = isInputNode || isCombinationNode ? 312 : 248;
+  const metaNodeMinHeight = isInputNode || isCombinationNode ? 184 : 132;
+  const currentBatchPreviewIndex = Math.max(
+    0,
+    currentBatchPreviewItems.findIndex((item) => item.id === (isPlanBatchRun ? selectedBatchCombinationItem?.id : selectedBatchRunResult?.id)),
+  );
+  const currentBatchPreviewCount = currentBatchPreviewItems.length;
+
+  const goToAdjacentBatchPreview = (direction: -1 | 1) => {
+    if (currentBatchPreviewCount <= 1) {
+      return;
+    }
+
+    const nextIndex = Math.max(0, Math.min(currentBatchPreviewCount - 1, currentBatchPreviewIndex + direction));
+    const nextItem = currentBatchPreviewItems[nextIndex];
+
+    if (!nextItem) {
+      return;
+    }
+
+    if (isPlanBatchRun) {
+      setSelectedBatchCombinationItemId(nextItem.id);
+    } else {
+      setSelectedBatchRunResultId(nextItem.id);
+    }
+  };
 
   const downloadBatchResultItem = (run: CanvasBatchRunResult) => {
     if (!run.assetFileUrl) {
@@ -384,7 +460,9 @@ function InfiniteCanvasBoardNodeCardComponent({
       data-canvas-node-id={node.id}
       className={cn(
         "group absolute rounded-2xl border border-border/80 p-4 text-left text-foreground shadow-[0_18px_40px_rgba(15,23,42,0.10)] backdrop-blur transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]",
-        isTextNode || isStoryboardNode || isImageNode || isVideoNode || isBatchResultNode ? "overflow-visible" : "overflow-hidden",
+        isTextNode || isStoryboardNode || isImageNode || isVideoNode || isInputNode || isCombinationNode || isBatchResultNode
+          ? "overflow-visible"
+          : "overflow-hidden",
         isSelected ? "ring-2 ring-primary/50" : undefined,
         effectiveSelectedNodeId === node.id ? "shadow-[0_0_0_6px_rgba(59,130,246,0.12)]" : undefined,
         isPendingSource ? "ring-2 ring-primary/60" : undefined,
@@ -397,8 +475,8 @@ function InfiniteCanvasBoardNodeCardComponent({
       style={{
         left: `${screenPoint.x}px`,
         top: `${screenPoint.y}px`,
-        width: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_WIDTH : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : isBatchResultNode ? BATCH_RESULT_NODE_WIDTH : 248}px`,
-        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_HEIGHT : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : isBatchResultNode ? BATCH_RESULT_NODE_HEIGHT : 132}px`,
+        width: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_WIDTH : isImageNode ? imageNodeSize.width : isVideoNode ? VIDEO_NODE_WIDTH : isBatchResultNode ? BATCH_RESULT_NODE_WIDTH : metaNodeWidth}px`,
+        minHeight: `${isTextNode ? TEXT_NODE_SIZE : isStoryboardNode ? STORYBOARD_NODE_HEIGHT : isImageNode ? imageNodeSize.height : isVideoNode ? VIDEO_NODE_HEIGHT : isBatchResultNode ? BATCH_RESULT_NODE_HEIGHT : metaNodeMinHeight}px`,
         transform: `translate(-50%, -50%) scale(${zoom})`,
         transformOrigin: "center center",
       }}
@@ -537,7 +615,7 @@ function InfiniteCanvasBoardNodeCardComponent({
           <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
             <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
             <div className="absolute inset-0 bg-white/72" />
-            <div className="relative flex h-full flex-col p-4">
+          <div className="relative flex h-full min-h-0 flex-col p-4">
               <div className="mb-3 flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="inline-flex items-center gap-1 rounded-full bg-background/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm">
@@ -832,6 +910,98 @@ function InfiniteCanvasBoardNodeCardComponent({
             </div>
           </div>
         </>
+      ) : isInputNode || isCombinationNode ? (
+        <>
+          <NodeFloatingTitleBar
+            canEdit={canEdit}
+            deletingNodeId={deletingNodeId}
+            editingTextNodeTitle={editingTextNodeTitle}
+            isEditingTitle={isEditingTitle}
+            isSavingTextNodeTitle={isSavingTextNodeTitle}
+            node={node}
+            onCancelEditingTitle={onCancelEditingTitle}
+            onDeleteNode={onDeleteNode}
+            onSaveTitle={onSaveTitle}
+            onStartEditingTitle={onStartEditingTitle}
+            onTitleChange={onTitleChange}
+          />
+
+          <div className="absolute inset-0 overflow-hidden rounded-[28px] border border-border/80 bg-background shadow-[0_18px_40px_rgba(15,23,42,0.10)] transition hover:shadow-[0_20px_50px_rgba(15,23,42,0.16)]">
+            <div className={cn("absolute inset-0 bg-gradient-to-br opacity-90", optionTint)} />
+            <div className="absolute inset-0 bg-white/60" />
+            <div className="relative flex h-full min-h-0 flex-col p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="inline-flex items-center gap-1 rounded-full bg-background/85 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm">
+                    {isInputNode ? <Boxes className="size-3.5" /> : <GitBranch className="size-3.5" />}
+                    {isInputNode ? "输入源" : "组合计划"}
+                  </div>
+                  <p className="mt-2 text-sm font-medium text-foreground">
+                    {isInputNode
+                      ? `${inputNodeSummary?.enabledItems ?? 0}/${inputNodeSummary?.totalItems ?? 0} 项已启用`
+                      : `${combinationPlanSummary?.estimatedCombinationCount ?? 0} 个预计组合`}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {isInputNode
+                      ? `当前源类型 ${(inputNodeSummary?.sourceType ?? "text").toUpperCase()}`
+                      : `模式 ${combinationPlanSummary?.mode ?? "zip"} · 输入源 ${combinationPlanSummary?.inputSourceCount ?? 0} 个`}
+                  </p>
+                </div>
+                <div className="rounded-full bg-background/85 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+                  {node.status}
+                </div>
+              </div>
+
+              <div className="mt-3 min-h-0 flex-1 rounded-[20px] border bg-background/80 p-3">
+                {isInputNode ? (
+                  <>
+                    <p className="text-xs font-medium text-foreground">输入摘要</p>
+                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-muted-foreground">
+                      {inputNodeSummary?.sampleLabels.length
+                        ? inputNodeSummary.sampleLabels.slice(0, 3).join("、")
+                        : "尚未添加输入项，后续会在这里显示前几个样例。"}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs font-medium text-foreground">组合摘要</p>
+                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-muted-foreground">
+                      {combinationPlanSummary?.sampleLabels.length
+                        ? combinationPlanSummary.sampleLabels.slice(0, 3).join("、")
+                        : "尚未估算组合，后续会在这里显示计划样例。"}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="rounded-full border bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+                        来源 {combinationPlanDetail?.sources.length ?? combinationPlanSummary?.inputSourceCount ?? 0}
+                      </span>
+                      <span className="rounded-full border bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+                        样例 {combinationPlanDetail?.samples.length ?? 0}
+                      </span>
+                      <span className="rounded-full border bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
+                        治理信号 {combinationPlanSummary?.governanceSignals.length ?? 0}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="mt-3 flex min-h-[28px] flex-wrap items-center gap-2 overflow-hidden text-[11px]">
+                {(isInputNode ? inputNodeSummary?.sampleLabels : combinationPlanSummary?.sampleLabels)?.slice(0, 3).map((label) => (
+                  <span key={label} className="max-w-full truncate rounded-full bg-background/90 px-2.5 py-1 text-muted-foreground shadow-sm">
+                    {label}
+                  </span>
+                ))}
+                {isCombinationNode && (combinationPlanSummary?.governanceSignals.length ?? 0) > 0
+                  ? combinationPlanSummary?.governanceSignals.slice(0, 2).map((signal) => (
+                      <span key={signal} className="truncate rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-amber-700 shadow-sm">
+                        {signal}
+                      </span>
+                    ))
+                  : null}
+              </div>
+            </div>
+          </div>
+        </>
       ) : isBatchResultNode ? (
         <>
           <NodeFloatingTitleBar
@@ -926,9 +1096,21 @@ function InfiniteCanvasBoardNodeCardComponent({
 
               <div className="mt-3 flex flex-wrap items-center gap-2" onPointerDown={(event) => event.stopPropagation()}>
                 {[
-                  { key: "all", label: "全部", count: allBatchRunItems.length },
-                  { key: "succeeded", label: "成功", count: batchRunSuccessCount },
-                  { key: "failed", label: "失败", count: batchRunFailedCount },
+                  {
+                    key: "all",
+                    label: "全部",
+                    count: isPlanBatchRun ? linkedBatchRunDetail?.itemsPage?.total ?? 0 : allBatchRunItems.length,
+                  },
+                  {
+                    key: "succeeded",
+                    label: "成功",
+                    count: isPlanBatchRun ? combinationItemSuccessCount : batchRunSuccessCount,
+                  },
+                  {
+                    key: "failed",
+                    label: "失败",
+                    count: isPlanBatchRun ? combinationItemFailedCount : batchRunFailedCount,
+                  },
                 ].map((item) => (
                   <button
                     key={item.key}
@@ -941,8 +1123,7 @@ function InfiniteCanvasBoardNodeCardComponent({
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      setBatchResultFilter(item.key as "all" | "succeeded" | "failed");
-                      setBatchResultPage(1);
+                      onBatchResultFilterChange?.(item.key as "all" | "succeeded" | "failed");
                     }}
                   >
                     <span>{item.label}</span>
@@ -951,105 +1132,169 @@ function InfiniteCanvasBoardNodeCardComponent({
                 ))}
               </div>
 
-              {batchRunResultItems.length > 0 ? (
-                <div className="mt-3 space-y-2" onPointerDown={(event) => event.stopPropagation()}>
-                  {paginatedBatchResultItems.map((run) => {
-                    const isVideoResult = run.assetMimeType?.startsWith("video/");
-                    const isImageResult = run.assetMimeType?.startsWith("image/");
-                    const isAudioResult = run.assetMimeType?.startsWith("audio/");
-                    const isFailedResult = run.status === "failed";
-
-                    return (
+              {(isPlanBatchRun ? paginatedCombinationItems.length > 0 : batchRunResultItems.length > 0) ? (
+                <div className="mt-3 flex min-h-0 flex-1 flex-col" onPointerDown={(event) => event.stopPropagation()}>
+                  <div className="rounded-[20px] border bg-background/85 p-3 shadow-sm">
+                    <div className="flex items-center justify-between gap-2">
                       <button
-                        key={run.id}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-2xl border bg-background/80 p-2 text-left shadow-sm transition",
-                          selectedBatchRunResultId === run.id ? "border-sky-300 ring-2 ring-sky-100" : "hover:border-border/90",
-                          isFailedResult ? "border-rose-200 bg-rose-50/80" : undefined,
-                        )}
+                        aria-label="查看上一条批量结果"
+                        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border bg-background text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                        disabled={currentBatchPreviewIndex <= 0}
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation();
-                          setSelectedBatchRunResultId(run.id);
+                          goToAdjacentBatchPreview(-1);
                         }}
                         onPointerDown={(event) => event.stopPropagation()}
                       >
-                        <div className="h-14 w-16 shrink-0 overflow-hidden rounded-xl border bg-muted/40">
-                          {run.assetFileUrl && isVideoResult ? (
-                            <div className="flex h-full w-full items-center justify-center bg-black/80">
-                              <video className="h-full w-full object-contain" muted playsInline preload="metadata" src={run.assetFileUrl} />
-                            </div>
-                          ) : run.assetFileUrl && isImageResult ? (
-                            <img alt={run.nodeTitle} className="h-full w-full object-cover" src={run.assetFileUrl} />
-                          ) : run.assetFileUrl && isAudioResult ? (
-                            <div className="flex h-full w-full items-center justify-center bg-emerald-100 text-emerald-700">
-                              <AudioLines className="size-4" />
-                            </div>
-                          ) : isFailedResult ? (
-                            <div className="flex h-full w-full items-center justify-center bg-rose-100 text-rose-700">
-                              <AlertCircle className="size-4" />
-                            </div>
-                          ) : run.contentText ? (
-                            <div className="flex h-full w-full items-center justify-center bg-violet-100 text-violet-700">
-                              <Type className="size-4" />
-                            </div>
-                          ) : (
-                            <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-                              <Video className="size-4" />
-                            </div>
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-medium text-foreground">{run.nodeTitle || `第 ${run.runIndex ?? 0} 轮结果`}</p>
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            第 {run.runIndex ?? "?"} 轮
-                            {run.finishedAt ? ` · ${formatCanvasDateTime(run.finishedAt)}` : ""}
+                        <ChevronLeft className="size-4" />
+                      </button>
+
+                      <div className="min-w-0 flex-1 text-center">
+                        <p className="truncate text-xs font-medium text-foreground">
+                          {isPlanBatchRun
+                            ? selectedBatchCombinationItem?.label || `组合实例 ${(selectedBatchCombinationItem?.itemIndex ?? 0) + 1}`
+                            : selectedBatchRunResult?.nodeTitle || `第 ${selectedBatchRunResult?.runIndex ?? 0} 轮结果`}
+                        </p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {currentBatchPreviewCount > 0 ? `${currentBatchPreviewIndex + 1} / ${currentBatchPreviewCount}` : "0 / 0"}
+                        </p>
+                      </div>
+
+                      <button
+                        aria-label="查看下一条批量结果"
+                        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border bg-background text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                        disabled={currentBatchPreviewIndex >= currentBatchPreviewCount - 1}
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          goToAdjacentBatchPreview(1);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
+                        <ChevronRight className="size-4" />
+                      </button>
+                    </div>
+
+                    <div className="mt-3 min-h-[92px] rounded-2xl border bg-background/70 p-3">
+                      {isPlanBatchRun && selectedBatchCombinationItem ? (
+                        <>
+                          <p className="truncate text-xs font-medium text-foreground">
+                            {selectedBatchCombinationItem.label || `组合实例 ${selectedBatchCombinationItem.itemIndex + 1}`}
                           </p>
-                          {isFailedResult ? (
-                            <p className="mt-1 line-clamp-2 text-[11px] text-rose-700/90">
-                              {run.errorMessage || run.errorCode || "执行失败"}
-                            </p>
-                          ) : run.resultType ? (
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                              类型 {run.resultType}
-                              {isAudioResult ? " · 音频" : isImageResult ? " · 图片" : isVideoResult ? " · 视频" : run.contentText ? " · 文本" : ""}
+                          <p className="mt-1 line-clamp-3 text-[11px] text-muted-foreground">
+                            {formatBatchRunBindingSummary(selectedBatchCombinationItem.bindingSummary)}
+                          </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                            <span>实例 #{selectedBatchCombinationItem.itemIndex + 1}</span>
+                            <span>结果 {selectedBatchCombinationItem.resultIndexes.length} 条</span>
+                            {selectedBatchCombinationItem.finishedAt ? <span>{formatCanvasDateTime(selectedBatchCombinationItem.finishedAt)}</span> : null}
+                          </div>
+                          {selectedBatchCombinationItem.status === "failed" ? (
+                            <p className="mt-2 line-clamp-2 text-[11px] text-rose-700/90">
+                              {selectedBatchCombinationItem.lastErrorMessage || selectedBatchCombinationItem.lastErrorCode || "执行失败"}
                             </p>
                           ) : null}
-                        </div>
-                        {isVideoResult && canEdit ? (
-                          <button
-                            aria-label={`提取${run.nodeTitle || "批量结果"}为独立视频节点`}
+                        </>
+                      ) : selectedBatchRunResult ? (
+                        <>
+                          <p className="truncate text-xs font-medium text-foreground">{selectedBatchRunResult.nodeTitle || `第 ${selectedBatchRunResult.runIndex ?? 0} 轮结果`}</p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                            <span>第 {selectedBatchRunResult.runIndex ?? "?"} 轮</span>
+                            {selectedBatchRunResult.resultType ? <span>{selectedBatchRunResult.resultType}</span> : null}
+                            {selectedBatchRunResult.finishedAt ? <span>{formatCanvasDateTime(selectedBatchRunResult.finishedAt)}</span> : null}
+                          </div>
+                          {selectedBatchRunResult.status === "failed" ? (
+                            <p className="mt-2 line-clamp-2 text-[11px] text-rose-700/90">
+                              {selectedBatchRunResult.errorMessage || selectedBatchRunResult.errorCode || "执行失败"}
+                            </p>
+                          ) : selectedBatchRunResult.contentText ? (
+                            <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">
+                              {selectedBatchRunResult.contentText}
+                            </p>
+                          ) : (
+                            <p className="mt-2 text-[11px] text-muted-foreground">当前结果可在上方区域预览，并通过下方动作进行提取或下载。</p>
+                          )}
+                        </>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {isPlanBatchRun && selectedBatchCombinationItem ? (
+                        <>
+                          {canEdit ? (
+                            <button
+                              className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onRetryBatchResultItem?.(selectedBatchCombinationItem.id);
+                              }}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
+                              重试
+                            </button>
+                          ) : null}
+                          {canEdit && selectedBatchRunResult ? (
+                            <button
+                              className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onExtractBatchResultToStandaloneNode?.(node.id, selectedBatchRunResult);
+                              }}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
+                              提取
+                            </button>
+                          ) : null}
+                          <a
                             className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onExtractBatchResultToVideoNode?.(node.id, run);
-                            }}
+                            href={`/api/tasks/batch-runs/${linkedBatchRun?.id}/items/${selectedBatchCombinationItem.id}/download?workspaceId=${workspaceId}`}
+                            onClick={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                           >
-                            提取
-                          </button>
-                        ) : null}
-                        {run.assetFileUrl ? (
-                          <button
-                            aria-label={`下载${run.nodeTitle || "批量结果"}`}
-                            className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition hover:text-foreground"
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              downloadBatchResultItem(run);
-                            }}
-                            onPointerDown={(event) => event.stopPropagation()}
-                          >
-                            <Download className="size-4" />
-                          </button>
-                        ) : null}
-                      </button>
-                    );
-                  })}
+                            导出
+                          </a>
+                        </>
+                      ) : selectedBatchRunResult ? (
+                        <>
+                          {canEdit ? (
+                            <button
+                              aria-label={`提取${selectedBatchRunResult.nodeTitle || "批量结果"}为独立节点`}
+                              className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onExtractBatchResultToStandaloneNode?.(node.id, selectedBatchRunResult);
+                              }}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
+                              提取
+                            </button>
+                          ) : null}
+                          {selectedBatchRunResult.assetFileUrl ? (
+                            <button
+                              aria-label={`下载${selectedBatchRunResult.nodeTitle || "批量结果"}`}
+                              className="inline-flex rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm transition hover:text-foreground"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                downloadBatchResultItem(selectedBatchRunResult);
+                              }}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
+                              下载
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
                   <div className="flex items-center justify-between gap-2 rounded-full bg-background/85 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
                     <span>
-                      第 {Math.min(batchResultPage, batchResultTotalPages)} / {batchResultTotalPages} 页 · 共 {batchRunResultItems.length} 条
+                      第 {Math.min(batchResultPage, batchResultTotalPages)} / {batchResultTotalPages} 页 · 共{" "}
+                      {isPlanBatchRun ? linkedBatchRunDetail?.itemsPage?.total ?? 0 : batchRunResultItems.length} 条
                     </span>
                     {batchResultTotalPages > 1 ? (
                       <div className="flex items-center gap-1">
@@ -1060,7 +1305,7 @@ function InfiniteCanvasBoardNodeCardComponent({
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            setBatchResultPage((current) => Math.max(1, current - 1));
+                            onBatchResultPageChange?.(Math.max(1, batchResultPage - 1));
                           }}
                           onPointerDown={(event) => event.stopPropagation()}
                         >
@@ -1073,7 +1318,7 @@ function InfiniteCanvasBoardNodeCardComponent({
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            setBatchResultPage((current) => Math.min(batchResultTotalPages, current + 1));
+                            onBatchResultPageChange?.(Math.min(batchResultTotalPages, batchResultPage + 1));
                           }}
                           onPointerDown={(event) => event.stopPropagation()}
                         >
@@ -1091,14 +1336,17 @@ function InfiniteCanvasBoardNodeCardComponent({
 
               <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
                 <span className="rounded-full bg-background/85 px-2.5 py-1 text-foreground shadow-sm">
-                  成功 {linkedBatchRun?.succeededNodeRunCount ?? batchRunSuccessCount}
+                  成功 {isPlanBatchRun ? combinationItemSuccessCount : linkedBatchRun?.succeededNodeRunCount ?? batchRunSuccessCount}
                 </span>
                 <span className="rounded-full bg-background/85 px-2.5 py-1 text-muted-foreground shadow-sm">
-                  失败 {linkedBatchRun?.failedNodeRunCount ?? batchRunFailedCount}
+                  失败 {isPlanBatchRun ? combinationItemFailedCount : linkedBatchRun?.failedNodeRunCount ?? batchRunFailedCount}
                 </span>
                 <span className="rounded-full bg-background/85 px-2.5 py-1 text-muted-foreground shadow-sm">
-                  结果 {linkedBatchRunDetail?.runs.length ?? 0} 条
+                  {isPlanBatchRun ? `实例 ${linkedBatchRun?.totalCombinationCount ?? linkedBatchRunDetail?.itemsPage?.total ?? 0} 个` : `结果 ${linkedBatchRunDetail?.runs.length ?? 0} 条`}
                 </span>
+                {isBatchResultDetailLoading ? (
+                  <span className="rounded-full bg-background/85 px-2.5 py-1 text-muted-foreground shadow-sm">加载中</span>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1144,7 +1392,9 @@ function InfiniteCanvasBoardNodeCardComponent({
                   <CanvasTaskActions
                     canvasId={canvasId}
                     nodeId={node.id}
+                    onRun={onRunNode ? () => onRunNode(node.id) : undefined}
                     onRuntimeChanged={onRuntimeChanged}
+                    runLabel={hasCombinationContext ? "批量运行" : "运行节点"}
                     taskId={latestTask?.id}
                     taskStatus={latestTask?.status}
                     taskType={node.type}
@@ -1196,7 +1446,7 @@ function areNodeCardPropsEqual(
     previousProps.activeStoryboardShotIndex === nextProps.activeStoryboardShotIndex &&
     previousProps.linkedBatchRun === nextProps.linkedBatchRun &&
     previousProps.linkedBatchRunDetail === nextProps.linkedBatchRunDetail &&
-    previousProps.onExtractBatchResultToVideoNode === nextProps.onExtractBatchResultToVideoNode
+    previousProps.onExtractBatchResultToStandaloneNode === nextProps.onExtractBatchResultToStandaloneNode
   );
 }
 

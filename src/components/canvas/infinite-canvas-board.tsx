@@ -6,9 +6,11 @@ import { toast } from "sonner";
 
 import {
   BatchRunResultsPanel,
+  CombinationNodePanel,
   ExpandedTextEditor,
   getReferenceAssetDownloadName,
   ImageNodePanel,
+  InputNodePanel,
   StoryboardNodePanel,
   TextNodePanel,
   VideoNodePanel,
@@ -22,6 +24,7 @@ import {
   fetchCanvasBatchRunDetail,
   fetchCanvasRuntime,
   patchCanvasGraph,
+  retryCanvasBatchRunItem,
   runCanvasNode,
   runCanvasNodeBatch,
   subscribeCanvasRuntime,
@@ -31,6 +34,8 @@ import {
   type CanvasRuntimeSnapshot,
 } from "@/components/canvas/infinite-canvas-board.api";
 import {
+  canCanvasNodeRun,
+  createInitialCanvasNodeOutputSnapshot,
   DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   GRID_MAJOR_SIZE,
@@ -42,6 +47,7 @@ import {
   getBatchResultLinkedBatchRunId,
   getCanvasConnectionLabel,
   getCanvasConnectionSemantic,
+  getDefaultCanvasNodeSettings,
   getCanvasNodeDimensions,
   getCanvasNodeGroupId,
   getImageNodeOutputSource,
@@ -66,6 +72,8 @@ import {
   setCanvasNodeGroupId,
   triggerDownload,
   type CanvasBatchRunDetail,
+  type CanvasBatchRunSummary,
+  type CanvasBatchRunResultIndex,
   type CanvasNode,
   type CanvasBatchRunResult,
   type CanvasNodeReferenceAsset,
@@ -83,6 +91,9 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
+const BATCH_RESULT_PAGE_SIZE = 4;
+
+type BatchRunDetailStatusFilter = "all" | "succeeded" | "failed";
 
 function getPromptMentionAssetIds(prompt: string | null | undefined) {
   if (!prompt) {
@@ -325,6 +336,9 @@ export function InfiniteCanvasBoard({
   const [isBatchRunDetailLoading, setIsBatchRunDetailLoading] = useState(false);
   const [selectedBatchRunId, setSelectedBatchRunId] = useState<string | null>(initialBatchRuns[0]?.id ?? null);
   const [batchPreviewPage, setBatchPreviewPage] = useState(1);
+  const [batchRunDetailQueryById, setBatchRunDetailQueryById] = useState<
+    Record<string, { page: number; status: BatchRunDetailStatusFilter }>
+  >({});
   const [isHydrated, setIsHydrated] = useState(false);
   const [selectionRect, setSelectionRect] = useState<{
     startX: number;
@@ -339,6 +353,56 @@ export function InfiniteCanvasBoard({
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   const apiContext = useMemo(() => ({ canvasId, workspaceId }), [canvasId, workspaceId]);
+  const getBatchRunDetailQuery = useCallback(
+    (batchRunId: string | null | undefined) =>
+      (batchRunId ? batchRunDetailQueryById[batchRunId] : null) ?? {
+        page: 1,
+        status: "all" as BatchRunDetailStatusFilter,
+      },
+    [batchRunDetailQueryById],
+  );
+  const setBatchRunDetailQuery = useCallback(
+    (
+      batchRunId: string,
+      patch:
+        | Partial<{ page: number; status: BatchRunDetailStatusFilter }>
+        | ((current: { page: number; status: BatchRunDetailStatusFilter }) => {
+            page: number;
+            status: BatchRunDetailStatusFilter;
+          }),
+    ) => {
+      setBatchRunDetailQueryById((current) => {
+        const previous = current[batchRunId] ?? { page: 1, status: "all" as BatchRunDetailStatusFilter };
+        const next = typeof patch === "function" ? patch(previous) : { ...previous, ...patch };
+
+        return {
+          ...current,
+          [batchRunId]: {
+            page: Math.max(1, next.page),
+            status: next.status,
+          },
+        };
+      });
+    },
+    [],
+  );
+  const getBatchRunDetailRequestOptions = useCallback(
+    (
+      batchRun: CanvasBatchRunSummary | null | undefined,
+      query: { page: number; status: BatchRunDetailStatusFilter },
+    ) =>
+      batchRun?.combinationPlanSummary
+        ? {
+            itemLimit: BATCH_RESULT_PAGE_SIZE,
+            itemOffset: (query.page - 1) * BATCH_RESULT_PAGE_SIZE,
+            itemStatus:
+              query.status === "all"
+                ? undefined
+                : (query.status === "succeeded" ? "succeeded" : "failed") as "succeeded" | "failed",
+          }
+        : undefined,
+    [],
+  );
   const isStructuredValueEqual = useCallback((left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right), []);
   const applyNodePatchToLocal = useCallback((node: CanvasNode, patch: CanvasGraphNodePatch): CanvasNode => {
     const nextNode: CanvasNode = { ...node };
@@ -499,6 +563,17 @@ export function InfiniteCanvasBoard({
     [applyNodePatchToLocal, runGraphMutation],
   );
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const incomingNodeIdsByTarget = useMemo(() => {
+    const nextMap = new Map<string, string[]>();
+
+    for (const edge of edges) {
+      const incomingNodeIds = nextMap.get(edge.targetNodeId) ?? [];
+      incomingNodeIds.push(edge.sourceNodeId);
+      nextMap.set(edge.targetNodeId, incomingNodeIds);
+    }
+
+    return nextMap;
+  }, [edges]);
   const buildNodeSettingsPayload = useCallback(
     (node: CanvasNode, settingsJson: Record<string, unknown> | null) =>
       setCanvasNodeGroupId(settingsJson, getCanvasNodeGroupId(node.settingsJson)),
@@ -558,6 +633,44 @@ export function InfiniteCanvasBoard({
     );
   }, [nodePositions, nodes]);
   const pendingConnectionSourceNode = pendingConnectionSourceId ? nodeById.get(pendingConnectionSourceId) ?? null : null;
+  const autoBatchRunnableNodeIds = useMemo(() => {
+    const result = new Set<string>();
+
+    for (const node of nodes) {
+      if (!canCanvasNodeRun(node.type)) {
+        continue;
+      }
+
+      const visited = new Set<string>();
+      const queue = [...(incomingNodeIdsByTarget.get(node.id) ?? [])];
+
+      while (queue.length > 0) {
+        const currentNodeId = queue.shift();
+
+        if (!currentNodeId || visited.has(currentNodeId)) {
+          continue;
+        }
+
+        visited.add(currentNodeId);
+
+        const currentNode = nodeById.get(currentNodeId);
+
+        if (!currentNode) {
+          continue;
+        }
+
+        if (currentNode.type === "combination") {
+          result.add(node.id);
+          break;
+        }
+
+        const nextIncomingNodeIds = incomingNodeIdsByTarget.get(currentNodeId) ?? [];
+        queue.push(...nextIncomingNodeIds);
+      }
+    }
+
+    return result;
+  }, [incomingNodeIdsByTarget, nodeById, nodes]);
   const effectiveSelectedNodeIds = useMemo(
     () =>
       Array.from(new Set(selectedNodeIds)).filter((nodeId) =>
@@ -570,6 +683,7 @@ export function InfiniteCanvasBoard({
     effectiveSelectedNodeIds[0] ??
     null;
   const selectedNode = nodes.find((node) => node.id === effectiveSelectedNodeId) ?? null;
+  const selectedNodeAutoBatchEnabled = selectedNode ? autoBatchRunnableNodeIds.has(selectedNode.id) : false;
   const selectedNodeDraftIdentity = selectedNode ? `${selectedNode.id}:${selectedNode.type}` : null;
   const selectedBatchResultRunId =
     selectedNode?.type === "batch_result" ? getBatchResultLinkedBatchRunId(selectedNode, batchRuns) : null;
@@ -764,8 +878,13 @@ export function InfiniteCanvasBoard({
   const activeBatchRun =
     visibleBatchRuns.find((batchRun) => batchRun.id === selectedBatchRunId) ?? visibleBatchRuns[0] ?? null;
   const activeBatchRunDetail = activeBatchRun ? batchRunDetailsById[activeBatchRun.id] ?? null : null;
-  const activeBatchRunPreviewItems = useMemo(() => {
+  const activeBatchRunQuery = getBatchRunDetailQuery(activeBatchRun?.id);
+  const activeBatchRunPreviewItems = useMemo<CanvasBatchRunResult[]>(() => {
     if (!activeBatchRun) {
+      return [];
+    }
+
+    if (activeBatchRunDetail?.itemsPage) {
       return [];
     }
 
@@ -780,14 +899,23 @@ export function InfiniteCanvasBoard({
 
     return filteredRuns.length > 0 ? filteredRuns : activeRuns;
   }, [activeBatchRun, activeBatchRunDetail, effectiveSelectedNodeIds, isBatchRunSelectionFiltered]);
-  const batchPreviewPageSize = 4;
-  const batchPreviewTotalPages = Math.max(1, Math.ceil(activeBatchRunPreviewItems.length / batchPreviewPageSize));
-  const paginatedBatchPreviewItems = useMemo(() => {
-    const currentPage = Math.min(batchPreviewPage, batchPreviewTotalPages);
-    const startIndex = (currentPage - 1) * batchPreviewPageSize;
+  const batchPreviewTotalPages = useMemo(() => {
+    if (activeBatchRunDetail?.itemsPage) {
+      return Math.max(1, Math.ceil(activeBatchRunDetail.itemsPage.total / BATCH_RESULT_PAGE_SIZE));
+    }
 
-    return activeBatchRunPreviewItems.slice(startIndex, startIndex + batchPreviewPageSize);
-  }, [activeBatchRunPreviewItems, batchPreviewPage, batchPreviewTotalPages]);
+    return Math.max(1, Math.ceil(activeBatchRunPreviewItems.length / BATCH_RESULT_PAGE_SIZE));
+  }, [activeBatchRunDetail, activeBatchRunPreviewItems.length]);
+  const paginatedBatchPreviewItems = useMemo<CanvasBatchRunResult[]>(() => {
+    if (activeBatchRunDetail?.itemsPage) {
+      return [];
+    }
+
+    const currentPage = Math.min(batchPreviewPage, batchPreviewTotalPages);
+    const startIndex = (currentPage - 1) * BATCH_RESULT_PAGE_SIZE;
+
+    return activeBatchRunPreviewItems.slice(startIndex, startIndex + BATCH_RESULT_PAGE_SIZE);
+  }, [activeBatchRunDetail, activeBatchRunPreviewItems, batchPreviewPage, batchPreviewTotalPages]);
   const hasRunningSelectedNode = selectedNodes.some((node) => {
     const latestTask = latestTaskByNode.get(node.id);
 
@@ -817,6 +945,8 @@ export function InfiniteCanvasBoard({
   const isStoryboardNodeSelected = selectedNode?.type === "storyboard";
   const isImageNodeSelected = selectedNode?.type === "image";
   const isVideoNodeSelected = selectedNode?.type === "video";
+  const isInputNodeSelected = selectedNode?.type === "input";
+  const isCombinationNodeSelected = selectedNode?.type === "combination";
   const isTextNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
   const isStoryboardNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
   const isImageNodeTaskActive = selectedTask?.status === "queued" || selectedTask?.status === "processing";
@@ -923,18 +1053,25 @@ export function InfiniteCanvasBoard({
       return;
     }
 
-    if (
-      activeBatchRunDetail &&
-      activeBatchRunDetail.updatedAt === activeBatchRun.updatedAt &&
-      activeBatchRun.status !== "processing"
-    ) {
-      return;
-    }
-
     let cancelled = false;
     setIsBatchRunDetailLoading(true);
 
-    void fetchCanvasBatchRunDetail(apiContext, activeBatchRun.id)
+    void fetchCanvasBatchRunDetail(
+      apiContext,
+      activeBatchRun.id,
+      activeBatchRun.combinationPlanSummary
+        ? {
+            itemLimit: BATCH_RESULT_PAGE_SIZE,
+            itemOffset: (activeBatchRunQuery.page - 1) * BATCH_RESULT_PAGE_SIZE,
+            itemStatus:
+              activeBatchRunQuery.status === "all"
+                ? undefined
+                : activeBatchRunQuery.status === "succeeded"
+                  ? "succeeded"
+                  : "failed",
+          }
+        : undefined,
+    )
       .then((detail) => {
         if (cancelled) {
           return;
@@ -961,16 +1098,33 @@ export function InfiniteCanvasBoard({
     return () => {
       cancelled = true;
     };
-  }, [activeBatchRun, activeBatchRunDetail, apiContext, isBatchResultsOpen]);
+  }, [activeBatchRun, activeBatchRunQuery.page, activeBatchRunQuery.status, apiContext, isBatchResultsOpen]);
 
   useEffect(() => {
-    if (!selectedBatchResultRunId || batchRunDetailsById[selectedBatchResultRunId]) {
+    if (!selectedBatchResultRunId) {
       return;
     }
 
     let cancelled = false;
+    const linkedBatchRun = batchRuns.find((batchRun) => batchRun.id === selectedBatchResultRunId) ?? null;
+    const linkedQuery = getBatchRunDetailQuery(selectedBatchResultRunId);
 
-    void fetchCanvasBatchRunDetail(apiContext, selectedBatchResultRunId)
+    void fetchCanvasBatchRunDetail(
+      apiContext,
+      selectedBatchResultRunId,
+      linkedBatchRun?.combinationPlanSummary
+        ? {
+            itemLimit: BATCH_RESULT_PAGE_SIZE,
+            itemOffset: (linkedQuery.page - 1) * BATCH_RESULT_PAGE_SIZE,
+            itemStatus:
+              linkedQuery.status === "all"
+                ? undefined
+                : linkedQuery.status === "succeeded"
+                  ? "succeeded"
+                  : "failed",
+          }
+        : undefined,
+    )
       .then((detail) => {
         if (cancelled) {
           return;
@@ -990,7 +1144,7 @@ export function InfiniteCanvasBoard({
     return () => {
       cancelled = true;
     };
-  }, [apiContext, batchRunDetailsById, selectedBatchResultRunId]);
+  }, [apiContext, batchRuns, getBatchRunDetailQuery, selectedBatchResultRunId]);
 
   useEffect(() => {
     const batchResultNodes = nodes.filter((node) => node.type === "batch_result");
@@ -2029,45 +2183,23 @@ export function InfiniteCanvasBoard({
     [canEdit, ensureSelectionChangeAllowed, getWorldPoint, groupNodeIdsMap, nodePositionMap, persistNodePositions],
   );
 
-  const handleRunSelectedNodes = useCallback(async () => {
-    if (!canGenerate) {
-      return;
-    }
-
-    if (effectiveSelectedNodeIds.length === 0) {
-      toast.error("请先选中至少一个节点。");
-
-      return;
-    }
-
-    if (hasRunningSelectedNode) {
-      toast.error("所选节点中仍有运行中的任务，请稍后再试。");
-
-      return;
-    }
-
-    if (hasUnsavedCanvasChanges) {
-      toast.error("批量运行前请先保存画布。");
-
-      return;
-    }
-
+  const startBatchRunForNodes = useCallback(async (selectedRunnableNodes: CanvasNode[], runCount: number) => {
     setIsBatchRunning(true);
 
     try {
       const result = await runCanvasNodeBatch(
         apiContext,
         {
-          nodeIds: effectiveSelectedNodeIds,
-          runCount: batchRunCount,
+          nodeIds: selectedRunnableNodes.map((node) => node.id),
+          runCount,
         },
         "批量运行失败。",
       );
       const batchRunId = typeof result.batch_run_id === "string" ? result.batch_run_id : null;
-      const runCount = typeof result.run_count === "number" ? result.run_count : batchRunCount;
+      const resolvedRunCount = typeof result.run_count === "number" ? result.run_count : runCount;
 
       if (batchRunId && canEdit) {
-        const selectedSourceNodes = nodes.filter((node) => effectiveSelectedNodeIds.includes(node.id));
+        const selectedSourceNodes = selectedRunnableNodes;
 
         if (selectedSourceNodes.length > 0) {
           const selectedSourceIdSet = new Set(selectedSourceNodes.map((node) => node.id));
@@ -2104,7 +2236,7 @@ export function InfiniteCanvasBoard({
                     outputType: "json",
                     structuredData: {
                       batchRunId,
-                      runCount,
+                      runCount: resolvedRunCount,
                       sourceNodeIds: selectedSourceNodes.map((node) => node.id),
                       terminalNodeIds: anchorNodes.map((node) => node.id),
                     },
@@ -2153,7 +2285,7 @@ export function InfiniteCanvasBoard({
       }
 
       toast.success(
-        `已触发 ${result.node_count ?? effectiveSelectedNodeIds.length} 个节点，共 ${runCount} 轮批量运行。`,
+        `已触发 ${result.node_count ?? selectedRunnableNodes.length} 个节点，共 ${resolvedRunCount} 轮批量运行。`,
       );
       await refreshCanvasRuntime("批量运行状态刷新失败。");
     } catch (error) {
@@ -2163,20 +2295,76 @@ export function InfiniteCanvasBoard({
     }
   }, [
     apiContext,
-    batchRunCount,
-    canGenerate,
     canEdit,
     edges,
+    refreshCanvasRuntime,
+    runGraphMutation,
+  ]);
+  const handleRunSelectedNodes = useCallback(async () => {
+    if (!canGenerate) {
+      return;
+    }
+
+    if (effectiveSelectedNodeIds.length === 0) {
+      toast.error("请先选中至少一个节点。");
+
+      return;
+    }
+
+    if (hasRunningSelectedNode) {
+      toast.error("所选节点中仍有运行中的任务，请稍后再试。");
+
+      return;
+    }
+
+    if (hasUnsavedCanvasChanges) {
+      toast.error("批量运行前请先保存画布。");
+
+      return;
+    }
+
+    const selectedRunnableNodes = nodes.filter(
+      (node) => effectiveSelectedNodeIds.includes(node.id) && canCanvasNodeRun(node.type),
+    );
+
+    if (selectedRunnableNodes.length !== effectiveSelectedNodeIds.length) {
+      toast.error("当前批量运行仅支持文本、分镜、图片和视频节点。");
+
+      return;
+    }
+
+    await startBatchRunForNodes(selectedRunnableNodes, batchRunCount);
+  }, [
+    batchRunCount,
+    canGenerate,
     effectiveSelectedNodeIds,
     hasRunningSelectedNode,
     hasUnsavedCanvasChanges,
     nodes,
-    refreshCanvasRuntime,
-    runGraphMutation,
+    startBatchRunForNodes,
   ]);
-  const handleExtractBatchResultToVideoNode = useCallback(
-    async (batchResultNodeId: string, run: CanvasBatchRunResult) => {
-      if (!canEdit || !run.assetFileUrl) {
+  const triggerNodeExecution = useCallback(
+    async (node: CanvasNode, options: { requestPrefix: string; fallbackMessage: string; singleRunSuccessMessage: string }) => {
+      if (autoBatchRunnableNodeIds.has(node.id)) {
+        if (hasUnsavedCanvasChanges) {
+          toast.error("批量运行前请先保存画布。");
+          return false;
+        }
+
+        await startBatchRunForNodes([node], 1);
+        return true;
+      }
+
+      await runCanvasNode(apiContext, node.id, `${options.requestPrefix}-${crypto.randomUUID()}`, options.fallbackMessage);
+      await refreshCanvasRuntime("任务状态刷新失败。");
+      toast.success(options.singleRunSuccessMessage);
+      return false;
+    },
+    [apiContext, autoBatchRunnableNodeIds, hasUnsavedCanvasChanges, refreshCanvasRuntime, startBatchRunForNodes],
+  );
+  const handleExtractBatchResultToStandaloneNode = useCallback(
+    async (batchResultNodeId: string, run: CanvasBatchRunResult | CanvasBatchRunResultIndex) => {
+      if (!canEdit || (!run.assetFileUrl && !run.contentText)) {
         return;
       }
 
@@ -2195,6 +2383,14 @@ export function InfiniteCanvasBoard({
       };
       const resultMeta =
         run.resultMeta && typeof run.resultMeta === "object" && !Array.isArray(run.resultMeta) ? run.resultMeta : {};
+      const extractedNodeType: CanvasNode["type"] =
+        run.assetMimeType?.startsWith("image/") || run.resultType === "image"
+          ? "image"
+          : run.assetMimeType?.startsWith("audio/") || run.resultType === "audio"
+            ? "audio"
+            : run.assetMimeType?.startsWith("video/") || run.resultType === "video"
+              ? "video"
+              : "text";
       const clientId = `extract-batch-result-${crypto.randomUUID()}`;
       const generatedAtSource = run.finishedAt ?? run.createdAt;
       const generatedAt =
@@ -2205,13 +2401,13 @@ export function InfiniteCanvasBoard({
             : new Date().toISOString();
       const outputSnapshot = {
         taskId: run.taskId ?? undefined,
-        outputType: "video",
-        content: run.assetFileUrl,
-        assets: run.assetId
+        outputType: extractedNodeType === "text" ? (run.resultType === "json" ? "json" : "text") : extractedNodeType,
+        content: run.assetFileUrl ?? run.contentText ?? "",
+        assets: run.assetId && run.assetFileUrl
           ? [
               {
                 assetId: run.assetId,
-                assetType: "video",
+                assetType: extractedNodeType,
                 url: run.assetFileUrl,
                 mimeType: run.assetMimeType ?? undefined,
               },
@@ -2219,7 +2415,7 @@ export function InfiniteCanvasBoard({
           : undefined,
         structuredData: {
           ...resultMeta,
-          videoUrl: run.assetFileUrl,
+          assetUrl: run.assetFileUrl ?? undefined,
           assetId: run.assetId ?? (typeof resultMeta.assetId === "string" ? resultMeta.assetId : undefined),
         },
         generatedAt,
@@ -2232,12 +2428,15 @@ export function InfiniteCanvasBoard({
               type: "create_node",
               clientId,
               node: {
-                type: "video",
-                title: `${sourceNode?.title || run.nodeTitle || "视频结果"} · 第 ${run.runIndex ?? 1} 轮`,
+                type: extractedNodeType,
+                title: `${sourceNode?.title || run.nodeTitle || "结果"} · ${run.runIndex ? `第 ${run.runIndex} 轮` : "提取结果"}`,
                 promptInput: sourceNode?.promptInput ?? "",
                 outputSnapshot,
                 modelKey: sourceNode?.modelKey ?? undefined,
-                settingsJson: sourceNode?.settingsJson ?? {},
+                settingsJson:
+                  sourceNode?.type === extractedNodeType
+                    ? sourceNode.settingsJson ?? {}
+                    : getDefaultCanvasNodeSettings(extractedNodeType),
                 resourceRefs: sourceNode?.resourceRefs ?? {
                   subjectIds: [],
                   sceneIds: [],
@@ -2255,18 +2454,42 @@ export function InfiniteCanvasBoard({
           result.operationResults.find((item) => item.type === "create_node" && item.clientId === clientId)?.nodeId ?? null;
 
         if (!createdNodeId) {
-          throw new Error("视频节点创建成功，但未返回节点 ID。");
+          throw new Error("结果节点创建成功，但未返回节点 ID。");
         }
 
         await saveNodePatch(createdNodeId, { status: "succeeded" }, "独立视频节点状态更新失败。");
         setSelectedNodeIds([createdNodeId]);
         setSelectedNodeId(createdNodeId);
-        toast.success(`已提取第 ${run.runIndex ?? 1} 轮结果为独立视频节点。`);
+        toast.success(`已提取${run.nodeTitle || "结果"}为独立节点。`);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "提取独立视频节点失败。");
+        toast.error(error instanceof Error ? error.message : "提取独立结果节点失败。");
       }
     },
     [canEdit, nodeById, nodePositionMap, runGraphMutation, saveNodePatch],
+  );
+  const handleRetryBatchRunItem = useCallback(
+    async (batchRunId: string, itemId: string) => {
+      try {
+        await retryCanvasBatchRunItem(apiContext, batchRunId, itemId);
+        toast.success("已加入单实例重试。");
+        await refreshCanvasRuntime();
+        const batchRun = batchRuns.find((item) => item.id === batchRunId) ?? null;
+        const query = getBatchRunDetailQuery(batchRunId);
+        const detail = await fetchCanvasBatchRunDetail(
+          apiContext,
+          batchRunId,
+          getBatchRunDetailRequestOptions(batchRun, query),
+        );
+
+        setBatchRunDetailsById((current) => ({
+          ...current,
+          [batchRunId]: detail,
+        }));
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "单实例重试失败。");
+      }
+    },
+    [apiContext, batchRuns, getBatchRunDetailQuery, getBatchRunDetailRequestOptions, refreshCanvasRuntime],
   );
   const handleSaveCanvas = useCallback(async () => {
     const saved = await flushCanvasChanges();
@@ -2503,7 +2726,7 @@ export function InfiniteCanvasBoard({
       const semantic = getCanvasConnectionSemantic(sourceNode.type, targetNode.type);
 
       if (!semantic) {
-        toast.error("当前仅支持 文本/分镜→文本/分镜/图片/视频，图片→分镜/图片/视频。");
+        toast.error("当前支持 输入源→组合、组合→生成节点、生成节点→批量产出，以及既有的文本/分镜/图片链路。");
         clearPendingConnection();
 
         return;
@@ -2621,7 +2844,8 @@ export function InfiniteCanvasBoard({
               type,
               title: `${option?.label ?? type}节点 ${nextNodeIndex}`,
               promptInput: "",
-              settingsJson: type === "storyboard" ? serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS) : undefined,
+              outputSnapshot: createInitialCanvasNodeOutputSnapshot(type),
+              settingsJson: getDefaultCanvasNodeSettings(type),
               positionX: Math.round(x),
               positionY: Math.round(y),
             },
@@ -3681,14 +3905,19 @@ export function InfiniteCanvasBoard({
 
     try {
       await saveNodePatch(selectedNode.id, { promptInput: draftPrompt }, "文本提示词保存失败。");
-      await runCanvasNode(apiContext, selectedNode.id, `text-node-run-${crypto.randomUUID()}`, "AI 生成失败。");
-      await refreshCanvasRuntime("文本任务状态刷新失败。");
+      const isBatch = await triggerNodeExecution(selectedNode, {
+        requestPrefix: "text-node-run",
+        fallbackMessage: "AI 生成失败。",
+        singleRunSuccessMessage: "已提交 AI 生成请求。",
+      });
+      if (isBatch) {
+        toast.success("检测到组合输入，已自动切换为批量运行。");
+      }
 
       setTextGenerateCooldown({
         nodeId: selectedNode.id,
         expiresAt: Date.now() + TEXT_GENERATE_COOLDOWN_MS,
       });
-      toast.success("已提交 AI 生成请求。");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "AI 生成失败。");
     } finally {
@@ -3717,10 +3946,14 @@ export function InfiniteCanvasBoard({
         },
         "分镜节点配置保存失败。",
       );
-      await runCanvasNode(apiContext, selectedNode.id, `storyboard-node-run-${crypto.randomUUID()}`, "分镜生成失败。");
-      await refreshCanvasRuntime("分镜任务状态刷新失败。");
-
-      toast.success("已提交分镜生成请求。");
+      const isBatch = await triggerNodeExecution(selectedNode, {
+        requestPrefix: "storyboard-node-run",
+        fallbackMessage: "分镜生成失败。",
+        singleRunSuccessMessage: "已提交分镜生成请求。",
+      });
+      if (isBatch) {
+        toast.success("检测到组合输入，已自动切换为批量运行。");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "分镜生成失败。");
     } finally {
@@ -3772,10 +4005,14 @@ export function InfiniteCanvasBoard({
         },
         "图片提示词保存失败。",
       );
-      await runCanvasNode(apiContext, selectedNode.id, `image-node-run-${crypto.randomUUID()}`, "图片生成失败。");
-      await refreshCanvasRuntime("图片任务状态刷新失败。");
-
-      toast.success("已提交图片生成请求。");
+      const isBatch = await triggerNodeExecution(selectedNode, {
+        requestPrefix: "image-node-run",
+        fallbackMessage: "图片生成失败。",
+        singleRunSuccessMessage: "已提交图片生成请求。",
+      });
+      if (isBatch) {
+        toast.success("检测到组合输入，已自动切换为批量运行。");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "图片生成失败。");
     } finally {
@@ -3887,10 +4124,14 @@ export function InfiniteCanvasBoard({
         },
         "视频提示词保存失败。",
       );
-      await runCanvasNode(apiContext, selectedNode.id, `video-node-run-${crypto.randomUUID()}`, "视频生成失败。");
-      await refreshCanvasRuntime("视频任务状态刷新失败。");
-
-      toast.success("已提交视频生成请求。");
+      const isBatch = await triggerNodeExecution(selectedNode, {
+        requestPrefix: "video-node-run",
+        fallbackMessage: "视频生成失败。",
+        singleRunSuccessMessage: "已提交视频生成请求。",
+      });
+      if (isBatch) {
+        toast.success("检测到组合输入，已自动切换为批量运行。");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "视频生成失败。");
     } finally {
@@ -4633,6 +4874,10 @@ export function InfiniteCanvasBoard({
             const linkedBatchRunId = node.type === "batch_result" ? getBatchResultLinkedBatchRunId(node, batchRuns) : null;
             const linkedBatchRun = linkedBatchRunId ? batchRuns.find((batchRun) => batchRun.id === linkedBatchRunId) ?? null : null;
             const linkedBatchRunDetail = linkedBatchRunId ? batchRunDetailsById[linkedBatchRunId] ?? null : null;
+            const linkedBatchRunQuery = getBatchRunDetailQuery(linkedBatchRunId);
+            const linkedBatchRunTotalPages = linkedBatchRunDetail?.itemsPage
+              ? Math.max(1, Math.ceil(linkedBatchRunDetail.itemsPage.total / BATCH_RESULT_PAGE_SIZE))
+              : 1;
 
             if (!position) {
               return null;
@@ -4665,9 +4910,39 @@ export function InfiniteCanvasBoard({
                 isSavingTextNodeTitle={isSavingTextNodeTitle}
                 linkedBatchRun={linkedBatchRun}
                 linkedBatchRunDetail={linkedBatchRunDetail}
+                isBatchResultDetailLoading={isBatchRunDetailLoading && linkedBatchRunDetail == null}
                 latestTask={latestTask}
                 node={node}
-                onExtractBatchResultToVideoNode={handleExtractBatchResultToVideoNode}
+                batchResultFilter={linkedBatchRunQuery.status}
+                batchResultPage={linkedBatchRunQuery.page}
+                batchResultTotalPages={linkedBatchRunTotalPages}
+                onBatchResultFilterChange={(filter) => {
+                  if (!linkedBatchRunId) {
+                    return;
+                  }
+
+                  setBatchRunDetailQuery(linkedBatchRunId, {
+                    page: 1,
+                    status: filter,
+                  });
+                }}
+                onBatchResultPageChange={(page) => {
+                  if (!linkedBatchRunId) {
+                    return;
+                  }
+
+                  setBatchRunDetailQuery(linkedBatchRunId, {
+                    page,
+                  });
+                }}
+                onRetryBatchResultItem={(itemId) => {
+                  if (!linkedBatchRunId) {
+                    return;
+                  }
+
+                  void handleRetryBatchRunItem(linkedBatchRunId, itemId);
+                }}
+                onExtractBatchResultToStandaloneNode={handleExtractBatchResultToStandaloneNode}
                 canAcceptPendingConnection={canAcceptPendingConnection}
                 isPendingConnectionTarget={canAcceptPendingConnection}
                 onCancelEditingTitle={() => {
@@ -4684,6 +4959,16 @@ export function InfiniteCanvasBoard({
                   void handleDeleteNode(nodeId);
                 }}
                 onOpenTextEditor={() => setIsExpandedEditorOpen(true)}
+                hasCombinationContext={autoBatchRunnableNodeIds.has(node.id)}
+                onRunNode={async (nodeId) => {
+                  const targetNode = nodeById.get(nodeId);
+                  if (!targetNode) return;
+                  await triggerNodeExecution(targetNode, {
+                    requestPrefix: "canvas-node-run",
+                    fallbackMessage: "节点运行失败。",
+                    singleRunSuccessMessage: "节点运行已触发。",
+                  });
+                }}
                 onRegisterVideoElement={(nodeId, element) => {
                   videoPreviewRefs.current[nodeId] = element;
                 }}
@@ -4727,6 +5012,7 @@ export function InfiniteCanvasBoard({
       {selectedNode && isTextNodeSelected ? (
         <TextNodePanel
           canGenerate={canGenerate}
+          generateLabel={selectedNodeAutoBatchEnabled ? "批量生成内容" : undefined}
           draftPrompt={draftPrompt}
           isCoolingDown={isSelectedTextNodeCoolingDown}
           isGenerating={isSelectedTextNodeGenerating}
@@ -4744,6 +5030,29 @@ export function InfiniteCanvasBoard({
         />
       ) : null}
 
+      {selectedNode && isInputNodeSelected ? (
+        <InputNodePanel
+          canvasId={canvasId}
+          canEdit={canEdit}
+          instructionPresets={instructionPresets}
+          scenes={scenes}
+          selectedNode={selectedNode}
+          subjects={subjects}
+          workspaceId={workspaceId}
+          onRefreshRuntime={refreshCanvasRuntime}
+        />
+      ) : null}
+
+      {selectedNode && isCombinationNodeSelected ? (
+        <CombinationNodePanel
+          canvasId={canvasId}
+          canEdit={canEdit}
+          selectedNode={selectedNode}
+          workspaceId={workspaceId}
+          onRefreshRuntime={refreshCanvasRuntime}
+        />
+      ) : null}
+
       {selectedNode && isStoryboardNodeSelected ? (
         <StoryboardNodePanel
           activeShotDraft={draftStoryboardShot}
@@ -4751,6 +5060,7 @@ export function InfiniteCanvasBoard({
           availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
+          generateLabel={selectedNodeAutoBatchEnabled ? "批量生成分镜" : undefined}
           draftPrompt={draftPrompt}
           draftSettings={draftStoryboardSettings}
           isGenerating={isSelectedStoryboardNodeGenerating}
@@ -4799,6 +5109,7 @@ export function InfiniteCanvasBoard({
           availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
+          generateLabel={selectedNodeAutoBatchEnabled ? "批量生成图片" : undefined}
           draftImagePrompt={draftImagePrompt}
           imageUploadInputRef={imageUploadInputRef}
           isGenerating={isSelectedImageNodeGenerating}
@@ -4834,6 +5145,7 @@ export function InfiniteCanvasBoard({
           availablePromptAssets={selectedNodePromptAssets}
           canEdit={canEdit}
           canGenerate={canGenerate}
+          generateLabel={selectedNodeAutoBatchEnabled ? "批量生成视频" : undefined}
           draftVideoModelKey={draftVideoModelKey}
           draftVideoPrompt={draftVideoPrompt}
           draftVideoSettings={draftVideoSettings}
@@ -4872,20 +5184,66 @@ export function InfiniteCanvasBoard({
       {visibleBatchRuns.length > 0 && isBatchResultsOpen ? (
         <BatchRunResultsPanel
           activeBatchRunId={activeBatchRun?.id ?? null}
+          activeBatchRunDetail={activeBatchRunDetail}
           batchRuns={visibleBatchRuns}
           canvasId={canvasId}
-          currentPage={Math.min(batchPreviewPage, batchPreviewTotalPages)}
+          currentFilter={activeBatchRunQuery.status}
+          currentPage={Math.min(activeBatchRun?.combinationPlanSummary ? activeBatchRunQuery.page : batchPreviewPage, batchPreviewTotalPages)}
           filteredBySelection={isBatchRunSelectionFiltered}
           isLoadingRuns={isBatchRunDetailLoading && !activeBatchRunDetail}
+          onChangeFilter={(filter) => {
+            if (!activeBatchRun) {
+              return;
+            }
+
+            setBatchRunDetailQuery(activeBatchRun.id, {
+              page: 1,
+              status: filter,
+            });
+          }}
           onClose={() => setIsBatchResultsOpen(false)}
           onDownloadRun={downloadBatchRunResult}
-          onNextPage={() => setBatchPreviewPage((currentPage) => Math.min(batchPreviewTotalPages, currentPage + 1))}
-          onPreviousPage={() => setBatchPreviewPage((currentPage) => Math.max(1, currentPage - 1))}
+          onExtractResult={handleExtractBatchResultToStandaloneNode}
+          onNextPage={() => {
+            if (!activeBatchRun) {
+              return;
+            }
+
+            if (activeBatchRun.combinationPlanSummary) {
+              setBatchRunDetailQuery(activeBatchRun.id, (current) => ({
+                ...current,
+                page: Math.min(batchPreviewTotalPages, current.page + 1),
+              }));
+
+              return;
+            }
+
+            setBatchPreviewPage((currentPage) => Math.min(batchPreviewTotalPages, currentPage + 1));
+          }}
+          onPreviousPage={() => {
+            if (!activeBatchRun) {
+              return;
+            }
+
+            if (activeBatchRun.combinationPlanSummary) {
+              setBatchRunDetailQuery(activeBatchRun.id, (current) => ({
+                ...current,
+                page: Math.max(1, current.page - 1),
+              }));
+
+              return;
+            }
+
+            setBatchPreviewPage((currentPage) => Math.max(1, currentPage - 1));
+          }}
+          onRetryItem={(batchRunId, itemId) => {
+            void handleRetryBatchRunItem(batchRunId, itemId);
+          }}
           onSelectBatchRun={(batchRunId) => {
             setSelectedBatchRunId(batchRunId);
             setBatchPreviewPage(1);
           }}
-          paginatedRuns={paginatedBatchPreviewItems}
+          paginatedRuns={activeBatchRunDetail?.itemsPage ? [] : paginatedBatchPreviewItems}
           selectedNodeCount={effectiveSelectedNodeIds.length}
           totalPages={batchPreviewTotalPages}
           workspaceId={workspaceId}

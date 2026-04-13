@@ -4,6 +4,8 @@ import type {
   CanvasEdge,
   CanvasNode,
   CanvasNodeResourceRefs,
+  CanvasInputSourceType,
+  CanvasCombinationMode,
   CanvasNodeType,
   CanvasTask,
 } from "@/components/canvas/infinite-canvas-board.shared";
@@ -239,10 +241,29 @@ export async function fetchCanvasRuntime(
 export async function fetchCanvasBatchRunDetail(
   context: CanvasBoardApiContext,
   batchRunId: string,
+  options?: {
+    itemLimit?: number;
+    itemOffset?: number;
+    itemStatus?: "draft" | "queued" | "running" | "succeeded" | "failed" | "paused" | "canceled";
+  },
   fallbackMessage = "批量运行详情加载失败。",
 ) {
+  const searchParams = new URLSearchParams();
+
+  if (typeof options?.itemLimit === "number") {
+    searchParams.set("item_limit", String(options.itemLimit));
+  }
+
+  if (typeof options?.itemOffset === "number") {
+    searchParams.set("item_offset", String(options.itemOffset));
+  }
+
+  if (options?.itemStatus) {
+    searchParams.set("item_status", options.itemStatus);
+  }
+
   const response = await requestApi(
-    `/api/tasks/batch-runs/${batchRunId}`,
+    `/api/tasks/batch-runs/${batchRunId}${searchParams.size > 0 ? `?${searchParams.toString()}` : ""}`,
     {
     method: "GET",
     headers: getWorkspaceHeaders(context.workspaceId, false),
@@ -251,6 +272,25 @@ export async function fetchCanvasBatchRunDetail(
   );
 
   return parseApiEnvelope<CanvasBatchRunDetail>(response, fallbackMessage);
+}
+
+export async function retryCanvasBatchRunItem(
+  context: CanvasBoardApiContext,
+  batchRunId: string,
+  itemId: string,
+  fallbackMessage = "组合实例重试失败。",
+) {
+  const response = await requestApi(
+    `/api/tasks/batch-runs/${batchRunId}/items/${itemId}/retry`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify({}),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<{ batchRunId: string; combinationItemId: string; status: string }>(response, fallbackMessage);
 }
 
 export async function bindCanvasBatchRunResultNode(
@@ -272,6 +312,306 @@ export async function bindCanvasBatchRunResultNode(
   );
 
   return parseApiEnvelope<{ batch_run_id: string; result_node_id: string | null }>(response, fallbackMessage);
+}
+
+export type CanvasInputNodeItem = {
+  id: string;
+  stable_key: string;
+  source_type: CanvasInputSourceType;
+  label: string;
+  content_text: string | null;
+  asset_id: string | null;
+  enabled: boolean;
+  sort_order: number;
+  source_ref: Record<string, unknown> | null;
+  snapshot: Record<string, unknown> | null;
+  asset: {
+    id: string;
+    asset_type: string;
+    file_name: string;
+    file_url: string;
+    mime_type: string;
+    width: number | null;
+    height: number | null;
+    duration_ms: number | null;
+  } | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CanvasInputNodeItemsResponse = {
+  node_id: string;
+  summary: Record<string, unknown> | null;
+  items: CanvasInputNodeItem[];
+};
+
+export async function fetchCanvasInputNodeItems(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  fallbackMessage = "输入源加载失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/input-items`,
+    {
+      method: "GET",
+      headers: getWorkspaceHeaders(context.workspaceId, false),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasInputNodeItemsResponse>(response, fallbackMessage);
+}
+
+export async function saveCanvasInputNodeItems(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  payload: {
+    items: Array<{
+      sourceType: CanvasInputSourceType;
+      displayLabel: string;
+      contentText?: string | null;
+      assetId?: string | null;
+      enabled: boolean;
+      sourceRefJson?: Record<string, unknown>;
+    }>;
+  },
+  fallbackMessage = "输入源保存失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/input-items`,
+    {
+      method: "PUT",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasInputNodeItemsResponse>(response, fallbackMessage);
+}
+
+export async function reorderCanvasInputNodeItems(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  payload: {
+    itemIds: string[];
+  },
+  fallbackMessage = "输入源排序失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/input-items/reorder`,
+    {
+      method: "PATCH",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasInputNodeItemsResponse>(response, fallbackMessage);
+}
+
+export async function setCanvasInputNodeItemEnabled(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  itemId: string,
+  payload: {
+    enabled: boolean;
+  },
+  fallbackMessage = "输入项更新失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/input-items/${itemId}`,
+    {
+      method: "PATCH",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<{ item_id: string; enabled: boolean }>(response, fallbackMessage);
+}
+
+export type CanvasCombinationPlanPreview = {
+  mode: CanvasCombinationMode;
+  anchor_input_node_id: string | null;
+  input_source_count: number;
+  estimated_combination_count: number;
+  governance_action: string | null;
+  governance_signals: string[];
+  sources: Array<{
+    input_node_id: string;
+    input_node_title: string;
+    source_type: CanvasInputSourceType;
+    total_items: number;
+    enabled_items: number;
+  }>;
+  samples: Array<{
+    id: string;
+    label: string;
+    bindings: Array<{
+      inputNodeId: string;
+      itemId: string;
+      itemLabel: string;
+      sourceType: CanvasInputSourceType;
+    }>;
+  }>;
+  sample_labels: string[];
+  max_expandable_combination_count: number;
+};
+
+export async function previewCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  payload: {
+    mode: CanvasCombinationMode;
+    anchorInputNodeId?: string | null;
+    sampleSize?: number;
+  },
+  fallbackMessage = "组合预估失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/combination-preview`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanPreview>(response, fallbackMessage);
+}
+
+export type CanvasCombinationPlanApiDetail = {
+  id: string;
+  canvas_id: string;
+  combination_node_id: string;
+  combination_node_title: string | null;
+  batch_run_id: string | null;
+  mode: CanvasCombinationMode;
+  status: string;
+  governance_action: string | null;
+  governance_signals: string[];
+  input_node_ids: string[];
+  estimated_combination_count: number;
+  total_item_count: number;
+  completed_item_count: number;
+  succeeded_item_count: number;
+  failed_item_count: number;
+  total_shard_count: number;
+  completed_shard_count: number;
+  succeeded_shard_count: number;
+  failed_shard_count: number;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function createCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  nodeId: string,
+  payload: {
+    mode: CanvasCombinationMode;
+    anchorInputNodeId?: string | null;
+    sampleSize?: number;
+    shardSize?: number;
+  },
+  fallbackMessage = "创建组合计划失败。",
+) {
+  const response = await requestApi(
+    `/api/canvases/${context.canvasId}/nodes/${nodeId}/combination-plans`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanApiDetail>(response, fallbackMessage);
+}
+
+export async function runCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  planId: string,
+  payload?: {
+    allowHighCost?: boolean;
+  },
+  fallbackMessage = "启动组合计划失败。",
+) {
+  const response = await requestApi(
+    `/api/combination-plans/${planId}/run`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload ?? {}),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanApiDetail>(response, fallbackMessage);
+}
+
+export async function pauseCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  planId: string,
+  fallbackMessage = "暂停组合计划失败。",
+) {
+  const response = await requestApi(
+    `/api/combination-plans/${planId}/pause`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify({}),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanApiDetail>(response, fallbackMessage);
+}
+
+export async function resumeCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  planId: string,
+  payload?: {
+    allowHighCost?: boolean;
+  },
+  fallbackMessage = "恢复组合计划失败。",
+) {
+  const response = await requestApi(
+    `/api/combination-plans/${planId}/resume`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify(payload ?? {}),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanApiDetail>(response, fallbackMessage);
+}
+
+export async function cancelCanvasCombinationPlan(
+  context: CanvasBoardApiContext,
+  planId: string,
+  fallbackMessage = "取消组合计划失败。",
+) {
+  const response = await requestApi(
+    `/api/combination-plans/${planId}/cancel`,
+    {
+      method: "POST",
+      headers: getWorkspaceHeaders(context.workspaceId),
+      body: JSON.stringify({}),
+    },
+    fallbackMessage,
+  );
+
+  return parseApiEnvelope<CanvasCombinationPlanApiDetail>(response, fallbackMessage);
 }
 
 export function subscribeCanvasRuntime(

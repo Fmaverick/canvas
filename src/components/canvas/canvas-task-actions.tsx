@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 
+import { canCanvasNodeRun } from "@/components/canvas/infinite-canvas-board.shared";
 import { Button } from "@/components/ui/button";
 
 type CanvasTaskActionsProps = {
@@ -13,6 +14,8 @@ type CanvasTaskActionsProps = {
   taskStatus?: string | null;
   taskType: string;
   onRuntimeChanged?: () => Promise<void> | void;
+  onRun?: () => Promise<void> | void;
+  runLabel?: string;
 };
 
 function createRequestId(prefix: string) {
@@ -27,15 +30,23 @@ export function CanvasTaskActions({
   taskStatus,
   taskType,
   onRuntimeChanged,
+  onRun,
+  runLabel,
 }: CanvasTaskActionsProps) {
   const [isRunning, setIsRunning] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
+  const canRunNode = canCanvasNodeRun(taskType);
 
   async function runNode() {
     setIsRunning(true);
 
     try {
+      if (onRun) {
+        await onRun();
+        return;
+      }
+
       const response = await fetch(`/api/canvases/${canvasId}/nodes/${nodeId}/run`, {
         method: "POST",
         headers: {
@@ -122,8 +133,8 @@ export function CanvasTaskActions({
 
   return (
     <div className="flex flex-wrap gap-2">
-      <Button disabled={isRunning} size="sm" type="button" variant="default" onClick={runNode}>
-        {isRunning ? "运行中..." : "运行节点"}
+      <Button disabled={!canRunNode || isRunning} size="sm" type="button" variant="default" onClick={runNode}>
+        {isRunning ? "运行中..." : (runLabel ?? "运行节点")}
       </Button>
       {taskId && taskStatus === "failed" ? (
         <Button disabled={isRetrying} size="sm" type="button" variant="outline" onClick={retryTask}>

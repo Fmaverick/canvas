@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { and, asc, desc, eq, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { createGeneratedAsset, listAssetsByOwner } from "@/application/services/asset-service";
@@ -11,6 +12,9 @@ import {
   canvasEdges,
   canvasNodes,
   canvases,
+  combinationItems,
+  combinationPlans,
+  combinationShards,
   generationTasks,
   instructionPresets,
   libraryItems,
@@ -26,9 +30,16 @@ import {
 } from "@/infrastructure/ai/cloubic-client";
 import { ApiError } from "@/lib/api";
 import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
+import { deriveProviderCircuitState, evaluateSchedulerCapacity } from "@/lib/combination-runtime";
 import { env } from "@/lib/env";
+import { logRuntimeEvent, recordRuntimeMetric } from "@/lib/runtime-observability";
 
 const runNodeMergeStrategySchema = z.enum(["previous_only", "merge_all", "custom"]);
+const runnableNodeTypes = new Set(["text", "image", "video", "storyboard"]);
+
+function isRunnableNodeType(nodeType: string) {
+  return runnableNodeTypes.has(nodeType);
+}
 
 function emitCanvasRuntimeEvent(workspaceId: string, canvasId: string | null | undefined, reason: string) {
   if (!canvasId) {
@@ -54,6 +65,11 @@ export const runNodeInputSchema = z.object({
   overrideSettings: z.record(z.string(), z.unknown()).default({}),
   batchRunId: z.uuid().optional(),
   batchRunIndex: z.coerce.number().int().positive().optional(),
+  combinationPlanId: z.uuid().optional(),
+  combinationItemId: z.uuid().optional(),
+  combinationShardId: z.uuid().optional(),
+  sourceBatchItemKey: z.string().min(1).max(160).optional(),
+  displayOrder: z.coerce.number().int().min(0).optional(),
   existingNodeRunId: z.uuid().optional(),
 });
 
@@ -91,6 +107,7 @@ export const runNodeBatchInputSchema = z.object({
   actorUserId: z.uuid(),
   nodeIds: z.array(z.uuid()).min(1).max(30),
   runCount: z.coerce.number().int().positive().max(50),
+  combinationPlanId: z.uuid().optional(),
 });
 
 export const listNodeRunBatchesInputSchema = z.object({
@@ -102,12 +119,21 @@ export const listNodeRunBatchesInputSchema = z.object({
 export const getNodeRunBatchInputSchema = z.object({
   workspaceId: z.uuid(),
   batchRunId: z.uuid(),
+  itemLimit: z.coerce.number().int().positive().max(100).optional(),
+  itemOffset: z.coerce.number().int().min(0).optional(),
+  itemStatus: z.enum(["draft", "queued", "running", "succeeded", "failed", "paused", "canceled"]).optional(),
 });
 
 export const bindNodeRunBatchResultNodeInputSchema = z.object({
   workspaceId: z.uuid(),
   batchRunId: z.uuid(),
   resultNodeId: z.uuid(),
+});
+
+export const retryBatchRunCombinationItemInputSchema = z.object({
+  workspaceId: z.uuid(),
+  batchRunId: z.uuid(),
+  combinationItemId: z.uuid(),
 });
 
 const DEFAULT_STORYBOARD_TEMPLATE_FILE = "shotOutFormat.md";
@@ -121,6 +147,18 @@ let cachedStoryboardTemplate:
       content: string;
     }
   | null = null;
+
+function getCombinationSchedulerLimits() {
+  return {
+    maxActiveShards: env.combinationActiveShardLimit,
+    maxActiveTasks: env.combinationActiveTaskLimit,
+    workspaceTaskQuota: env.workspaceActiveTaskQuota,
+    mediaPollBacklogLimit: env.mediaPollBacklogLimit,
+    providerCircuitMinSampleSize: env.providerCircuitMinSampleSize,
+    providerCircuitFailureRate: env.providerCircuitFailureRate,
+    providerCircuitConsecutiveFailures: env.providerCircuitConsecutiveFailures,
+  };
+}
 
 export const runLibraryItemImageGenerationInputSchema = z.object({
   workspaceId: z.uuid(),
@@ -200,6 +238,10 @@ function isTerminalNodeRunStatus(status: string | null | undefined) {
   return status === "succeeded" || status === "failed";
 }
 
+function isTerminalBatchRunStatus(status: string | null | undefined) {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
 function normalizeRecord(value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -208,8 +250,485 @@ function normalizeRecord(value: unknown) {
   return {};
 }
 
+type CombinationBindingRecord = {
+  inputNodeId: string;
+  inputNodeTitle: string;
+  itemId: string;
+  stableKey?: string;
+  itemLabel: string;
+  sourceType: "text" | "image" | "video";
+  contentText: string | null;
+  assetId: string | null;
+  sourceRefJson: Record<string, unknown>;
+  snapshotJson: Record<string, unknown>;
+};
+
+type CombinationExecutionContext = {
+  planId: string;
+  shardId: string | null;
+  itemId: string;
+  itemIndex: number;
+  stableKey: string;
+  displayLabel: string;
+  attemptCount: number;
+  bindingSummary: Record<string, unknown>[];
+  inputBindings: CombinationBindingRecord[];
+};
+
+type CombinationBatchContext = {
+  plan: typeof combinationPlans.$inferSelect;
+  combinationNode: typeof canvasNodes.$inferSelect;
+  selectedNodes: Array<{ id: string; title: string; type: string }>;
+  selectedEdges: Array<{ sourceNodeId: string; targetNodeId: string; priority: number }>;
+};
+
+function isPlanBatchMode(batchMode: string | null | undefined) {
+  return batchMode === "plan";
+}
+
+function isTerminalCombinationStatus(status: string | null | undefined) {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+function buildStableExecutionRequestId(parts: string[]) {
+  return createHash("sha1").update(parts.join(":")).digest("hex").slice(0, 24);
+}
+
+function extractCombinationPlanSummary(outputSnapshot: unknown) {
+  if (!outputSnapshot || typeof outputSnapshot !== "object") {
+    return null;
+  }
+
+  const summary = (outputSnapshot as Record<string, unknown>).summary;
+
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+
+  const summaryRecord = summary as Record<string, unknown>;
+
+  if (
+    summaryRecord.kind !== "combination_plan" ||
+    typeof summaryRecord.mode !== "string" ||
+    typeof summaryRecord.inputSourceCount !== "number" ||
+    typeof summaryRecord.estimatedCombinationCount !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    mode: summaryRecord.mode,
+    inputSourceCount: summaryRecord.inputSourceCount,
+    estimatedCombinationCount: summaryRecord.estimatedCombinationCount,
+    governanceSignals: Array.isArray(summaryRecord.governanceSignals)
+      ? summaryRecord.governanceSignals.filter((signal): signal is string => typeof signal === "string")
+      : [],
+    sampleLabels: Array.isArray(summaryRecord.sampleLabels)
+      ? summaryRecord.sampleLabels.filter((label): label is string => typeof label === "string")
+      : [],
+  };
+}
+
+function extractCombinationPlanDetail(outputSnapshot: unknown) {
+  if (!outputSnapshot || typeof outputSnapshot !== "object") {
+    return null;
+  }
+
+  const detail = (outputSnapshot as Record<string, unknown>).detail;
+
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+
+  const detailRecord = detail as Record<string, unknown>;
+
+  if (
+    typeof detailRecord.mode !== "string" ||
+    typeof detailRecord.inputSourceCount !== "number" ||
+    typeof detailRecord.estimatedCombinationCount !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    mode: detailRecord.mode,
+    inputSourceCount: detailRecord.inputSourceCount,
+    estimatedCombinationCount: detailRecord.estimatedCombinationCount,
+    governanceSignals: Array.isArray(detailRecord.governanceSignals)
+      ? detailRecord.governanceSignals.filter((signal): signal is string => typeof signal === "string")
+      : [],
+    sampleLabels: Array.isArray(detailRecord.sampleLabels)
+      ? detailRecord.sampleLabels.filter((label): label is string => typeof label === "string")
+      : [],
+    sources: Array.isArray(detailRecord.sources)
+      ? detailRecord.sources.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      : [],
+    samples: Array.isArray(detailRecord.samples)
+      ? detailRecord.samples.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      : [],
+  };
+}
+
+async function enrichBatchRunsWithCombinationSummary<
+  TBatchRun extends {
+    workspaceId: string;
+    selectedNodesJson: Array<{ id: string; type: string }>;
+  },
+>(batchRuns: TBatchRun[], includeDetail = false) {
+  const combinationNodeIds = uniqueStrings(
+    batchRuns.flatMap((batchRun) =>
+      batchRun.selectedNodesJson
+        .filter((node) => node.type === "combination")
+        .map((node) => node.id),
+    ),
+  );
+
+  if (combinationNodeIds.length === 0) {
+    return batchRuns.map((batchRun) => ({
+      ...batchRun,
+      combinationPlanSummary: null,
+      ...(includeDetail ? { combinationPlanDetail: null } : {}),
+    }));
+  }
+
+  const combinationNodes = await db
+    .select({
+      id: canvasNodes.id,
+      outputSnapshot: canvasNodes.outputSnapshot,
+    })
+    .from(canvasNodes)
+    .where(inArray(canvasNodes.id, combinationNodeIds));
+  const combinationNodeMap = new Map(combinationNodes.map((node) => [node.id, node.outputSnapshot]));
+
+  return batchRuns.map((batchRun) => {
+    const combinationNode = batchRun.selectedNodesJson.find((node) => node.type === "combination");
+    const outputSnapshot = combinationNode ? combinationNodeMap.get(combinationNode.id) : null;
+
+    return {
+      ...batchRun,
+      combinationPlanSummary: extractCombinationPlanSummary(outputSnapshot),
+      ...(includeDetail ? { combinationPlanDetail: extractCombinationPlanDetail(outputSnapshot) } : {}),
+    };
+  });
+}
+
+function mapNodeRunIndexRecord(
+  record: {
+    id: string;
+    combinationItemId: string | null;
+    nodeId: string;
+    taskId: string | null;
+    requestId: string;
+    runIndex: number | null;
+    nodeType: string;
+    nodeTitle: string;
+    status: string;
+    resultType: string | null;
+    contentText: string | null;
+    assetId: string | null;
+    resultMeta: Record<string, unknown> | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    startedAt: Date | null;
+    finishedAt: Date | null;
+    createdAt: Date;
+    assetFileName: string | null;
+    assetFileUrl: string | null;
+    assetMimeType: string | null;
+    taskRetryCount: number | null;
+    providerTaskId: string | null;
+  },
+) {
+  return {
+    id: record.id,
+    nodeRunId: record.id,
+    combinationItemId: record.combinationItemId,
+    nodeId: record.nodeId,
+    taskId: record.taskId,
+    requestId: record.requestId,
+    runIndex: record.runIndex,
+    nodeType: record.nodeType,
+    nodeTitle: record.nodeTitle,
+    status: record.status,
+    resultType: record.resultType,
+    contentText: record.contentText,
+    assetId: record.assetId,
+    resultMeta: record.resultMeta,
+    errorCode: record.errorCode,
+    errorMessage: record.errorMessage,
+    startedAt: record.startedAt,
+    finishedAt: record.finishedAt,
+    createdAt: record.createdAt,
+    assetFileName: record.assetFileName,
+    assetFileUrl: record.assetFileUrl,
+    assetMimeType: record.assetMimeType,
+    retryCount: record.taskRetryCount ?? 0,
+    providerTaskId: record.providerTaskId,
+  };
+}
+
+async function listLatestNodeRunIndexesForCombinationItems(params: {
+  workspaceId: string;
+  batchRunId: string;
+  combinationItemIds: string[];
+}) {
+  if (params.combinationItemIds.length === 0) {
+    return new Map<string, ReturnType<typeof mapNodeRunIndexRecord>[]>();
+  }
+
+  const rows = await db
+    .select({
+      id: nodeRuns.id,
+      combinationItemId: nodeRuns.combinationItemId,
+      nodeId: nodeRuns.nodeId,
+      taskId: nodeRuns.taskId,
+      requestId: nodeRuns.requestId,
+      runIndex: nodeRuns.runIndex,
+      nodeType: nodeRuns.nodeType,
+      nodeTitle: nodeRuns.nodeTitle,
+      status: nodeRuns.status,
+      resultType: nodeRuns.resultType,
+      contentText: nodeRuns.contentText,
+      assetId: nodeRuns.assetId,
+      resultMeta: nodeRuns.resultMeta,
+      errorCode: nodeRuns.errorCode,
+      errorMessage: nodeRuns.errorMessage,
+      startedAt: nodeRuns.startedAt,
+      finishedAt: nodeRuns.finishedAt,
+      createdAt: nodeRuns.createdAt,
+      assetFileName: assets.fileName,
+      assetFileUrl: assets.fileUrl,
+      assetMimeType: assets.mimeType,
+      taskRetryCount: generationTasks.retryCount,
+      providerTaskId: generationTasks.providerTaskId,
+    })
+    .from(nodeRuns)
+    .leftJoin(assets, eq(assets.id, nodeRuns.assetId))
+    .leftJoin(generationTasks, eq(generationTasks.id, nodeRuns.taskId))
+    .where(
+      and(
+        eq(nodeRuns.workspaceId, params.workspaceId),
+        eq(nodeRuns.batchRunId, params.batchRunId),
+        inArray(nodeRuns.combinationItemId, params.combinationItemIds),
+      ),
+    )
+    .orderBy(asc(nodeRuns.combinationItemId), asc(nodeRuns.nodeId), desc(nodeRuns.createdAt));
+  const latestIndexes = new Map<string, ReturnType<typeof mapNodeRunIndexRecord>[]>();
+  const seenNodeKey = new Set<string>();
+
+  for (const row of rows) {
+    const combinationItemId = row.combinationItemId;
+
+    if (!combinationItemId) {
+      continue;
+    }
+
+    const latestKey = `${combinationItemId}:${row.nodeId}`;
+
+    if (seenNodeKey.has(latestKey)) {
+      continue;
+    }
+
+    seenNodeKey.add(latestKey);
+    const current = latestIndexes.get(combinationItemId) ?? [];
+    current.push(mapNodeRunIndexRecord(row));
+    latestIndexes.set(combinationItemId, current);
+  }
+
+  return latestIndexes;
+}
+
+export async function getBatchRunCombinationItemDetail(params: {
+  workspaceId: string;
+  batchRunId: string;
+  combinationItemId: string;
+}) {
+  const [item] = await db
+    .select()
+    .from(combinationItems)
+    .where(
+      and(
+        eq(combinationItems.workspaceId, params.workspaceId),
+        eq(combinationItems.batchRunId, params.batchRunId),
+        eq(combinationItems.id, params.combinationItemId),
+      ),
+    )
+    .limit(1);
+
+  if (!item) {
+    throw new ApiError(404, "COMBINATION_ITEM_NOT_FOUND", "组合实例不存在。");
+  }
+
+  const indexMap = await listLatestNodeRunIndexesForCombinationItems({
+    workspaceId: params.workspaceId,
+    batchRunId: params.batchRunId,
+    combinationItemIds: [item.id],
+  });
+
+  return {
+    id: item.id,
+    shardId: item.shardId,
+    itemIndex: item.itemIndex,
+    stableKey: item.stableKey,
+    label: item.displayLabel,
+    status: item.status,
+    bindingSummary: item.bindingSummaryJson,
+    inputBindings: item.inputBindingsJson,
+    sourceBatchItemKey: item.sourceBatchItemKey,
+    displayOrder: item.displayOrder,
+    attemptCount: item.attemptCount,
+    lastErrorNodeId: item.lastErrorNodeId,
+    lastErrorCode: item.lastErrorCode,
+    lastErrorMessage: item.lastErrorMessage,
+    startedAt: item.startedAt,
+    finishedAt: item.finishedAt,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    resultIndexes: indexMap.get(item.id) ?? [],
+  };
+}
+
 function createBatchRunRequestId(batchRunId: string, runIndex: number, nodeId: string) {
   return `br-${batchRunId.slice(0, 8)}-${runIndex}-${nodeId.slice(0, 8)}-${crypto.randomUUID().slice(0, 12)}`;
+}
+
+function createCombinationNodeRunRequestId(batchRunId: string, combinationItemId: string, nodeId: string, attemptCount: number) {
+  return `cp-${batchRunId.slice(0, 8)}-${nodeId.slice(0, 8)}-${buildStableExecutionRequestId([
+    combinationItemId,
+    nodeId,
+    String(attemptCount),
+  ])}`;
+}
+
+function getLatestCombinationPlanIdFromSnapshot(outputSnapshot: unknown) {
+  if (!outputSnapshot || typeof outputSnapshot !== "object") {
+    return null;
+  }
+
+  const detail = normalizeRecord((outputSnapshot as Record<string, unknown>).detail);
+  const latestPlanId = detail.latestPlanId;
+
+  return typeof latestPlanId === "string" && latestPlanId.trim().length > 0 ? latestPlanId.trim() : null;
+}
+
+function getRunnableSelectedNodes(nodes: Array<{ id: string; title: string; type: string }>) {
+  return nodes.filter((node) => isRunnableNodeType(node.type));
+}
+
+function parseCombinationBindingRecord(value: unknown): CombinationBindingRecord | null {
+  const record = normalizeRecord(value);
+  const sourceType = record.sourceType;
+
+  if (
+    typeof record.inputNodeId !== "string" ||
+    typeof record.inputNodeTitle !== "string" ||
+    typeof record.itemId !== "string" ||
+    typeof record.itemLabel !== "string" ||
+    (sourceType !== "text" && sourceType !== "image" && sourceType !== "video")
+  ) {
+    return null;
+  }
+
+  return {
+    inputNodeId: record.inputNodeId,
+    inputNodeTitle: record.inputNodeTitle,
+    itemId: record.itemId,
+    stableKey: typeof record.stableKey === "string" ? record.stableKey : undefined,
+    itemLabel: record.itemLabel,
+    sourceType,
+    contentText: typeof record.contentText === "string" ? record.contentText : null,
+    assetId: typeof record.assetId === "string" ? record.assetId : null,
+    sourceRefJson: normalizeRecord(record.sourceRefJson),
+    snapshotJson: normalizeRecord(record.snapshotJson),
+  };
+}
+
+function extractCombinationBindingText(binding: CombinationBindingRecord) {
+  if (binding.contentText && binding.contentText.trim().length > 0) {
+    return binding.contentText.trim();
+  }
+
+  const snapshotText = binding.snapshotJson.contentText;
+
+  if (typeof snapshotText === "string" && snapshotText.trim().length > 0) {
+    return snapshotText.trim();
+  }
+
+  return null;
+}
+
+function extractCombinationBindingAssetUrl(binding: CombinationBindingRecord) {
+  const snapshotAsset = normalizeRecord(binding.snapshotJson.asset);
+  const assetUrlCandidates = [
+    snapshotAsset.fileUrl,
+    binding.snapshotJson.fileUrl,
+    binding.snapshotJson.imageUrl,
+    binding.snapshotJson.videoUrl,
+    binding.snapshotJson.url,
+  ];
+
+  for (const candidate of assetUrlCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function buildCombinationPromptSegments(
+  context: CombinationExecutionContext | null,
+  targetType: string,
+) {
+  if (!context) {
+    return [];
+  }
+
+  return context.inputBindings
+    .map((binding) => {
+      if (binding.sourceType === "text") {
+        return extractCombinationBindingText(binding) ?? binding.itemLabel;
+      }
+
+      if (binding.sourceType === "image") {
+        const imageUrl = extractCombinationBindingAssetUrl(binding);
+
+        if (targetType === "image" || targetType === "video") {
+          return binding.itemLabel.trim();
+        }
+
+        return [binding.itemLabel.trim(), imageUrl ? `参考图: ${imageUrl}` : null].filter(Boolean).join("\n");
+      }
+
+      const videoUrl = extractCombinationBindingAssetUrl(binding);
+      const videoText = extractCombinationBindingText(binding);
+
+      return [binding.itemLabel.trim(), videoText, videoUrl ? `视频参考: ${videoUrl}` : null].filter(Boolean).join("\n");
+    })
+    .filter((segment): segment is string => typeof segment === "string" && segment.trim().length > 0);
+}
+
+function buildCombinationReferenceImages(context: CombinationExecutionContext | null) {
+  if (!context) {
+    return [];
+  }
+
+  return context.inputBindings.flatMap((binding) => {
+    if (binding.sourceType !== "image") {
+      return [];
+    }
+
+      const url = extractCombinationBindingAssetUrl(binding);
+
+      if (!url) {
+        return [];
+      }
+
+      return [{
+        url,
+        label: binding.itemLabel.trim() || undefined,
+      }];
+    });
 }
 
 function buildLibraryItemGenerationPrompt(params: {
@@ -927,13 +1446,13 @@ function buildOutputSnapshotFromNodeRun(run: {
 async function getUpstreamNodesForExecution(
   input: Pick<
     z.infer<typeof runNodeInputSchema>,
-    "workspaceId" | "canvasId" | "batchRunId" | "batchRunIndex"
+    "workspaceId" | "canvasId" | "batchRunId" | "batchRunIndex" | "combinationItemId"
   >,
   upstreamNodeIds: string[],
 ) {
   const upstreamNodes = await getUpstreamNodes(input.workspaceId, input.canvasId, upstreamNodeIds);
 
-  if (!input.batchRunId || !input.batchRunIndex || upstreamNodes.length === 0) {
+  if (!input.batchRunId || upstreamNodes.length === 0) {
     return upstreamNodes;
   }
 
@@ -951,6 +1470,7 @@ async function getUpstreamNodesForExecution(
       finishedAt: nodeRuns.finishedAt,
       assetFileUrl: assets.fileUrl,
       assetMimeType: assets.mimeType,
+      createdAt: nodeRuns.createdAt,
     })
     .from(nodeRuns)
     .leftJoin(assets, eq(assets.id, nodeRuns.assetId))
@@ -958,12 +1478,23 @@ async function getUpstreamNodesForExecution(
       and(
         eq(nodeRuns.workspaceId, input.workspaceId),
         eq(nodeRuns.batchRunId, input.batchRunId),
-        eq(nodeRuns.runIndex, input.batchRunIndex),
+        input.combinationItemId
+          ? eq(nodeRuns.combinationItemId, input.combinationItemId)
+          : input.batchRunIndex
+            ? eq(nodeRuns.runIndex, input.batchRunIndex)
+            : undefined,
         inArray(nodeRuns.nodeId, upstreamNodeIds),
       ),
-    );
+    )
+    .orderBy(desc(nodeRuns.createdAt));
 
-  const batchNodeRunMap = new Map(batchNodeRuns.map((run) => [run.nodeId, run]));
+  const batchNodeRunMap = new Map<string, (typeof batchNodeRuns)[number]>();
+
+  for (const run of batchNodeRuns) {
+    if (!batchNodeRunMap.has(run.nodeId)) {
+      batchNodeRunMap.set(run.nodeId, run);
+    }
+  }
 
   return upstreamNodes.map((node) => {
     const batchNodeRun = batchNodeRunMap.get(node.id);
@@ -1102,6 +1633,43 @@ async function getCanvasEdgesForNodes(workspaceId: string, canvasId: string, nod
     .orderBy(asc(canvasEdges.priority), asc(canvasEdges.createdAt));
 }
 
+async function getCombinationExecutionContext(
+  workspaceId: string,
+  combinationItemId: string | null | undefined,
+) {
+  if (!combinationItemId) {
+    return null;
+  }
+
+  const [item] = await db
+    .select()
+    .from(combinationItems)
+    .where(and(eq(combinationItems.workspaceId, workspaceId), eq(combinationItems.id, combinationItemId)))
+    .limit(1);
+
+  if (!item) {
+    throw new ApiError(404, "COMBINATION_ITEM_NOT_FOUND", "组合实例不存在。");
+  }
+
+  return {
+    planId: item.planId,
+    shardId: item.shardId,
+    itemId: item.id,
+    itemIndex: item.itemIndex,
+    stableKey: item.stableKey,
+    displayLabel: item.displayLabel,
+    attemptCount: item.attemptCount ?? 0,
+    bindingSummary: Array.isArray(item.bindingSummaryJson)
+      ? item.bindingSummaryJson.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object"))
+      : [],
+    inputBindings: Array.isArray(item.inputBindingsJson)
+      ? item.inputBindingsJson
+          .map((value) => parseCombinationBindingRecord(value))
+          .filter((value): value is CombinationBindingRecord => Boolean(value))
+      : [],
+  } satisfies CombinationExecutionContext;
+}
+
 function sortNodesForBatchRun(
   nodes: Array<{ id: string; title: string; type: string }>,
   edges: Array<{ sourceNodeId: string; targetNodeId: string; priority: number }>,
@@ -1160,6 +1728,7 @@ async function buildExecutionPayload(
   upstreamNodes: Awaited<ReturnType<typeof getUpstreamNodesForExecution>>,
   referenceAssets: Awaited<ReturnType<typeof getNodeReferenceAssets>>,
   input: z.infer<typeof runNodeInputSchema>,
+  combinationContext: CombinationExecutionContext | null,
 ) {
   const upstreamReferenceAssetMap = await getNodeReferenceAssetMap(input.workspaceId, upstreamNodes);
   const upstreamImagePromptContextMap =
@@ -1198,8 +1767,12 @@ async function buildExecutionPayload(
         ]
       : [],
   );
+  const combinationPromptSegments = buildCombinationPromptSegments(combinationContext, node.type);
+  const combinationReferenceImages = buildCombinationReferenceImages(combinationContext);
 
   const promptSegments = [normalizePromptForExecution(node.promptInput).trim()];
+
+  promptSegments.push(...combinationPromptSegments);
 
   if (input.useUpstreamOutputs) {
     promptSegments.push(
@@ -1281,6 +1854,7 @@ async function buildExecutionPayload(
     ...(node.type === "video"
       ? [...explicitReferenceImageAssets, ...unassignedReferenceImageAssets].map((asset) => asset.fileUrl)
       : referenceAssets.map((asset) => asset.fileUrl)),
+    ...combinationReferenceImages.map((image) => image.url),
     ...upstreamReferenceImages.map((image) => image.url),
     ...mergedReferenceImages,
   ]);
@@ -1296,8 +1870,15 @@ async function buildExecutionPayload(
     typeof mergedSettings.lastFrameImageUrl === "string" && mergedSettings.lastFrameImageUrl.trim().length > 0
       ? mergedSettings.lastFrameImageUrl.trim()
       : undefined;
-  const firstFrameImageUrl = isFirstLastVideoMode ? firstFrameAsset?.fileUrl ?? configuredFirstFrameImageUrl : undefined;
-  const lastFrameImageUrl = isFirstLastVideoMode ? lastFrameAsset?.fileUrl ?? configuredLastFrameImageUrl : undefined;
+  const firstFrameImageUrl = isFirstLastVideoMode
+    ? firstFrameAsset?.fileUrl ?? configuredFirstFrameImageUrl ?? combinationReferenceImages[0]?.url
+    : undefined;
+  const lastFrameImageUrl = isFirstLastVideoMode
+    ? lastFrameAsset?.fileUrl ??
+      configuredLastFrameImageUrl ??
+      combinationReferenceImages[1]?.url ??
+      combinationReferenceImages[0]?.url
+    : undefined;
   const shotPrompts = uniqueStrings(
     ((isStoryboardVideoMode ? ((mergedSettings.shotPrompts as unknown[]) ?? []) : []).filter(
       (item): item is string => typeof item === "string",
@@ -1331,7 +1912,10 @@ async function buildExecutionPayload(
     labeledUnassignedReferenceAssets,
     referenceOrderMaps,
   );
-  const orderedUpstreamReferenceImages = sortVideoReferenceAssetsByContext(upstreamReferenceImages, referenceOrderMaps);
+  const orderedUpstreamReferenceImages = sortVideoReferenceAssetsByContext(
+    [...combinationReferenceImages, ...upstreamReferenceImages],
+    referenceOrderMaps,
+  );
   const referenceImageEntries =
     node.type === "video"
       ? buildVideoReferenceImageEntries({
@@ -1371,6 +1955,18 @@ async function buildExecutionPayload(
     referenceAssets,
     upstreamNodeIds: upstreamNodes.map((upstreamNode) => upstreamNode.id),
     upstreamOutputs,
+    combinationContext: combinationContext
+      ? {
+          combinationPlanId: combinationContext.planId,
+          combinationItemId: combinationContext.itemId,
+          combinationShardId: combinationContext.shardId,
+          sourceBatchItemKey: combinationContext.stableKey,
+          displayOrder: combinationContext.itemIndex,
+          displayLabel: combinationContext.displayLabel,
+          inputBindings: combinationContext.inputBindings,
+        }
+      : null,
+    inputBindingSummary: combinationContext?.bindingSummary ?? [],
     useUpstreamOutputs: input.useUpstreamOutputs,
     mergeStrategy: input.mergeStrategy,
   };
@@ -1381,14 +1977,13 @@ function getNextPollAt(delaySeconds = 10) {
 }
 
 async function refreshNodeRunBatchSummary(batchRunId: string) {
-  const [batchRun] = await db
-    .select({
-      workspaceId: nodeRunBatches.workspaceId,
-      canvasId: nodeRunBatches.canvasId,
-    })
-    .from(nodeRunBatches)
-    .where(eq(nodeRunBatches.id, batchRunId))
-    .limit(1);
+  const batchRun = await getBatchRunRecord(batchRunId);
+
+  if (isPlanBatchMode(batchRun.batchMode)) {
+    await refreshCombinationBatchSummary(batchRun);
+    return;
+  }
+
   const batchNodeRuns = await db
     .select({
       status: nodeRuns.status,
@@ -1421,9 +2016,7 @@ async function refreshNodeRunBatchSummary(batchRunId: string) {
     })
     .where(eq(nodeRunBatches.id, batchRunId));
 
-  if (batchRun) {
-    emitCanvasRuntimeEvent(batchRun.workspaceId, batchRun.canvasId, "batch_summary_updated");
-  }
+  emitCanvasRuntimeEvent(batchRun.workspaceId, batchRun.canvasId, "batch_summary_updated");
 }
 
 async function getNodeRunRecord(nodeRunId: string) {
@@ -1454,15 +2047,321 @@ async function getBatchRunRecord(batchRunId: string) {
   return batchRun;
 }
 
+async function getCombinationPlanByBatchRunId(batchRunId: string) {
+  const [plan] = await db
+    .select()
+    .from(combinationPlans)
+    .where(eq(combinationPlans.batchRunId, batchRunId))
+    .orderBy(desc(combinationPlans.createdAt))
+    .limit(1);
+
+  if (!plan) {
+    throw new ApiError(404, "COMBINATION_PLAN_NOT_FOUND", "组合计划不存在。");
+  }
+
+  return plan;
+}
+
+async function getCombinationPlanRecord(planId: string) {
+  const [plan] = await db
+    .select()
+    .from(combinationPlans)
+    .where(eq(combinationPlans.id, planId))
+    .limit(1);
+
+  if (!plan) {
+    throw new ApiError(404, "COMBINATION_PLAN_NOT_FOUND", "组合计划不存在。");
+  }
+
+  return plan;
+}
+
+async function listRecentProviderTaskStatuses(workspaceId: string, provider: string, limit: number) {
+  const records = await db
+    .select({
+      status: generationTasks.status,
+    })
+    .from(generationTasks)
+    .where(and(eq(generationTasks.workspaceId, workspaceId), eq(generationTasks.provider, provider)))
+    .orderBy(desc(generationTasks.createdAt))
+    .limit(limit);
+
+  return records.map((record) => record.status);
+}
+
+async function countWorkspaceActiveTasks(workspaceId: string) {
+  const [{ count }] = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(generationTasks)
+    .where(
+      and(
+        eq(generationTasks.workspaceId, workspaceId),
+        or(
+          eq(generationTasks.status, "queued"),
+          eq(generationTasks.status, "dispatched"),
+          eq(generationTasks.status, "processing"),
+        ),
+      ),
+    );
+
+  return Number(count ?? 0);
+}
+
+async function countMediaPollBacklog(workspaceId: string) {
+  const [{ count }] = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(generationTasks)
+    .where(
+      and(
+        eq(generationTasks.workspaceId, workspaceId),
+        eq(generationTasks.taskType, "video"),
+        or(eq(generationTasks.status, "dispatched"), eq(generationTasks.status, "processing")),
+      ),
+    );
+
+  return Number(count ?? 0);
+}
+
+async function pauseCombinationPlanForGovernance(params: {
+  workspaceId: string;
+  canvasId: string;
+  planId: string;
+  reasonCode: string;
+  reasonMessage: string;
+}) {
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(combinationPlans)
+      .set({
+        status: "paused",
+        lastErrorCode: params.reasonCode,
+        lastErrorMessage: params.reasonMessage,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(combinationPlans.workspaceId, params.workspaceId),
+          eq(combinationPlans.id, params.planId),
+          or(eq(combinationPlans.status, "queued"), eq(combinationPlans.status, "running")),
+        ),
+      );
+
+    await tx
+      .update(combinationItems)
+      .set({
+        status: "paused",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(combinationItems.workspaceId, params.workspaceId),
+          eq(combinationItems.planId, params.planId),
+          or(eq(combinationItems.status, "queued"), eq(combinationItems.status, "running")),
+        ),
+      );
+
+    await tx
+      .update(combinationShards)
+      .set({
+        status: "paused",
+        lastErrorCode: params.reasonCode,
+        lastErrorMessage: params.reasonMessage,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(combinationShards.workspaceId, params.workspaceId),
+          eq(combinationShards.planId, params.planId),
+          or(eq(combinationShards.status, "queued"), eq(combinationShards.status, "running")),
+        ),
+      );
+  });
+
+  recordRuntimeMetric({
+    name: "combination_plan_auto_paused",
+    value: 1,
+    unit: "count",
+    tags: {
+      workspace_id: params.workspaceId,
+      plan_id: params.planId,
+      reason_code: params.reasonCode,
+    },
+  });
+  logRuntimeEvent({
+    level: "warn",
+    event: "combination.plan.auto_paused",
+    workspaceId: params.workspaceId,
+    canvasId: params.canvasId,
+    planId: params.planId,
+    status: "paused",
+    details: {
+      reasonCode: params.reasonCode,
+      reasonMessage: params.reasonMessage,
+    },
+  });
+}
+
+function buildNodeDependencyMap(
+  nodes: Array<{ id: string }>,
+  edges: Array<{ sourceNodeId: string; targetNodeId: string }>,
+) {
+  const selectedNodeIdSet = new Set(nodes.map((node) => node.id));
+
+  return new Map<string, string[]>(
+    nodes.map((node) => [
+      node.id,
+      edges
+        .filter((edge) => edge.targetNodeId === node.id && selectedNodeIdSet.has(edge.sourceNodeId))
+        .map((edge) => edge.sourceNodeId),
+    ]),
+  );
+}
+
+async function refreshCombinationBatchSummary(batchRun: Awaited<ReturnType<typeof getBatchRunRecord>>) {
+  const [plan, items, shards, batchNodeRuns] = await Promise.all([
+    getCombinationPlanByBatchRunId(batchRun.id),
+    db.select().from(combinationItems).where(eq(combinationItems.batchRunId, batchRun.id)),
+    db.select().from(combinationShards).where(eq(combinationShards.batchRunId, batchRun.id)).orderBy(asc(combinationShards.shardIndex)),
+    db.select({ status: nodeRuns.status }).from(nodeRuns).where(eq(nodeRuns.batchRunId, batchRun.id)),
+  ]);
+
+  const now = new Date();
+  const itemsByShardId = new Map<string, typeof items>();
+
+  for (const item of items) {
+    if (!item.shardId) {
+      continue;
+    }
+
+    const current = itemsByShardId.get(item.shardId) ?? [];
+    current.push(item);
+    itemsByShardId.set(item.shardId, current);
+  }
+
+  for (const shard of shards) {
+    const shardItems = itemsByShardId.get(shard.id) ?? [];
+    const completedItemCount = shardItems.filter((item) => isTerminalCombinationStatus(item.status)).length;
+    const succeededItemCount = shardItems.filter((item) => item.status === "succeeded").length;
+    const failedItemCount = shardItems.filter((item) => item.status === "failed").length;
+    const hasRunningItem = shardItems.some((item) => item.status === "running");
+    const hasQueuedItem = shardItems.some((item) => item.status === "queued" || item.status === "draft");
+    const nextStatus =
+      shard.status === "paused" || shard.status === "canceled"
+        ? shard.status
+        : shardItems.length === 0 || completedItemCount === shardItems.length
+          ? failedItemCount === 0
+            ? "succeeded"
+            : "failed"
+          : hasRunningItem || completedItemCount > 0
+            ? "running"
+            : hasQueuedItem
+              ? "queued"
+              : shard.status;
+
+    await db
+      .update(combinationShards)
+      .set({
+        status: nextStatus,
+        completedItemCount,
+        succeededItemCount,
+        failedItemCount,
+        finishedAt: nextStatus === "succeeded" || nextStatus === "failed" ? shard.finishedAt ?? now : null,
+        updatedAt: now,
+      })
+      .where(eq(combinationShards.id, shard.id));
+  }
+
+  const refreshedShards = await db
+    .select()
+    .from(combinationShards)
+    .where(eq(combinationShards.batchRunId, batchRun.id));
+  const totalItemCount = items.length;
+  const completedItemCount = items.filter((item) => isTerminalCombinationStatus(item.status)).length;
+  const succeededItemCount = items.filter((item) => item.status === "succeeded").length;
+  const failedItemCount = items.filter((item) => item.status === "failed").length;
+  const totalShardCount = refreshedShards.length;
+  const completedShardCount = refreshedShards.filter((shard) => isTerminalCombinationStatus(shard.status)).length;
+  const succeededShardCount = refreshedShards.filter((shard) => shard.status === "succeeded").length;
+  const failedShardCount = refreshedShards.filter((shard) => shard.status === "failed").length;
+  const totalNodeRunCount = batchNodeRuns.length;
+  const completedNodeRunCount = batchNodeRuns.filter((item) => isTerminalNodeRunStatus(item.status)).length;
+  const succeededNodeRunCount = batchNodeRuns.filter((item) => item.status === "succeeded").length;
+  const failedNodeRunCount = batchNodeRuns.filter((item) => item.status === "failed").length;
+  const hasActiveItems = items.some((item) => item.status === "queued" || item.status === "running");
+  const nextPlanStatus =
+    plan.status === "paused" || plan.status === "canceled"
+      ? plan.status
+      : totalItemCount === 0 || completedItemCount === totalItemCount
+        ? failedItemCount === 0
+          ? "succeeded"
+          : "failed"
+        : hasActiveItems || completedItemCount > 0
+          ? "running"
+          : "queued";
+  const nextBatchStatus =
+    totalItemCount === 0 || completedItemCount < totalItemCount
+      ? "processing"
+      : failedItemCount === 0
+        ? "succeeded"
+        : succeededItemCount === 0
+          ? "failed"
+          : "partial_failed";
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(combinationPlans)
+      .set({
+        status: nextPlanStatus,
+        totalItemCount,
+        completedItemCount,
+        succeededItemCount,
+        failedItemCount,
+        totalShardCount,
+        completedShardCount,
+        succeededShardCount,
+        failedShardCount,
+        finishedAt: nextPlanStatus === "succeeded" || nextPlanStatus === "failed" ? plan.finishedAt ?? now : null,
+        updatedAt: now,
+      })
+      .where(eq(combinationPlans.id, plan.id));
+
+    await tx
+      .update(nodeRunBatches)
+      .set({
+        status: nextBatchStatus,
+        totalCombinationCount: totalItemCount,
+        completedCombinationCount: completedItemCount,
+        succeededCombinationCount: succeededItemCount,
+        failedCombinationCount: failedItemCount,
+        totalShardCount,
+        completedShardCount,
+        totalNodeRunCount,
+        completedNodeRunCount,
+        succeededNodeRunCount,
+        failedNodeRunCount,
+        updatedAt: now,
+      })
+      .where(eq(nodeRunBatches.id, batchRun.id));
+  });
+
+  emitCanvasRuntimeEvent(batchRun.workspaceId, batchRun.canvasId, "batch_summary_updated");
+}
+
 async function getSelectedEdgesForBatchRun(batchRun: Awaited<ReturnType<typeof getBatchRunRecord>>) {
   const nodeIds = batchRun.selectedNodesJson.map((node) => node.id);
 
   return getCanvasEdgesForNodes(batchRun.workspaceId, batchRun.canvasId, nodeIds);
 }
 
-async function triggerBatchRunProgress(batchRunId: string, runIndex: number) {
+async function triggerRepeatBatchRunProgress(batchRunId: string, runIndex: number) {
   const batchRun = await getBatchRunRecord(batchRunId);
-  const selectedNodes = batchRun.selectedNodesJson;
+  const selectedNodes = getRunnableSelectedNodes(batchRun.selectedNodesJson);
   const selectedNodeIds = selectedNodes.map((node) => node.id);
   const selectedEdges = await getSelectedEdgesForBatchRun(batchRun);
   const batchNodeRuns = await db
@@ -1567,6 +2466,435 @@ async function triggerBatchRunProgress(batchRunId: string, runIndex: number) {
   await Promise.all(readyNodeRuns.map((nodeRun) => launchBatchNodeRun(nodeRun.id)));
 }
 
+async function syncCombinationItemState(
+  batchRun: Awaited<ReturnType<typeof getBatchRunRecord>>,
+  combinationItemId: string,
+) {
+  const [item] = await db
+    .select()
+    .from(combinationItems)
+    .where(and(eq(combinationItems.batchRunId, batchRun.id), eq(combinationItems.id, combinationItemId)))
+    .limit(1);
+
+  if (!item || item.status === "paused" || item.status === "canceled") {
+    return item;
+  }
+
+  const selectedNodes = getRunnableSelectedNodes(batchRun.selectedNodesJson);
+  const itemNodeRuns = await db
+    .select()
+    .from(nodeRuns)
+    .where(and(eq(nodeRuns.batchRunId, batchRun.id), eq(nodeRuns.combinationItemId, combinationItemId)))
+    .orderBy(desc(nodeRuns.createdAt));
+  const latestNodeRunMap = new Map<string, (typeof itemNodeRuns)[number]>();
+
+  for (const nodeRun of itemNodeRuns) {
+    if (!latestNodeRunMap.has(nodeRun.nodeId)) {
+      latestNodeRunMap.set(nodeRun.nodeId, nodeRun);
+    }
+  }
+
+  const latestNodeRuns = Array.from(latestNodeRunMap.values());
+  const terminalNodeRunCount = latestNodeRuns.filter((nodeRun) => isTerminalNodeRunStatus(nodeRun.status)).length;
+  const hasActiveNodeRun = latestNodeRuns.some(
+    (nodeRun) => nodeRun.status === "queued" || nodeRun.status === "launching" || nodeRun.status === "processing",
+  );
+  const failedNodeRun = latestNodeRuns.find((nodeRun) => nodeRun.status === "failed") ?? null;
+  const nextStatus =
+    latestNodeRuns.length === 0
+      ? "queued"
+      : hasActiveNodeRun
+        ? "running"
+        : terminalNodeRunCount >= selectedNodes.length
+          ? failedNodeRun
+            ? "failed"
+            : "succeeded"
+          : failedNodeRun
+            ? "failed"
+            : "running";
+  const startedAt = item.startedAt ?? latestNodeRuns.map((nodeRun) => nodeRun.startedAt).find(Boolean) ?? null;
+  const finishedAt = nextStatus === "succeeded" || nextStatus === "failed" ? new Date() : null;
+
+  await db
+    .update(combinationItems)
+    .set({
+      status: nextStatus,
+      startedAt,
+      finishedAt,
+      lastErrorNodeId: failedNodeRun?.nodeId ?? null,
+      lastErrorCode: failedNodeRun?.errorCode ?? null,
+      lastErrorMessage: failedNodeRun?.errorMessage ?? null,
+      updatedAt: new Date(),
+    })
+    .where(eq(combinationItems.id, item.id));
+
+  return item;
+}
+
+async function triggerCombinationItemProgress(batchRunId: string, combinationItemId: string) {
+  const batchRun = await getBatchRunRecord(batchRunId);
+
+  if (!isPlanBatchMode(batchRun.batchMode)) {
+    return;
+  }
+
+  const [item] = await db
+    .select()
+    .from(combinationItems)
+    .where(and(eq(combinationItems.batchRunId, batchRun.id), eq(combinationItems.id, combinationItemId)))
+    .limit(1);
+
+  if (!item || item.status === "succeeded" || item.status === "failed" || item.status === "canceled") {
+    await refreshNodeRunBatchSummary(batchRun.id);
+    return;
+  }
+
+  const selectedNodes = getRunnableSelectedNodes(batchRun.selectedNodesJson);
+  const selectedEdges = await getSelectedEdgesForBatchRun(batchRun);
+  const incomingMap = buildNodeDependencyMap(selectedNodes, selectedEdges);
+  const itemNodeRuns = await db
+    .select()
+    .from(nodeRuns)
+    .where(and(eq(nodeRuns.batchRunId, batchRun.id), eq(nodeRuns.combinationItemId, combinationItemId)))
+    .orderBy(desc(nodeRuns.createdAt));
+  const latestNodeRunMap = new Map<string, (typeof itemNodeRuns)[number]>();
+
+  for (const nodeRun of itemNodeRuns) {
+    if (!latestNodeRunMap.has(nodeRun.nodeId)) {
+      latestNodeRunMap.set(nodeRun.nodeId, nodeRun);
+    }
+  }
+
+  if (item.status === "queued" || item.status === "draft") {
+    await db
+      .update(combinationItems)
+      .set({
+        status: "running",
+        startedAt: item.startedAt ?? new Date(),
+        attemptCount: Math.max(item.attemptCount ?? 0, 1),
+        updatedAt: new Date(),
+      })
+      .where(eq(combinationItems.id, item.id));
+
+    recordRuntimeMetric({
+      name: "combination_item_started",
+      value: 1,
+      unit: "count",
+      tags: {
+        workspace_id: batchRun.workspaceId,
+        batch_run_id: batchRun.id,
+        plan_id: item.planId,
+        shard_id: item.shardId ?? "none",
+        combination_item_id: item.id,
+      },
+      fields: {
+        itemIndex: item.itemIndex,
+        stableKey: item.stableKey,
+        attemptCount: Math.max(item.attemptCount ?? 0, 1),
+      },
+    });
+    logRuntimeEvent({
+      level: "info",
+      event: "combination.item.started",
+      workspaceId: batchRun.workspaceId,
+      canvasId: batchRun.canvasId,
+      planId: item.planId,
+      shardId: item.shardId,
+      combinationItemId: item.id,
+      status: "running",
+      details: {
+        itemIndex: item.itemIndex,
+        stableKey: item.stableKey,
+        displayLabel: item.displayLabel,
+      },
+    });
+  }
+
+  const readyNodeRunIds: string[] = [];
+
+  for (const node of selectedNodes) {
+    const existingNodeRun = latestNodeRunMap.get(node.id);
+
+    if (existingNodeRun) {
+      if (!existingNodeRun.taskId && existingNodeRun.status === "queued") {
+        readyNodeRunIds.push(existingNodeRun.id);
+      }
+
+      continue;
+    }
+
+    const dependencyNodeIds = incomingMap.get(node.id) ?? [];
+    const dependencyRuns = dependencyNodeIds.map((dependencyNodeId) => latestNodeRunMap.get(dependencyNodeId)).filter(Boolean);
+
+    if (dependencyRuns.length !== dependencyNodeIds.length) {
+      continue;
+    }
+
+    const hasFailedDependency = dependencyRuns.some((dependencyRun) => dependencyRun?.status === "failed");
+
+    if (hasFailedDependency) {
+      const [blockedNodeRun] = await db
+        .insert(nodeRuns)
+        .values({
+          workspaceId: batchRun.workspaceId,
+          canvasId: batchRun.canvasId,
+          nodeId: node.id,
+          batchRunId: batchRun.id,
+          combinationPlanId: item.planId,
+          combinationItemId: item.id,
+          combinationShardId: item.shardId,
+          requestId: createCombinationNodeRunRequestId(batchRun.id, item.id, node.id, Math.max(item.attemptCount, 1)),
+          sourceBatchItemKey: item.stableKey,
+          displayOrder: item.itemIndex,
+          nodeType: node.type,
+          nodeTitle: node.title,
+          status: "failed",
+          errorCode: "UPSTREAM_NODE_FAILED",
+          errorMessage: "组合实例中的上游节点失败，当前节点已被阻断。",
+          finishedAt: new Date(),
+        })
+        .returning();
+
+      latestNodeRunMap.set(node.id, blockedNodeRun);
+      continue;
+    }
+
+    const dependenciesReady = dependencyRuns.every((dependencyRun) => dependencyRun?.status === "succeeded");
+
+    if (!dependenciesReady) {
+      continue;
+    }
+
+    const [createdNodeRun] = await db
+      .insert(nodeRuns)
+      .values({
+        workspaceId: batchRun.workspaceId,
+        canvasId: batchRun.canvasId,
+        nodeId: node.id,
+        batchRunId: batchRun.id,
+        combinationPlanId: item.planId,
+        combinationItemId: item.id,
+        combinationShardId: item.shardId,
+        requestId: createCombinationNodeRunRequestId(batchRun.id, item.id, node.id, Math.max(item.attemptCount, 1)),
+        sourceBatchItemKey: item.stableKey,
+        displayOrder: item.itemIndex,
+        nodeType: node.type,
+        nodeTitle: node.title,
+        status: "queued",
+      })
+      .returning();
+
+    latestNodeRunMap.set(node.id, createdNodeRun);
+    readyNodeRunIds.push(createdNodeRun.id);
+  }
+
+  await syncCombinationItemState(batchRun, combinationItemId);
+  await refreshNodeRunBatchSummary(batchRun.id);
+
+  if (readyNodeRunIds.length > 0) {
+    await Promise.all(readyNodeRunIds.map((nodeRunId) => launchBatchNodeRun(nodeRunId)));
+  }
+
+  await refreshNodeRunBatchSummary(batchRun.id);
+  await scheduleCombinationBatchRun(batchRun.id);
+}
+
+async function scheduleCombinationBatchRun(batchRunId: string) {
+  const batchRun = await getBatchRunRecord(batchRunId);
+
+  if (!isPlanBatchMode(batchRun.batchMode)) {
+    return;
+  }
+
+  const plan = await getCombinationPlanByBatchRunId(batchRun.id);
+
+  if (plan.status === "paused" || plan.status === "canceled" || plan.status === "succeeded" || plan.status === "failed") {
+    await refreshNodeRunBatchSummary(batchRun.id);
+    return;
+  }
+
+  const runtimeLimits = getCombinationSchedulerLimits();
+  const [runningShards, queuedShards, activeTasks, workspaceActiveTaskCount, mediaPollBacklog, recentProviderStatuses] =
+    await Promise.all([
+    db
+      .select()
+      .from(combinationShards)
+      .where(and(eq(combinationShards.batchRunId, batchRun.id), eq(combinationShards.status, "running")))
+      .orderBy(asc(combinationShards.shardIndex)),
+    db
+      .select()
+      .from(combinationShards)
+      .where(and(eq(combinationShards.batchRunId, batchRun.id), eq(combinationShards.status, "queued")))
+      .orderBy(asc(combinationShards.shardIndex)),
+    db
+      .select({ id: generationTasks.id })
+      .from(generationTasks)
+      .where(
+        and(
+          eq(generationTasks.combinationPlanId, plan.id),
+          or(eq(generationTasks.status, "queued"), eq(generationTasks.status, "processing")),
+        ),
+      ),
+    countWorkspaceActiveTasks(batchRun.workspaceId),
+    countMediaPollBacklog(batchRun.workspaceId),
+    listRecentProviderTaskStatuses(batchRun.workspaceId, "cloubic", Math.max(20, runtimeLimits.providerCircuitMinSampleSize * 2)),
+  ]);
+
+  for (const shard of runningShards) {
+    const shardItems = await db
+      .select({
+        id: combinationItems.id,
+      })
+      .from(combinationItems)
+      .where(
+        and(
+          eq(combinationItems.batchRunId, batchRun.id),
+          eq(combinationItems.shardId, shard.id),
+          or(eq(combinationItems.status, "queued"), eq(combinationItems.status, "running")),
+        ),
+      )
+      .orderBy(asc(combinationItems.itemIndex));
+
+    for (const shardItem of shardItems) {
+      await triggerCombinationItemProgress(batchRun.id, shardItem.id);
+    }
+  }
+
+  const providerCircuitState = deriveProviderCircuitState({
+    recentStatuses: recentProviderStatuses,
+    minimumSampleSize: runtimeLimits.providerCircuitMinSampleSize,
+    failureRateThreshold: runtimeLimits.providerCircuitFailureRate,
+    consecutiveFailureThreshold: runtimeLimits.providerCircuitConsecutiveFailures,
+  });
+  const schedulerCapacity = evaluateSchedulerCapacity({
+    activeShardCount: runningShards.length,
+    maxActiveShards: runtimeLimits.maxActiveShards,
+    activeTaskCount: activeTasks.length,
+    maxActiveTasks: runtimeLimits.maxActiveTasks,
+    workspaceActiveTaskCount,
+    workspaceTaskQuota: runtimeLimits.workspaceTaskQuota,
+    mediaPollBacklog,
+    mediaPollBacklogLimit: runtimeLimits.mediaPollBacklogLimit,
+    providerCircuitState,
+  });
+
+  recordRuntimeMetric({
+    name: "combination_scheduler_capacity",
+    value: schedulerCapacity.allowScheduling ? 1 : 0,
+    tags: {
+      workspace_id: batchRun.workspaceId,
+      canvas_id: batchRun.canvasId,
+      plan_id: plan.id,
+      provider_circuit_state: providerCircuitState,
+    },
+    fields: {
+      blockingReasons: schedulerCapacity.blockingReasons,
+      snapshot: schedulerCapacity.snapshot,
+    },
+  });
+
+  if (!schedulerCapacity.allowScheduling) {
+    logRuntimeEvent({
+      level: schedulerCapacity.shouldPausePlan ? "warn" : "info",
+      event: "combination.scheduler.deferred",
+      workspaceId: batchRun.workspaceId,
+      canvasId: batchRun.canvasId,
+      planId: plan.id,
+      status: plan.status,
+      details: {
+        blockingReasons: schedulerCapacity.blockingReasons,
+        snapshot: schedulerCapacity.snapshot,
+      },
+    });
+
+    if (schedulerCapacity.shouldPausePlan) {
+      await pauseCombinationPlanForGovernance({
+        workspaceId: batchRun.workspaceId,
+        canvasId: batchRun.canvasId,
+        planId: plan.id,
+        reasonCode: "PROVIDER_CIRCUIT_OPEN",
+        reasonMessage: "供应商近期失败率过高，组合计划已自动暂停，等待恢复后继续调度。",
+      });
+    }
+
+    await refreshNodeRunBatchSummary(batchRun.id);
+    return;
+  }
+
+  const availableShardSlots = Math.max(0, runtimeLimits.maxActiveShards - runningShards.length);
+  const remainingTaskCapacity = Math.max(0, runtimeLimits.maxActiveTasks - activeTasks.length);
+
+  if (availableShardSlots === 0 || remainingTaskCapacity === 0) {
+    await refreshNodeRunBatchSummary(batchRun.id);
+    return;
+  }
+
+  for (const shard of queuedShards.slice(0, availableShardSlots)) {
+    const [claimedShard] = await db
+      .update(combinationShards)
+      .set({
+        status: "running",
+        scheduledAt: shard.scheduledAt ?? new Date(),
+        startedAt: shard.startedAt ?? new Date(),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(combinationShards.id, shard.id), eq(combinationShards.status, "queued")))
+      .returning();
+
+    if (!claimedShard) {
+      continue;
+    }
+
+    logRuntimeEvent({
+      level: "info",
+      event: "combination.shard.claimed",
+      workspaceId: batchRun.workspaceId,
+      canvasId: batchRun.canvasId,
+      planId: plan.id,
+      shardId: claimedShard.id,
+      status: claimedShard.status,
+      details: {
+        shardIndex: claimedShard.shardIndex,
+        itemCount: claimedShard.itemCount,
+      },
+    });
+    recordRuntimeMetric({
+      name: "combination_shard_claimed",
+      value: 1,
+      unit: "count",
+      tags: {
+        workspace_id: batchRun.workspaceId,
+        plan_id: plan.id,
+        shard_id: claimedShard.id,
+      },
+      fields: {
+        shardIndex: claimedShard.shardIndex,
+        itemCount: claimedShard.itemCount,
+      },
+    });
+
+    const shardItems = await db
+      .select({
+        id: combinationItems.id,
+      })
+      .from(combinationItems)
+      .where(
+        and(
+          eq(combinationItems.batchRunId, batchRun.id),
+          eq(combinationItems.shardId, claimedShard.id),
+          or(eq(combinationItems.status, "queued"), eq(combinationItems.status, "draft")),
+        ),
+      )
+      .orderBy(asc(combinationItems.itemIndex));
+
+    for (const shardItem of shardItems) {
+      await triggerCombinationItemProgress(batchRun.id, shardItem.id);
+    }
+  }
+
+  await refreshNodeRunBatchSummary(batchRun.id);
+}
+
 async function updateNodeRunRecord(
   nodeRunId: string | null | undefined,
   payload: Partial<{
@@ -1605,18 +2933,69 @@ async function updateNodeRunRecord(
 
   const [record] = await db
     .select({
+      workspaceId: nodeRuns.workspaceId,
+      canvasId: nodeRuns.canvasId,
+      nodeId: nodeRuns.nodeId,
+      taskId: nodeRuns.taskId,
+      combinationPlanId: nodeRuns.combinationPlanId,
+      combinationShardId: nodeRuns.combinationShardId,
       batchRunId: nodeRuns.batchRunId,
       runIndex: nodeRuns.runIndex,
+      combinationItemId: nodeRuns.combinationItemId,
+      batchMode: nodeRunBatches.batchMode,
     })
     .from(nodeRuns)
+    .leftJoin(nodeRunBatches, eq(nodeRunBatches.id, nodeRuns.batchRunId))
     .where(eq(nodeRuns.id, nodeRunId))
     .limit(1);
 
   if (record?.batchRunId) {
     await refreshNodeRunBatchSummary(record.batchRunId);
 
-    if (record.runIndex && isTerminalNodeRunStatus(payload.status)) {
-      await triggerBatchRunProgress(record.batchRunId, record.runIndex);
+    if (isTerminalNodeRunStatus(payload.status)) {
+      recordRuntimeMetric({
+        name: "node_run_terminal",
+        value: 1,
+        unit: "count",
+        tags: {
+          workspace_id: record.workspaceId,
+          canvas_id: record.canvasId,
+          node_id: record.nodeId,
+          node_run_id: nodeRunId,
+          task_id: record.taskId ?? "none",
+          status: payload.status ?? "unknown",
+        },
+        fields: {
+          combinationPlanId: record.combinationPlanId,
+          combinationItemId: record.combinationItemId,
+          combinationShardId: record.combinationShardId,
+          errorCode: payload.errorCode ?? null,
+          errorMessage: payload.errorMessage ?? null,
+        },
+      });
+      logRuntimeEvent({
+        level: payload.status === "failed" ? "warn" : "info",
+        event: "node_run.terminal",
+        workspaceId: record.workspaceId,
+        canvasId: record.canvasId,
+        nodeId: record.nodeId,
+        nodeRunId,
+        taskId: record.taskId,
+        planId: record.combinationPlanId,
+        shardId: record.combinationShardId,
+        combinationItemId: record.combinationItemId,
+        status: payload.status ?? null,
+        details: {
+          errorCode: payload.errorCode ?? null,
+          errorMessage: payload.errorMessage ?? null,
+        },
+      });
+
+      if (isPlanBatchMode(record.batchMode) && record.combinationItemId) {
+        await triggerCombinationItemProgress(record.batchRunId, record.combinationItemId);
+      } else if (record.runIndex) {
+        await triggerRepeatBatchRunProgress(record.batchRunId, record.runIndex);
+      }
     }
   }
 }
@@ -1651,6 +3030,11 @@ async function launchBatchNodeRun(nodeRunId: string) {
       overrideSettings: {},
       batchRunId: claimedNodeRun.batchRunId ?? undefined,
       batchRunIndex: claimedNodeRun.runIndex ?? undefined,
+      combinationPlanId: claimedNodeRun.combinationPlanId ?? undefined,
+      combinationItemId: claimedNodeRun.combinationItemId ?? undefined,
+      combinationShardId: claimedNodeRun.combinationShardId ?? undefined,
+      sourceBatchItemKey: claimedNodeRun.sourceBatchItemKey ?? undefined,
+      displayOrder: claimedNodeRun.displayOrder ?? undefined,
       existingNodeRunId: claimedNodeRun.id,
     });
   } catch (error) {
@@ -1825,8 +3209,19 @@ async function executeTask(taskId: string) {
         await tx.insert(taskResults).values({
           taskId: task.id,
           workspaceId: task.workspaceId,
+          batchRunId: task.batchRunId,
+          nodeRunId: task.nodeRunId,
+          nodeId: task.nodeId,
+          combinationPlanId: task.combinationPlanId,
+          combinationItemId: task.combinationItemId,
+          combinationShardId: task.combinationShardId,
           resultType: isStoryboardTask ? "json" : "text",
           contentText: output.content,
+          sourceBatchItemKey: task.sourceBatchItemKey,
+          displayOrder: task.displayOrder,
+          inputBindingSummaryJson: Array.isArray(requestPayload.inputBindingSummary)
+            ? requestPayload.inputBindingSummary.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object"))
+            : [],
           meta: {
             provider: output.provider,
             model: output.model,
@@ -1980,9 +3375,20 @@ async function executeTask(taskId: string) {
         await tx.insert(taskResults).values({
           taskId: task.id,
           workspaceId: task.workspaceId,
+          batchRunId: task.batchRunId,
+          nodeRunId: task.nodeRunId,
+          nodeId: task.nodeId,
+          combinationPlanId: task.combinationPlanId,
+          combinationItemId: task.combinationItemId,
+          combinationShardId: task.combinationShardId,
           resultType: "image",
           contentText: output.markdown,
           assetId: generatedAsset.id,
+          sourceBatchItemKey: task.sourceBatchItemKey,
+          displayOrder: task.displayOrder,
+          inputBindingSummaryJson: Array.isArray(requestPayload.inputBindingSummary)
+            ? requestPayload.inputBindingSummary.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object"))
+            : [],
           meta: {
             provider: output.provider,
             model: output.model,
@@ -2200,11 +3606,17 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
   }
 
   const node = await assertNodeForRun(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
+
+  if (!isRunnableNodeType(node.type)) {
+    throw new ApiError(409, "NODE_RUN_UNSUPPORTED", "当前节点类型暂不支持直接运行。");
+  }
+
   const incomingEdges = await getIncomingEdges(parsed.workspaceId, parsed.canvasId, parsed.nodeId);
   const upstreamNodeIds = await resolveSelectedUpstreamNodeIds(parsed, incomingEdges);
   const upstreamNodes = await getUpstreamNodesForExecution(parsed, upstreamNodeIds);
   const referenceAssets = await getNodeReferenceAssets(node);
-  const requestPayload = await buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed);
+  const combinationContext = await getCombinationExecutionContext(parsed.workspaceId, parsed.combinationItemId);
+  const requestPayload = await buildExecutionPayload(node, upstreamNodes, referenceAssets, parsed, combinationContext);
 
   const createdTask = await db.transaction(async (tx) => {
     const nodeRun = existingNodeRun
@@ -2217,8 +3629,13 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
               canvasId: parsed.canvasId,
               nodeId: parsed.nodeId,
               batchRunId: parsed.batchRunId ?? null,
+              combinationPlanId: parsed.combinationPlanId ?? combinationContext?.planId ?? null,
+              combinationItemId: parsed.combinationItemId ?? combinationContext?.itemId ?? null,
+              combinationShardId: parsed.combinationShardId ?? combinationContext?.shardId ?? null,
               requestId: parsed.requestId,
               runIndex: parsed.batchRunIndex ?? null,
+              sourceBatchItemKey: parsed.sourceBatchItemKey ?? combinationContext?.stableKey ?? null,
+              displayOrder: parsed.displayOrder ?? combinationContext?.itemIndex ?? null,
               nodeType: node.type,
               nodeTitle: node.title,
               status: "queued",
@@ -2233,7 +3650,16 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
         nodeId: parsed.nodeId,
         nodeRunId: nodeRun.id,
         batchRunId: parsed.batchRunId ?? null,
+        combinationPlanId:
+          parsed.combinationPlanId ?? nodeRun.combinationPlanId ?? combinationContext?.planId ?? null,
+        combinationItemId:
+          parsed.combinationItemId ?? nodeRun.combinationItemId ?? combinationContext?.itemId ?? null,
+        combinationShardId:
+          parsed.combinationShardId ?? nodeRun.combinationShardId ?? combinationContext?.shardId ?? null,
         batchRunIndex: parsed.batchRunIndex ?? null,
+        sourceBatchItemKey:
+          parsed.sourceBatchItemKey ?? nodeRun.sourceBatchItemKey ?? combinationContext?.stableKey ?? null,
+        displayOrder: parsed.displayOrder ?? nodeRun.displayOrder ?? combinationContext?.itemIndex ?? null,
         requestId: parsed.requestId,
         taskType: node.type,
         provider: "internal",
@@ -2264,6 +3690,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
 
     return {
       taskId: task.id,
+      nodeRunId: nodeRun.id,
       status: task.status,
       requestId: task.requestId,
       batchRunId: task.batchRunId,
@@ -2271,6 +3698,42 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
   });
 
   emitCanvasRuntimeEvent(parsed.workspaceId, parsed.canvasId, "task_queued");
+  recordRuntimeMetric({
+    name: "generation_task_queued",
+    value: 1,
+    unit: "count",
+    tags: {
+      workspace_id: parsed.workspaceId,
+      canvas_id: parsed.canvasId,
+      node_id: parsed.nodeId,
+      node_run_id: createdTask.nodeRunId,
+      task_id: createdTask.taskId,
+    },
+    fields: {
+      requestId: createdTask.requestId,
+      batchRunId: createdTask.batchRunId ?? null,
+      combinationPlanId: parsed.combinationPlanId ?? combinationContext?.planId ?? null,
+      combinationItemId: parsed.combinationItemId ?? combinationContext?.itemId ?? null,
+      combinationShardId: parsed.combinationShardId ?? combinationContext?.shardId ?? null,
+    },
+  });
+  logRuntimeEvent({
+    level: "info",
+    event: "generation.task.queued",
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    nodeId: parsed.nodeId,
+    nodeRunId: createdTask.nodeRunId,
+    planId: parsed.combinationPlanId ?? combinationContext?.planId ?? null,
+    shardId: parsed.combinationShardId ?? combinationContext?.shardId ?? null,
+    combinationItemId: parsed.combinationItemId ?? combinationContext?.itemId ?? null,
+    taskId: createdTask.taskId,
+    status: "queued",
+    requestId: createdTask.requestId,
+    details: {
+      batchRunId: createdTask.batchRunId ?? null,
+    },
+  });
 
   await executeTask(createdTask.taskId);
 
@@ -2579,8 +4042,21 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
       await tx.insert(taskResults).values({
         taskId: task.id,
         workspaceId: task.workspaceId,
+        batchRunId: task.batchRunId,
+        nodeRunId: task.nodeRunId,
+        nodeId: task.nodeId,
+        combinationPlanId: task.combinationPlanId,
+        combinationItemId: task.combinationItemId,
+        combinationShardId: task.combinationShardId,
         resultType: "video",
         contentText: providerStatus.videoUrl,
+        sourceBatchItemKey: task.sourceBatchItemKey,
+        displayOrder: task.displayOrder,
+        inputBindingSummaryJson: Array.isArray((task.requestPayload as Record<string, unknown> | null)?.inputBindingSummary)
+          ? (((task.requestPayload as Record<string, unknown> | null)?.inputBindingSummary ?? []) as unknown[]).filter(
+              (value): value is Record<string, unknown> => Boolean(value && typeof value === "object"),
+            )
+          : [],
         meta: {
           provider: providerStatus.provider,
           providerTaskId: providerStatus.providerTaskId,
@@ -2838,6 +4314,103 @@ export async function listTasks(input: z.infer<typeof listTasksInputSchema>) {
     .limit(limit);
 }
 
+async function resolveCombinationBatchContextForSelection(params: {
+  workspaceId: string;
+  canvasId: string;
+  selectedNodes: Array<{ id: string; title: string; type: string; outputSnapshot?: unknown }>;
+  selectedEdges: Array<{ sourceNodeId: string; targetNodeId: string; priority: number }>;
+  combinationPlanId?: string;
+}) {
+  let combinationNode: typeof canvasNodes.$inferSelect | null = null;
+  let plan: typeof combinationPlans.$inferSelect | null = null;
+
+  if (params.combinationPlanId) {
+    plan = await getCombinationPlanRecord(params.combinationPlanId);
+    combinationNode = await assertNodeForRun(params.workspaceId, params.canvasId, plan.combinationNodeId);
+  } else {
+    const selectedNodeIds = params.selectedNodes.map((node) => node.id);
+    const incomingEdges = await db
+      .select()
+      .from(canvasEdges)
+      .where(
+        and(
+          eq(canvasEdges.workspaceId, params.workspaceId),
+          eq(canvasEdges.canvasId, params.canvasId),
+          inArray(canvasEdges.targetNodeId, selectedNodeIds),
+        ),
+      );
+    const incomingSourceNodeIds = uniqueStrings(incomingEdges.map((edge) => edge.sourceNodeId));
+    const incomingSourceNodes =
+      incomingSourceNodeIds.length > 0
+        ? await getCanvasNodesByIds(params.workspaceId, params.canvasId, incomingSourceNodeIds)
+        : [];
+    const combinationSourceNodes = incomingSourceNodes.filter((node) => node.type === "combination");
+
+    if (combinationSourceNodes.length > 1) {
+      throw new ApiError(409, "BATCH_COMBINATION_CONTEXT_CONFLICT", "当前批量执行仅支持单个组合节点作为输入源。");
+    }
+
+    combinationNode = combinationSourceNodes[0] ?? null;
+
+    if (!combinationNode) {
+      return null;
+    }
+
+    const latestPlanId = getLatestCombinationPlanIdFromSnapshot(combinationNode.outputSnapshot);
+
+    if (!latestPlanId) {
+      throw new ApiError(409, "COMBINATION_PLAN_REQUIRED", "组合节点尚未生成可运行的组合计划。");
+    }
+
+    plan = await getCombinationPlanRecord(latestPlanId);
+  }
+
+  if (!plan || !combinationNode) {
+    return null;
+  }
+
+  if (
+    plan.workspaceId !== params.workspaceId ||
+    plan.canvasId !== params.canvasId ||
+    plan.combinationNodeId !== combinationNode.id
+  ) {
+    throw new ApiError(409, "COMBINATION_PLAN_SCOPE_INVALID", "组合计划与当前画布或组合节点不匹配。");
+  }
+
+  const sortedNodes = sortNodesForBatchRun(
+    params.selectedNodes.map((node) => ({
+      id: node.id,
+      title: node.title,
+      type: node.type,
+    })),
+    params.selectedEdges,
+  );
+  const batchSelectedNodes = uniqueStrings([combinationNode.id, ...sortedNodes.map((node) => node.id)]).map((nodeId) => {
+    if (nodeId === combinationNode.id) {
+      return {
+        id: combinationNode.id,
+        title: combinationNode.title,
+        type: combinationNode.type,
+      };
+    }
+
+    const node = sortedNodes.find((item) => item.id === nodeId);
+
+    if (!node) {
+      throw new ApiError(500, "BATCH_NODE_SORT_FAILED", "批量节点排序失败。");
+    }
+
+    return node;
+  });
+
+  return {
+    plan,
+    combinationNode,
+    selectedNodes: batchSelectedNodes,
+    selectedEdges: params.selectedEdges,
+  } satisfies CombinationBatchContext;
+}
+
 export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema>) {
   const parsed = runNodeBatchInputSchema.parse(input);
   const uniqueNodeIds = uniqueStrings(parsed.nodeIds);
@@ -2847,14 +4420,55 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
     throw new ApiError(404, "NODE_NOT_FOUND", "部分选中节点不存在或不属于当前画布。");
   }
 
+  const unsupportedNodes = selectedNodes.filter((node) => !isRunnableNodeType(node.type));
+
+  if (unsupportedNodes.length > 0) {
+    throw new ApiError(409, "NODE_RUN_UNSUPPORTED", "批量运行仅支持文本、分镜、图片和视频节点。");
+  }
+
   const nodeSummaries = selectedNodes.map((node) => ({
     id: node.id,
     title: node.title,
     type: node.type,
   }));
   const selectedEdges = await getCanvasEdgesForNodes(parsed.workspaceId, parsed.canvasId, uniqueNodeIds);
-  const sortedNodes = sortNodesForBatchRun(nodeSummaries, selectedEdges);
-  const totalNodeRunCount = sortedNodes.length * parsed.runCount;
+  const combinationContext = await resolveCombinationBatchContextForSelection({
+    workspaceId: parsed.workspaceId,
+    canvasId: parsed.canvasId,
+    selectedNodes,
+    selectedEdges,
+    combinationPlanId: parsed.combinationPlanId,
+  });
+
+  if (combinationContext?.plan.batchRunId) {
+    const existingBatchRun = await getBatchRunRecord(combinationContext.plan.batchRunId);
+    const planIsTerminal = isTerminalCombinationStatus(combinationContext.plan.status);
+    const batchIsTerminal = isTerminalBatchRunStatus(existingBatchRun.status);
+
+    // Only reuse active plan/batch. If previous execution has completed, create a fresh batch run and re-queue items/shards.
+    if (!planIsTerminal && !batchIsTerminal) {
+      await refreshNodeRunBatchSummary(existingBatchRun.id);
+      await scheduleCombinationBatchRun(existingBatchRun.id);
+
+      emitCanvasRuntimeEvent(parsed.workspaceId, parsed.canvasId, "batch_run_started");
+
+      return {
+        batchRunId: existingBatchRun.id,
+        status: existingBatchRun.status,
+        runCount: existingBatchRun.requestedRunCount,
+        nodeCount: getRunnableSelectedNodes(existingBatchRun.selectedNodesJson).length,
+        totalNodeRunCount: existingBatchRun.totalNodeRunCount,
+        items: [],
+      };
+    }
+  }
+
+  const sortedNodes = combinationContext
+    ? getRunnableSelectedNodes(combinationContext.selectedNodes)
+    : sortNodesForBatchRun(nodeSummaries, selectedEdges);
+  const totalNodeRunCount = combinationContext
+    ? combinationContext.plan.totalItemCount * sortedNodes.length
+    : sortedNodes.length * parsed.runCount;
   const mode = sortedNodes.length === 1 ? "single_node" : "group";
   const [batchRun] = await db
     .insert(nodeRunBatches)
@@ -2864,28 +4478,93 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
       createdBy: parsed.actorUserId,
       mode,
       status: "processing",
-      requestedRunCount: parsed.runCount,
+      batchMode: combinationContext ? "plan" : "repeat",
+      requestedRunCount: combinationContext ? combinationContext.plan.totalItemCount : parsed.runCount,
       totalNodeRunCount,
-      selectedNodesJson: sortedNodes,
+      totalCombinationCount: combinationContext ? combinationContext.plan.totalItemCount : 0,
+      totalShardCount: combinationContext ? combinationContext.plan.totalShardCount : 0,
+      selectedNodesJson: combinationContext ? combinationContext.selectedNodes : sortedNodes,
     })
     .returning();
-  const plannedNodeRuns = Array.from({ length: parsed.runCount }, (_, index) => index + 1).flatMap((runIndex) =>
-    sortedNodes.map((node) => ({
-      workspaceId: parsed.workspaceId,
-      canvasId: parsed.canvasId,
-      nodeId: node.id,
-      batchRunId: batchRun.id,
-      requestId: createBatchRunRequestId(batchRun.id, runIndex, node.id),
-      runIndex,
-      nodeType: node.type,
-      nodeTitle: node.title,
-      status: "queued",
-    })),
-  );
 
-  await db.insert(nodeRuns).values(plannedNodeRuns);
-  await refreshNodeRunBatchSummary(batchRun.id);
-  await Promise.all(Array.from({ length: parsed.runCount }, (_, index) => triggerBatchRunProgress(batchRun.id, index + 1)));
+  if (combinationContext) {
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(combinationPlans)
+        .set({
+          batchRunId: batchRun.id,
+          status: "running",
+          startedAt: now,
+          finishedAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          completedItemCount: 0,
+          succeededItemCount: 0,
+          failedItemCount: 0,
+          completedShardCount: 0,
+          succeededShardCount: 0,
+          failedShardCount: 0,
+          updatedAt: now,
+        })
+        .where(eq(combinationPlans.id, combinationContext.plan.id));
+
+      await tx
+        .update(combinationShards)
+        .set({
+          batchRunId: batchRun.id,
+          status: "queued",
+          scheduledAt: null,
+          startedAt: null,
+          finishedAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          completedItemCount: 0,
+          succeededItemCount: 0,
+          failedItemCount: 0,
+          updatedAt: now,
+        })
+        .where(eq(combinationShards.planId, combinationContext.plan.id));
+
+      await tx
+        .update(combinationItems)
+        .set({
+          batchRunId: batchRun.id,
+          status: "queued",
+          startedAt: null,
+          finishedAt: null,
+          lastErrorNodeId: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          // Bump attempts so stable request ids won't collide across reruns.
+          attemptCount: sql`${combinationItems.attemptCount} + 1`,
+          updatedAt: now,
+        })
+        .where(eq(combinationItems.planId, combinationContext.plan.id));
+    });
+
+    await refreshNodeRunBatchSummary(batchRun.id);
+    await scheduleCombinationBatchRun(batchRun.id);
+  } else {
+    const plannedNodeRuns = Array.from({ length: parsed.runCount }, (_, index) => index + 1).flatMap((runIndex) =>
+      sortedNodes.map((node) => ({
+        workspaceId: parsed.workspaceId,
+        canvasId: parsed.canvasId,
+        nodeId: node.id,
+        batchRunId: batchRun.id,
+        requestId: createBatchRunRequestId(batchRun.id, runIndex, node.id),
+        runIndex,
+        nodeType: node.type,
+        nodeTitle: node.title,
+        status: "queued",
+      })),
+    );
+
+    await db.insert(nodeRuns).values(plannedNodeRuns);
+    await refreshNodeRunBatchSummary(batchRun.id);
+    await Promise.all(Array.from({ length: parsed.runCount }, (_, index) => triggerRepeatBatchRunProgress(batchRun.id, index + 1)));
+  }
 
   emitCanvasRuntimeEvent(parsed.workspaceId, parsed.canvasId, "batch_run_started");
 
@@ -2898,25 +4577,28 @@ export async function runNodeBatch(input: z.infer<typeof runNodeBatchInputSchema
   return {
     id: batchRun.id,
     mode,
-    runCount: parsed.runCount,
+    runCount: combinationContext ? combinationContext.plan.totalItemCount : parsed.runCount,
     nodeCount: sortedNodes.length,
     status: latestBatchRun?.status ?? "processing",
     totalNodeRunCount,
-    items: plannedNodeRuns.map((nodeRun) => ({
-      nodeId: nodeRun.nodeId,
-      nodeTitle: nodeRun.nodeTitle,
-      taskId: null,
-      status: nodeRun.status,
-      runIndex: nodeRun.runIndex,
-    })),
+    items: combinationContext
+      ? []
+      : Array.from({ length: parsed.runCount }, (_, index) => index + 1).flatMap((runIndex) =>
+          sortedNodes.map((node) => ({
+            nodeId: node.id,
+            nodeTitle: node.title,
+            taskId: null,
+            status: "queued" as const,
+            runIndex,
+          })),
+        ),
   };
 }
 
 export async function listNodeRunBatches(input: z.infer<typeof listNodeRunBatchesInputSchema>) {
   const parsed = listNodeRunBatchesInputSchema.parse(input);
   const limit = parsed.limit ?? 20;
-
-  return db
+  const batchRuns = await db
     .select()
     .from(nodeRunBatches)
     .where(
@@ -2927,6 +4609,8 @@ export async function listNodeRunBatches(input: z.infer<typeof listNodeRunBatche
     )
     .orderBy(desc(nodeRunBatches.createdAt))
     .limit(limit);
+
+  return enrichBatchRunsWithCombinationSummary(batchRuns);
 }
 
 export async function getNodeRunBatch(input: z.infer<typeof getNodeRunBatchInputSchema>) {
@@ -2979,9 +4663,94 @@ export async function getNodeRunBatch(input: z.infer<typeof getNodeRunBatchInput
     )
     .orderBy(asc(nodeRuns.runIndex), asc(nodeRuns.createdAt));
 
+  const [detail] = await enrichBatchRunsWithCombinationSummary(
+    [
+      {
+        ...batchRun,
+        runs,
+      },
+    ],
+    true,
+  );
+
+  if (!isPlanBatchMode(batchRun.batchMode)) {
+    return {
+      ...detail,
+      itemsPage: null,
+    };
+  }
+
+  const plan = await getCombinationPlanByBatchRunId(batchRun.id);
+  const itemLimit = parsed.itemLimit ?? 8;
+  const itemOffset = parsed.itemOffset ?? 0;
+  const itemWhere = and(
+    eq(combinationItems.workspaceId, parsed.workspaceId),
+    eq(combinationItems.batchRunId, parsed.batchRunId),
+    parsed.itemStatus ? eq(combinationItems.status, parsed.itemStatus) : undefined,
+  );
+  const [{ total: totalItemsRaw }] = await db
+    .select({
+      total: sql<number>`count(*)`,
+    })
+    .from(combinationItems)
+    .where(itemWhere);
+  const totalItems = Number(totalItemsRaw ?? 0);
+  const pagedItems = await db
+    .select()
+    .from(combinationItems)
+    .where(itemWhere)
+    .orderBy(asc(combinationItems.itemIndex))
+    .limit(itemLimit)
+    .offset(itemOffset);
+  const selectedNodeOrder = new Map(
+    getRunnableSelectedNodes(batchRun.selectedNodesJson).map((node, index) => [node.id, index]),
+  );
+  const latestIndexesByItemId = await listLatestNodeRunIndexesForCombinationItems({
+    workspaceId: parsed.workspaceId,
+    batchRunId: batchRun.id,
+    combinationItemIds: pagedItems.map((item) => item.id),
+  });
+
   return {
-    ...batchRun,
-    runs,
+    ...detail,
+    planId: plan.id,
+    itemsPage: {
+      offset: itemOffset,
+      limit: itemLimit,
+      total: totalItems,
+      hasMore: itemOffset + pagedItems.length < totalItems,
+      status: parsed.itemStatus ?? null,
+      items: pagedItems.map((item) => ({
+        id: item.id,
+        shardId: item.shardId,
+        itemIndex: item.itemIndex,
+        stableKey: item.stableKey,
+        label: item.displayLabel,
+        status: item.status,
+        bindingSummary: item.bindingSummaryJson,
+        inputBindings: item.inputBindingsJson,
+        sourceBatchItemKey: item.sourceBatchItemKey,
+        displayOrder: item.displayOrder,
+        attemptCount: item.attemptCount,
+        lastErrorNodeId: item.lastErrorNodeId,
+        lastErrorCode: item.lastErrorCode,
+        lastErrorMessage: item.lastErrorMessage,
+        startedAt: item.startedAt,
+        finishedAt: item.finishedAt,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        resultIndexes: (latestIndexesByItemId.get(item.id) ?? []).sort((left, right) => {
+          const leftOrder = selectedNodeOrder.get(left.nodeId) ?? Number.MAX_SAFE_INTEGER;
+          const rightOrder = selectedNodeOrder.get(right.nodeId) ?? Number.MAX_SAFE_INTEGER;
+
+          if (leftOrder !== rightOrder) {
+            return leftOrder - rightOrder;
+          }
+
+          return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+        }),
+      })),
+    },
   };
 }
 
@@ -3042,6 +4811,135 @@ export async function bindNodeRunBatchResultNode(input: z.infer<typeof bindNodeR
   emitCanvasRuntimeEvent(parsed.workspaceId, batchRun.canvasId, "batch_run_result_node_bound");
 
   return updatedBatchRun;
+}
+
+export async function retryBatchRunCombinationItem(input: z.infer<typeof retryBatchRunCombinationItemInputSchema>) {
+  const parsed = retryBatchRunCombinationItemInputSchema.parse(input);
+  const batchRun = await getBatchRunRecord(parsed.batchRunId);
+
+  if (batchRun.workspaceId !== parsed.workspaceId) {
+    throw new ApiError(404, "BATCH_RUN_NOT_FOUND", "批量运行记录不存在。");
+  }
+
+  if (!isPlanBatchMode(batchRun.batchMode)) {
+    throw new ApiError(409, "BATCH_RUN_MODE_UNSUPPORTED", "仅组合计划批量运行支持单实例重试。");
+  }
+
+  const plan = await getCombinationPlanByBatchRunId(batchRun.id);
+
+  if (plan.status === "canceled") {
+    throw new ApiError(409, "COMBINATION_PLAN_CANCELED", "当前组合计划已取消，不能重试单实例。");
+  }
+
+  const [item] = await db
+    .select()
+    .from(combinationItems)
+    .where(
+      and(
+        eq(combinationItems.workspaceId, parsed.workspaceId),
+        eq(combinationItems.batchRunId, parsed.batchRunId),
+        eq(combinationItems.id, parsed.combinationItemId),
+      ),
+    )
+    .limit(1);
+
+  if (!item) {
+    throw new ApiError(404, "COMBINATION_ITEM_NOT_FOUND", "组合实例不存在。");
+  }
+
+  if (item.status === "queued" || item.status === "running") {
+    throw new ApiError(409, "COMBINATION_ITEM_RETRY_CONFLICT", "当前组合实例正在执行中。");
+  }
+
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(taskResults)
+      .where(
+        and(
+          eq(taskResults.workspaceId, parsed.workspaceId),
+          eq(taskResults.batchRunId, parsed.batchRunId),
+          eq(taskResults.combinationItemId, parsed.combinationItemId),
+        ),
+      );
+
+    await tx
+      .delete(generationTasks)
+      .where(
+        and(
+          eq(generationTasks.workspaceId, parsed.workspaceId),
+          eq(generationTasks.batchRunId, parsed.batchRunId),
+          eq(generationTasks.combinationItemId, parsed.combinationItemId),
+        ),
+      );
+
+    await tx
+      .delete(nodeRuns)
+      .where(
+        and(
+          eq(nodeRuns.workspaceId, parsed.workspaceId),
+          eq(nodeRuns.batchRunId, parsed.batchRunId),
+          eq(nodeRuns.combinationItemId, parsed.combinationItemId),
+        ),
+      );
+
+    await tx
+      .update(combinationItems)
+      .set({
+        status: "queued",
+        attemptCount: (item.attemptCount ?? 0) + 1,
+        lastErrorNodeId: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        startedAt: null,
+        finishedAt: null,
+        updatedAt: now,
+      })
+      .where(eq(combinationItems.id, item.id));
+
+    if (item.shardId) {
+      await tx
+        .update(combinationShards)
+        .set({
+          status: "queued",
+          startedAt: null,
+          finishedAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          updatedAt: now,
+        })
+        .where(eq(combinationShards.id, item.shardId));
+    }
+
+    await tx
+      .update(combinationPlans)
+      .set({
+        status: "queued",
+        finishedAt: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        updatedAt: now,
+      })
+      .where(eq(combinationPlans.id, plan.id));
+
+    await tx
+      .update(nodeRunBatches)
+      .set({
+        status: "processing",
+        updatedAt: now,
+      })
+      .where(eq(nodeRunBatches.id, batchRun.id));
+  });
+
+  await refreshNodeRunBatchSummary(batchRun.id);
+  await scheduleCombinationBatchRun(batchRun.id);
+
+  return {
+    batchRunId: batchRun.id,
+    combinationItemId: item.id,
+    status: "queued" as const,
+  };
 }
 
 export async function pollDueVideoTasks(input: z.infer<typeof pollDueTasksInputSchema> = {}) {
