@@ -1,0 +1,7 @@
+- [x] Admin 可新增并保存 `seedance2.0` 供应商配置，且管理状态可见 `available` 状态
+- [x] `/v1/models` 返回 `seedance2.0` 视频模型，且字段满足 `modality=video`、`capability=generate`、`async=true`
+- [x] 视频节点可选择 `seedance2.0`，并支持参考图配置的保存与回显
+- [x] 网关视频请求可接收参考图并正确映射到 `seedance2.0` 供应商请求
+- [x] `seedance2.0` 视频任务可完成提交、轮询、回写，且输出结构与任务状态符合统一协议
+- [x] 供应商不可用、模型未启用、参考图参数非法三类场景分别返回标准错误码
+- [x] 端到端联调可按 `API_CURL_EXAMPLES.md` 顺序完成并得到可复现结果

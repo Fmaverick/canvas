@@ -413,6 +413,29 @@ export const DEFAULT_VIDEO_NODE_SETTINGS: VideoNodeSettings = {
   shotPrompts: [],
 };
 
+export const SEEDANCE_VIDEO_MODEL_KEY = "seedance-2.0";
+
+export function isSeedanceVideoModelKey(modelKey: string | null | undefined) {
+  return typeof modelKey === "string" && modelKey.trim().toLowerCase() === SEEDANCE_VIDEO_MODEL_KEY;
+}
+
+export function normalizeVideoSettingsByModel(
+  settings: VideoNodeSettings,
+  modelKey: string | null | undefined,
+): VideoNodeSettings {
+  if (!isSeedanceVideoModelKey(modelKey)) {
+    return settings;
+  }
+
+  return {
+    ...settings,
+    generationMode: "reference",
+    firstFrameAssetId: null,
+    lastFrameAssetId: null,
+    shotPrompts: [],
+  };
+}
+
 export const DEFAULT_STORYBOARD_NODE_SETTINGS: StoryboardNodeSettings = {
   generationMode: "smart_storyboard",
   shotCount: 6,

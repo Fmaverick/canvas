@@ -65,6 +65,7 @@ import {
   isFormFieldTarget,
   normalizeResourceRefs,
   normalizeStoryboardNodeSettings,
+  normalizeVideoSettingsByModel,
   normalizeVideoNodeSettings,
   quickCreateOptions,
   serializeStoryboardNodeSettings,
@@ -725,7 +726,7 @@ export function InfiniteCanvasBoard({
     }
 
     if (selectedNode.type === "video") {
-      const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
+      const persistedSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(draftVideoSettings, draftVideoModelKey));
       const nextSettingsJson = buildNodeSettingsPayload(selectedNode, {
         generationMode: persistedSettings.generationMode,
         duration: persistedSettings.durationSec,
@@ -988,7 +989,7 @@ export function InfiniteCanvasBoard({
     selectedStoryboardShots.length > 0
       ? Math.min(selectedStoryboardShots.length - 1, Math.max(0, selectedStoryboardShotIndex))
       : 0;
-  const visibleVideoSettings = getPersistedVideoNodeSettings(draftVideoSettings);
+  const visibleVideoSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(draftVideoSettings, draftVideoModelKey));
   const selectedVideoFirstFrameAsset = isVideoNodeSelected
     ? getReferenceAssetById(selectedNode.referenceAssets, visibleVideoSettings.firstFrameAssetId)
     : null;
@@ -1269,7 +1270,7 @@ export function InfiniteCanvasBoard({
       setDraftStoryboardShot(null);
       setDraftImagePrompt("");
       setDraftVideoPrompt(selectedNode.promptInput ?? "");
-      setDraftVideoSettings(normalizeVideoNodeSettings(selectedNode.settingsJson));
+      setDraftVideoSettings(normalizeVideoSettingsByModel(normalizeVideoNodeSettings(selectedNode.settingsJson), selectedNode.modelKey ?? ""));
       setDraftVideoModelKey(selectedNode.modelKey ?? "");
       setDraftResourceRefs(normalizeResourceRefs(selectedNode.resourceRefs));
       setExpandedTextContent("");
@@ -1290,6 +1291,11 @@ export function InfiniteCanvasBoard({
     setExpandedTextContent("");
     setIsExpandedEditorOpen(false);
   }, [selectedNodeDraftIdentity]);
+
+  const handleVideoModelKeyChange = useCallback((value: string) => {
+    setDraftVideoModelKey(value);
+    setDraftVideoSettings((current) => normalizeVideoSettingsByModel(current, value));
+  }, []);
 
   useEffect(() => {
     if (isExpandedEditorOpen) {
@@ -3741,7 +3747,7 @@ export function InfiniteCanvasBoard({
         nextSettings.referenceAssetIds = Array.from(new Set([...nextSettings.referenceAssetIds, ...uploadedAssetIds]));
       }
 
-      const persistedSettings = getPersistedVideoNodeSettings(nextSettings);
+      const persistedSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(nextSettings, draftVideoModelKey));
       const managedAssetIds = getManagedVideoAssetIds(nextSettings);
       const nextResourceRefs = {
         ...draftResourceRefs,
@@ -3812,7 +3818,7 @@ export function InfiniteCanvasBoard({
         firstFrameAssetId: draftVideoSettings.firstFrameAssetId === assetId ? null : draftVideoSettings.firstFrameAssetId,
         lastFrameAssetId: draftVideoSettings.lastFrameAssetId === assetId ? null : draftVideoSettings.lastFrameAssetId,
       };
-      const persistedSettings = getPersistedVideoNodeSettings(nextSettings);
+      const persistedSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(nextSettings, draftVideoModelKey));
       const usedAssetIds = getManagedVideoAssetIds(nextSettings);
       const nextResourceRefs = {
         ...draftResourceRefs,
@@ -4046,7 +4052,7 @@ export function InfiniteCanvasBoard({
     setIsSavingVideoPrompt(true);
 
     try {
-      const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
+      const persistedSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(draftVideoSettings, draftVideoModelKey));
 
       await saveNodePatch(
         selectedNode.id,
@@ -4096,7 +4102,7 @@ export function InfiniteCanvasBoard({
     setGeneratingVideoNodeId(selectedNode.id);
 
     try {
-      const persistedSettings = getPersistedVideoNodeSettings(draftVideoSettings);
+      const persistedSettings = getPersistedVideoNodeSettings(normalizeVideoSettingsByModel(draftVideoSettings, draftVideoModelKey));
 
       await saveNodePatch(
         selectedNode.id,
@@ -5158,7 +5164,7 @@ export function InfiniteCanvasBoard({
             void triggerVideoNodeGeneration();
           }}
           onLinkPromptAsset={linkPromptAsset}
-          onModelKeyChange={setDraftVideoModelKey}
+          onModelKeyChange={handleVideoModelKeyChange}
           onPromptChange={setDraftVideoPrompt}
           onRemoveVideoAsset={(assetId) => {
             void removeVideoAsset(assetId);

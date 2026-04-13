@@ -34,6 +34,12 @@ const serverEnvSchema = z.object({
   METRICS_ENABLED: z.string().min(1).optional(),
   INTERNAL_API_TOKEN: z.string().min(1).optional(),
   CRON_SECRET: z.string().min(1).optional(),
+  // External AI Gateway (optional). If set, canvas video tasks can be routed to that gateway.
+  GATEWAY_BASE_URL: z.url().optional(),
+  GATEWAY_CLIENT_KEY: z.string().min(1).optional(),
+  // Backwards-compatible aliases used in curl docs and some deployments.
+  BASE_URL: z.url().optional(),
+  CLIENT_KEY: z.string().min(1).optional(),
 });
 
 const parsedServerEnv = serverEnvSchema.parse({
@@ -70,6 +76,10 @@ const parsedServerEnv = serverEnvSchema.parse({
   METRICS_ENABLED: process.env.METRICS_ENABLED,
   INTERNAL_API_TOKEN: process.env.INTERNAL_API_TOKEN,
   CRON_SECRET: process.env.CRON_SECRET,
+  GATEWAY_BASE_URL: process.env.GATEWAY_BASE_URL,
+  GATEWAY_CLIENT_KEY: process.env.GATEWAY_CLIENT_KEY,
+  BASE_URL: process.env.BASE_URL,
+  CLIENT_KEY: process.env.CLIENT_KEY,
 });
 
 function requireValue(value: string | undefined, message: string) {
@@ -142,4 +152,6 @@ export const env = {
   metricsEnabled: parseBooleanFlag(parsedServerEnv.METRICS_ENABLED, true),
   internalApiToken: parsedServerEnv.INTERNAL_API_TOKEN,
   cronSecret: parsedServerEnv.CRON_SECRET,
+  gatewayBaseUrl: parsedServerEnv.GATEWAY_BASE_URL ?? parsedServerEnv.BASE_URL,
+  gatewayClientKey: parsedServerEnv.GATEWAY_CLIENT_KEY ?? parsedServerEnv.CLIENT_KEY,
 };

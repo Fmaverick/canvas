@@ -39,6 +39,7 @@ import {
   getCanvasBatchRunTitle,
   getPrimaryBatchRunResultIndex,
   inferImageExtension,
+  isSeedanceVideoModelKey,
   getStoryboardShotAssetNames,
   type CanvasInputNodeSettings,
   type CanvasCombinationNodeSettings,
@@ -62,6 +63,10 @@ const VIDEO_MODEL_PRESET_OPTIONS = [
   {
     value: "",
     label: "默认模型",
+  },
+  {
+    value: "seedance-2.0",
+    label: "Seedance 2.0",
   },
   {
     value: "kling-v3-omni-pro",
@@ -1977,6 +1982,7 @@ export function VideoNodePanel({
   onLinkPromptAsset,
   availablePromptAssets,
 }: VideoNodePanelProps) {
+  const isSeedanceVideoModel = isSeedanceVideoModelKey(draftVideoModelKey);
   const isReferenceVideoMode = draftVideoSettings.generationMode === "reference";
   const isFirstLastVideoMode = draftVideoSettings.generationMode === "first_last";
   const isMultiShotVideoMode = draftVideoSettings.generationMode === "multi_shot";
@@ -2079,6 +2085,7 @@ export function VideoNodePanel({
                 <span>视频模型</span>
                 <select
                   className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                  disabled={!canEdit}
                   value={selectedVideoModelPreset}
                   onChange={(event) => onModelKeyChange(event.target.value === "__custom__" ? draftVideoModelKey : event.target.value)}
                 >
@@ -2094,6 +2101,7 @@ export function VideoNodePanel({
                 <span>生成模式</span>
                 <select
                   className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                  disabled={!canEdit || isSeedanceVideoModel}
                   value={draftVideoSettings.generationMode}
                   onChange={(event) =>
                     onSettingsChange((current) => ({
@@ -2102,10 +2110,16 @@ export function VideoNodePanel({
                     }))
                   }
                 >
-                  <option value="reference">参考生成</option>
-                  <option value="first_last">首尾帧视频</option>
-                  <option value="smart_storyboard">智能分镜</option>
-                  <option value="multi_shot">自定义多镜头</option>
+                  {isSeedanceVideoModel ? (
+                    <option value="reference">参考生成（seedance-2.0）</option>
+                  ) : (
+                    <>
+                      <option value="reference">参考生成</option>
+                      <option value="first_last">首尾帧视频</option>
+                      <option value="smart_storyboard">智能分镜</option>
+                      <option value="multi_shot">自定义多镜头</option>
+                    </>
+                  )}
                 </select>
               </label>
               <label className="space-y-1 text-xs text-muted-foreground">
@@ -2212,6 +2226,7 @@ export function VideoNodePanel({
                       ? `已配置 ${draftVideoSettings.shotPrompts.length} 个镜头`
                       : `已关联 ${selectedVideoReferenceAssets.length} 张参考图`}
                 {draftVideoModelKey.trim() ? ` · 当前模型 ${draftVideoModelKey.trim()}` : " · 当前使用默认视频模型"}
+                {isSeedanceVideoModel ? " · seedance-2.0 仅支持参考图模式" : ""}
                 {draftVideoSettings.withAudio ? " · 将请求带声音视频" : " · 当前请求静音视频"}
                 {selectedVideoOutputSource ? " · 结果会直接显示在右侧预览区。" : "。"}
               </p>

@@ -28,6 +28,7 @@ import {
   generateVideoWithCloubic,
   getVideoStatusWithCloubic,
 } from "@/infrastructure/ai/cloubic-client";
+import { getVideoStatusThroughGateway, submitVideoThroughGateway } from "@/infrastructure/ai/gateway-video-client";
 import { ApiError } from "@/lib/api";
 import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
 import { deriveProviderCircuitState, evaluateSchedulerCapacity } from "@/lib/combination-runtime";
@@ -204,6 +205,20 @@ function normalizeOutputContent(outputSnapshot: Record<string, unknown> | null) 
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function toNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function resolveVideoProvider(model: string | null | undefined) {
+  const normalizedModel = toNonEmptyString(model)?.toLowerCase();
+
+  if (normalizedModel === "seedance-2.0") {
+    return "gateway" as const;
+  }
+
+  return "cloubic" as const;
 }
 
 const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
@@ -1951,6 +1966,20 @@ async function buildExecutionPayload(
           }
         : {}),
     },
+    assets:
+      node.type === "video"
+        ? referenceImageEntries.map((entry) => ({
+            kind: "image" as const,
+            url: entry.url,
+            label: entry.label,
+            role:
+              firstFrameImageUrl && entry.url === firstFrameImageUrl
+                ? ("first_frame" as const)
+                : lastFrameImageUrl && entry.url === lastFrameImageUrl
+                  ? ("last_frame" as const)
+                  : ("reference" as const),
+          }))
+        : [],
     referenceImages,
     referenceAssets,
     upstreamNodeIds: upstreamNodes.map((upstreamNode) => upstreamNode.id),
@@ -1974,6 +2003,90 @@ async function buildExecutionPayload(
 
 function getNextPollAt(delaySeconds = 10) {
   return new Date(Date.now() + delaySeconds * 1000);
+}
+
+type UnifiedVideoOutputItem = {
+  kind: "url";
+  url: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+};
+
+function normalizeUnifiedVideoOutput(rawOutput: unknown, fallbackUrl?: string | null) {
+  const normalized: UnifiedVideoOutputItem[] = [];
+  const seen = new Set<string>();
+  const outputList = Array.isArray(rawOutput) ? rawOutput : [];
+
+  for (const item of outputList) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const candidateUrl =
+      toNonEmptyString(record.url) ??
+      toNonEmptyString(record.videoUrl) ??
+      toNonEmptyString(record.video_url) ??
+      toNonEmptyString(record.fileUrl) ??
+      toNonEmptyString(record.file_url);
+
+    if (!candidateUrl || seen.has(candidateUrl)) {
+      continue;
+    }
+
+    seen.add(candidateUrl);
+    normalized.push({
+      kind: "url",
+      url: candidateUrl,
+      ...(toNonEmptyString(record.mimeType) ?? toNonEmptyString(record.mime_type)
+        ? { mimeType: toNonEmptyString(record.mimeType) ?? toNonEmptyString(record.mime_type) }
+        : {}),
+      ...(typeof record.width === "number" && Number.isFinite(record.width) ? { width: record.width } : {}),
+      ...(typeof record.height === "number" && Number.isFinite(record.height) ? { height: record.height } : {}),
+      ...(typeof record.durationMs === "number" && Number.isFinite(record.durationMs)
+        ? { durationMs: record.durationMs }
+        : typeof record.duration_ms === "number" && Number.isFinite(record.duration_ms)
+          ? { durationMs: record.duration_ms }
+          : {}),
+    });
+  }
+
+  if (normalized.length === 0 && fallbackUrl && fallbackUrl.trim().length > 0) {
+    normalized.push({
+      kind: "url",
+      url: fallbackUrl.trim(),
+      mimeType: "video/mp4",
+    });
+  }
+
+  return normalized;
+}
+
+function extractVideoTraceMeta(raw: unknown) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const record = raw as Record<string, unknown>;
+  const traceRecord =
+    record.trace && typeof record.trace === "object" && !Array.isArray(record.trace)
+      ? (record.trace as Record<string, unknown>)
+      : record;
+  const traceId = toNonEmptyString(traceRecord.traceId) ?? toNonEmptyString(traceRecord.trace_id);
+  const jobId = toNonEmptyString(traceRecord.jobId) ?? toNonEmptyString(traceRecord.job_id);
+  const keyId = toNonEmptyString(traceRecord.keyId) ?? toNonEmptyString(traceRecord.key_id);
+
+  if (!traceId && !jobId && !keyId) {
+    return null;
+  }
+
+  return {
+    ...(jobId ? { jobId } : {}),
+    ...(traceId ? { traceId } : {}),
+    ...(keyId ? { keyId } : {}),
+  };
 }
 
 async function refreshNodeRunBatchSummary(batchRunId: string) {
@@ -3055,7 +3168,19 @@ async function launchBatchNodeRun(nodeRunId: string) {
   }
 }
 
-async function persistTaskFailure(taskId: string, nodeId: string, code: string, message: string) {
+async function persistTaskFailure(
+  taskId: string,
+  nodeId: string,
+  code: string,
+  message: string,
+  options?: {
+    responsePayload?: Record<string, unknown> | null;
+    pollCount?: number;
+    nextPollAt?: Date | null;
+    providerTaskId?: string | null;
+    nodeRunResultMeta?: Record<string, unknown>;
+  },
+) {
   const finishedAt = new Date();
   const [task] = await db
     .select({
@@ -3074,6 +3199,10 @@ async function persistTaskFailure(taskId: string, nodeId: string, code: string, 
         status: "failed",
         errorCode: code,
         errorMessage: message,
+        ...(options?.responsePayload !== undefined ? { responsePayload: options.responsePayload } : {}),
+        ...(options?.pollCount !== undefined ? { pollCount: options.pollCount } : {}),
+        ...(options?.nextPollAt !== undefined ? { nextPollAt: options.nextPollAt } : {}),
+        ...(options?.providerTaskId !== undefined ? { providerTaskId: options.providerTaskId } : {}),
         finishedAt,
         updatedAt: finishedAt,
       })
@@ -3093,7 +3222,7 @@ async function persistTaskFailure(taskId: string, nodeId: string, code: string, 
     resultType: null,
     contentText: null,
     assetId: null,
-    resultMeta: {},
+    resultMeta: options?.nodeRunResultMeta ?? {},
     errorCode: code,
     errorMessage: message,
     finishedAt,
@@ -3464,6 +3593,14 @@ async function executeTask(taskId: string) {
 
     if (task.taskType === "video") {
       const normalizedSettings = settings as Record<string, unknown>;
+      const taskModel = task.model === "unassigned" ? null : task.model;
+      const provider = resolveVideoProvider(taskModel);
+      const requestAssets = Array.isArray(requestPayload.assets)
+        ? requestPayload.assets.filter(
+            (asset): asset is Record<string, unknown> =>
+              Boolean(asset && typeof asset === "object"),
+          )
+        : [];
 
       console.info("[canvas-video] request prepared", {
         workspaceId: task.workspaceId,
@@ -3471,7 +3608,8 @@ async function executeTask(taskId: string) {
         taskId: task.id,
         nodeId: node.id,
         nodeTitle: node.title,
-        model: task.model === "unassigned" ? null : task.model,
+        model: taskModel,
+        provider,
         promptPreview: prompt.slice(0, 800),
         promptLength: prompt.length,
         generationMode: normalizedSettings.generationMode ?? "reference",
@@ -3483,11 +3621,40 @@ async function executeTask(taskId: string) {
         referenceImagesPreview: referenceImages.slice(0, 5),
       });
 
-      const output = await generateVideoWithCloubic({
-        prompt,
-        model: task.model === "unassigned" ? undefined : task.model,
-        settings,
-      });
+      const output =
+        provider === "gateway"
+          ? await submitVideoThroughGateway({
+              prompt,
+              model: taskModel ?? "seedance-2.0",
+              settings,
+              assets: requestAssets
+                .map((asset) => {
+                  const kind = toNonEmptyString(asset.kind);
+                  const url = toNonEmptyString(asset.url);
+                  const filePath = toNonEmptyString(asset.filePath);
+                  const role = toNonEmptyString(asset.role);
+                  const normalizedRole: "first_frame" | "last_frame" | "reference" | undefined =
+                    role === "first_frame" || role === "last_frame" || role === "reference" ? role : undefined;
+
+                  if (kind !== "image") {
+                    return null;
+                  }
+
+                  return {
+                    kind: "image" as const,
+                    ...(url ? { url } : {}),
+                    ...(filePath ? { filePath } : {}),
+                    ...(normalizedRole ? { role: normalizedRole } : {}),
+                    ...(toNonEmptyString(asset.label) ? { label: toNonEmptyString(asset.label) } : {}),
+                  };
+                })
+                .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset)),
+            })
+          : await generateVideoWithCloubic({
+              prompt,
+              model: taskModel ?? undefined,
+              settings,
+            });
 
       console.info("[canvas-video] provider task accepted", {
         workspaceId: task.workspaceId,
@@ -3501,6 +3668,8 @@ async function executeTask(taskId: string) {
       });
 
       const updatedAt = new Date();
+      const nextPollAt = output.status === "failed" ? null : getNextPollAt();
+      const submissionTrace = extractVideoTraceMeta(output.rawResponse);
 
       await db.transaction(async (tx) => {
         await tx
@@ -3512,10 +3681,19 @@ async function executeTask(taskId: string) {
             providerTaskId: output.providerTaskId,
             responsePayload: {
               submission: output.rawResponse,
+              referenceImages,
+              assets: requestAssets,
+              tracking: {
+                providerTaskId: output.providerTaskId,
+                pollCount: 0,
+                nextPollAt: nextPollAt ? nextPollAt.toISOString() : null,
+              },
+              ...(submissionTrace ? { trace: submissionTrace } : {}),
             },
             errorCode: output.status === "failed" ? "VIDEO_SUBMIT_FAILED" : null,
             errorMessage: output.status === "failed" ? "Video submission failed." : null,
-            nextPollAt: output.status === "failed" ? null : getNextPollAt(),
+            pollCount: 0,
+            nextPollAt,
             updatedAt,
             finishedAt: output.status === "failed" ? updatedAt : null,
           })
@@ -3541,6 +3719,14 @@ async function executeTask(taskId: string) {
           model: output.model,
           providerTaskId: output.providerTaskId,
           submission: output.rawResponse,
+          referenceImages,
+          assets: requestAssets,
+          tracking: {
+            providerTaskId: output.providerTaskId,
+            pollCount: 0,
+            nextPollAt: nextPollAt ? nextPollAt.toISOString() : null,
+          },
+          ...(submissionTrace ? { trace: submissionTrace } : {}),
         },
         errorCode: output.status === "failed" ? "VIDEO_SUBMIT_FAILED" : null,
         errorMessage: output.status === "failed" ? "Video submission failed." : null,
@@ -3989,6 +4175,30 @@ export async function getTask(input: z.infer<typeof getTaskInputSchema>) {
 
 export async function getTaskStatus(input: z.infer<typeof getTaskInputSchema>) {
   const task = await getTask(input);
+  const responsePayload =
+    task.responsePayload && typeof task.responsePayload === "object"
+      ? (task.responsePayload as Record<string, unknown>)
+      : null;
+  const resultOutput =
+    task.results.find(
+      (item) =>
+        item.meta &&
+        typeof item.meta === "object" &&
+        Array.isArray((item.meta as Record<string, unknown>).output),
+    ) ?? null;
+  const outputFromResult =
+    resultOutput && resultOutput.meta && typeof resultOutput.meta === "object"
+      ? ((resultOutput.meta as Record<string, unknown>).output as unknown[])
+      : [];
+  const outputFromPayload = Array.isArray(responsePayload?.output) ? responsePayload.output : [];
+  const normalizedOutput = normalizeUnifiedVideoOutput(
+    outputFromResult.length > 0 ? outputFromResult : outputFromPayload,
+    toNonEmptyString(responsePayload?.videoUrl),
+  );
+  const providerTrace =
+    (resultOutput?.meta && typeof resultOutput.meta === "object"
+      ? extractVideoTraceMeta((resultOutput.meta as Record<string, unknown>).trace)
+      : null) ?? extractVideoTraceMeta(responsePayload?.trace);
 
   return {
     task_id: task.id,
@@ -3996,6 +4206,8 @@ export async function getTaskStatus(input: z.infer<typeof getTaskInputSchema>) {
     provider_task_id: task.providerTaskId,
     poll_count: task.pollCount,
     next_poll_at: task.nextPollAt,
+    ...(normalizedOutput.length > 0 ? { output: normalizedOutput } : {}),
+    ...(providerTrace ? { provider_trace: providerTrace } : {}),
     error: task.errorMessage
       ? {
           code: task.errorCode,
@@ -4022,18 +4234,29 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
     throw new ApiError(409, "PROVIDER_TASK_ID_MISSING", "Video task has not been submitted to provider yet.");
   }
 
-  const providerStatus = await getVideoStatusWithCloubic(task.providerTaskId);
+  const providerStatus =
+    resolveVideoProvider(task.model) === "gateway"
+      ? await getVideoStatusThroughGateway(task.providerTaskId)
+      : await getVideoStatusWithCloubic(task.providerTaskId);
   const pollCount = (task.pollCount ?? 0) + 1;
+  const providerTrace = extractVideoTraceMeta(providerStatus.rawResponse);
+  const normalizedOutput = normalizeUnifiedVideoOutput(
+    (providerStatus as { output?: unknown }).output,
+    providerStatus.videoUrl,
+  );
+  const primaryOutput = normalizedOutput[0] ?? null;
 
   if (providerStatus.status === "completed") {
     const finishedAt = new Date();
     const outputSnapshot = {
       taskId: task.id,
       outputType: "video",
-      content: providerStatus.videoUrl ?? "",
+      content: primaryOutput?.url ?? providerStatus.videoUrl ?? "",
       structuredData: {
-        videoUrl: providerStatus.videoUrl,
+        videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
         progress: providerStatus.progress,
+        output: normalizedOutput,
+        ...(providerTrace ? { trace: providerTrace } : {}),
       },
       generatedAt: finishedAt.toISOString(),
     };
@@ -4049,7 +4272,7 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
         combinationItemId: task.combinationItemId,
         combinationShardId: task.combinationShardId,
         resultType: "video",
-        contentText: providerStatus.videoUrl,
+        contentText: primaryOutput?.url ?? providerStatus.videoUrl,
         sourceBatchItemKey: task.sourceBatchItemKey,
         displayOrder: task.displayOrder,
         inputBindingSummaryJson: Array.isArray((task.requestPayload as Record<string, unknown> | null)?.inputBindingSummary)
@@ -4061,6 +4284,8 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           provider: providerStatus.provider,
           providerTaskId: providerStatus.providerTaskId,
           progress: providerStatus.progress,
+          output: normalizedOutput,
+          ...(providerTrace ? { trace: providerTrace } : {}),
         },
       });
 
@@ -4071,8 +4296,15 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           responsePayload: {
             ...(task.responsePayload as Record<string, unknown> | null),
             poll: providerStatus.rawResponse,
-            videoUrl: providerStatus.videoUrl,
+            videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
             progress: providerStatus.progress,
+            output: normalizedOutput,
+            tracking: {
+              providerTaskId: providerStatus.providerTaskId,
+              pollCount,
+              nextPollAt: null,
+            },
+            ...(providerTrace ? { trace: providerTrace } : {}),
           },
           pollCount,
           nextPollAt: null,
@@ -4097,13 +4329,20 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
       taskId: task.id,
       status: "succeeded",
       resultType: "video",
-      contentText: providerStatus.videoUrl ?? null,
+      contentText: primaryOutput?.url ?? providerStatus.videoUrl ?? null,
       assetId: null,
       resultMeta: {
         ...(task.responsePayload as Record<string, unknown> | null),
         poll: providerStatus.rawResponse,
-        videoUrl: providerStatus.videoUrl,
+        videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
         progress: providerStatus.progress,
+        output: normalizedOutput,
+        tracking: {
+          providerTaskId: providerStatus.providerTaskId,
+          pollCount,
+          nextPollAt: null,
+        },
+        ...(providerTrace ? { trace: providerTrace } : {}),
       },
       errorCode: null,
       errorMessage: null,
@@ -4121,7 +4360,37 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
   }
 
   if (providerStatus.status === "failed") {
-    await persistTaskFailure(task.id, node.id, "VIDEO_TASK_FAILED", "Video generation failed.");
+    await persistTaskFailure(task.id, node.id, "VIDEO_TASK_FAILED", "Video generation failed.", {
+      responsePayload: {
+        ...(task.responsePayload as Record<string, unknown> | null),
+        poll: providerStatus.rawResponse,
+        videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
+        progress: providerStatus.progress,
+        output: normalizedOutput,
+        tracking: {
+          providerTaskId: providerStatus.providerTaskId,
+          pollCount,
+          nextPollAt: null,
+        },
+        ...(providerTrace ? { trace: providerTrace } : {}),
+      },
+      pollCount,
+      nextPollAt: null,
+      providerTaskId: providerStatus.providerTaskId,
+      nodeRunResultMeta: {
+        ...(task.responsePayload as Record<string, unknown> | null),
+        poll: providerStatus.rawResponse,
+        videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
+        progress: providerStatus.progress,
+        output: normalizedOutput,
+        tracking: {
+          providerTaskId: providerStatus.providerTaskId,
+          pollCount,
+          nextPollAt: null,
+        },
+        ...(providerTrace ? { trace: providerTrace } : {}),
+      },
+    });
 
     return {
       taskId: task.id,
@@ -4143,6 +4412,13 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           ...(task.responsePayload as Record<string, unknown> | null),
           poll: providerStatus.rawResponse,
           progress: providerStatus.progress,
+          output: normalizedOutput,
+          tracking: {
+            providerTaskId: providerStatus.providerTaskId,
+            pollCount,
+            nextPollAt: nextPollAt.toISOString(),
+          },
+          ...(providerTrace ? { trace: providerTrace } : {}),
         },
         pollCount,
         nextPollAt,
@@ -4169,6 +4445,13 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
       ...(task.responsePayload as Record<string, unknown> | null),
       poll: providerStatus.rawResponse,
       progress: providerStatus.progress,
+      output: normalizedOutput,
+      tracking: {
+        providerTaskId: providerStatus.providerTaskId,
+        pollCount,
+        nextPollAt: nextPollAt.toISOString(),
+      },
+      ...(providerTrace ? { trace: providerTrace } : {}),
     },
     errorCode: null,
     errorMessage: null,
