@@ -42,6 +42,7 @@ const remotePatterns: ImageRemotePattern[] = [
 ].filter((pattern): pattern is ImageRemotePattern => Boolean(pattern));
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   images: {
     remotePatterns,
   },
