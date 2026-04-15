@@ -211,6 +211,18 @@ function toNonEmptyString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function stringifyForLog(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function resolveVideoProvider(model: string | null | undefined) {
   const normalizedModel = toNonEmptyString(model)?.toLowerCase();
 
@@ -4360,7 +4372,7 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
   }
 
   if (providerStatus.status === "failed") {
-    await persistTaskFailure(task.id, node.id, "VIDEO_TASK_FAILED", `Video generation failed.Response:${providerStatus.rawResponse}`, {
+    await persistTaskFailure(task.id, node.id, "VIDEO_TASK_FAILED", `Video generation failed. Response: ${stringifyForLog(providerStatus.rawResponse)}`, {
       responsePayload: {
         ...(task.responsePayload as Record<string, unknown> | null),
         poll: providerStatus.rawResponse,
