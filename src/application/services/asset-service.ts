@@ -14,6 +14,7 @@ import {
   getStoredObjectMetadata,
   getPublicUrlForStorageKey,
 } from "@/infrastructure/storage/s3";
+import { detectImageDimensions } from "@/lib/image-dimensions";
 import { ApiError } from "@/lib/api";
 import { env } from "@/lib/env";
 
@@ -76,6 +77,8 @@ export const createGeneratedAssetInputSchema = z.object({
   sourceUrl: z.string().trim().optional(),
   dataUri: z.string().trim().optional(),
   mimeType: z.string().trim().optional(),
+  width: z.coerce.number().int().positive().optional(),
+  height: z.coerce.number().int().positive().optional(),
   meta: uploadMetaSchema,
 });
 
@@ -299,6 +302,7 @@ async function uploadGeneratedAssetToStorage(params: {
     fileUrl: getPublicUrlForStorageKey(storageKey),
     fileSize: fileBuffer.byteLength,
     mimeType: resolvedMimeType,
+    ...detectImageDimensions(fileBuffer, resolvedMimeType),
   };
 }
 
@@ -326,8 +330,8 @@ export async function createGeneratedAsset(input: z.infer<typeof createGenerated
       storageKey: uploadResult.storageKey,
       fileUrl: uploadResult.fileUrl,
       fileSize: uploadResult.fileSize,
-      width: null,
-      height: null,
+      width: parsed.width ?? uploadResult.width ?? null,
+      height: parsed.height ?? uploadResult.height ?? null,
       durationMs: null,
       checksum: null,
       meta: parsed.meta,

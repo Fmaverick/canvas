@@ -36,6 +36,7 @@ import {
 import {
   canCanvasNodeRun,
   createInitialCanvasNodeOutputSnapshot,
+  DEFAULT_IMAGE_NODE_SETTINGS,
   DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   GRID_MAJOR_SIZE,
@@ -63,11 +64,13 @@ import {
   inferImageExtension,
   inferVideoExtension,
   isFormFieldTarget,
+  normalizeImageNodeSettings,
   normalizeResourceRefs,
   normalizeStoryboardNodeSettings,
   normalizeVideoSettingsByModel,
   normalizeVideoNodeSettings,
   quickCreateOptions,
+  serializeImageNodeSettings,
   serializeStoryboardNodeSettings,
   serializeVideoNodeSettings,
   setCanvasNodeGroupId,
@@ -81,6 +84,7 @@ import {
   type CanvasNodeResourceRefs,
   type StoryboardShot,
   type CanvasNodeType,
+  type ImageNodeSettings,
   type InstructionPresetOption,
   type InfiniteCanvasBoardProps,
   type LibraryItemOption,
@@ -288,6 +292,8 @@ export function InfiniteCanvasBoard({
   const [selectedStoryboardShotIndex, setSelectedStoryboardShotIndex] = useState(0);
   const [draftStoryboardShot, setDraftStoryboardShot] = useState<StoryboardShot | null>(null);
   const [draftImagePrompt, setDraftImagePrompt] = useState("");
+  const [draftImageSettings, setDraftImageSettings] = useState<ImageNodeSettings>(DEFAULT_IMAGE_NODE_SETTINGS);
+  const [draftImageModelKey, setDraftImageModelKey] = useState("");
   const [draftVideoPrompt, setDraftVideoPrompt] = useState("");
   const [draftVideoSettings, setDraftVideoSettings] = useState(DEFAULT_VIDEO_NODE_SETTINGS);
   const [draftVideoModelKey, setDraftVideoModelKey] = useState("");
@@ -714,15 +720,26 @@ export function InfiniteCanvasBoard({
 
     if (selectedNode.type === "image") {
       const nextResourceRefs = mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt);
+      const nextSettingsJson = buildNodeSettingsPayload(selectedNode, serializeImageNodeSettings(draftImageSettings));
+      const nextPatch: CanvasGraphNodePatch = {};
 
-      if (selectedNode.promptInput !== draftImagePrompt || !isStructuredValueEqual(normalizeResourceRefs(selectedNode.resourceRefs), nextResourceRefs)) {
-        return {
-          promptInput: draftImagePrompt,
-          resourceRefs: nextResourceRefs,
-        };
+      if (selectedNode.promptInput !== draftImagePrompt) {
+        nextPatch.promptInput = draftImagePrompt;
       }
 
-      return null;
+      if ((selectedNode.modelKey ?? "") !== draftImageModelKey.trim()) {
+        nextPatch.modelKey = draftImageModelKey.trim() || null;
+      }
+
+      if (!isStructuredValueEqual(normalizeResourceRefs(selectedNode.resourceRefs), nextResourceRefs)) {
+        nextPatch.resourceRefs = nextResourceRefs;
+      }
+
+      if (!isStructuredValueEqual(selectedNode.settingsJson ?? null, nextSettingsJson ?? null)) {
+        nextPatch.settingsJson = nextSettingsJson;
+      }
+
+      return Object.keys(nextPatch).length > 0 ? nextPatch : null;
     }
 
     if (selectedNode.type === "video") {
@@ -772,7 +789,9 @@ export function InfiniteCanvasBoard({
     return null;
   }, [
     buildNodeSettingsPayload,
+    draftImageModelKey,
     draftImagePrompt,
+    draftImageSettings,
     draftPrompt,
     draftResourceRefs,
     draftStoryboardSettings,
@@ -1223,6 +1242,8 @@ export function InfiniteCanvasBoard({
       setSelectedStoryboardShotIndex(0);
       setDraftStoryboardShot(null);
       setDraftImagePrompt("");
+      setDraftImageSettings(DEFAULT_IMAGE_NODE_SETTINGS);
+      setDraftImageModelKey("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
       setDraftVideoModelKey("");
@@ -1236,7 +1257,10 @@ export function InfiniteCanvasBoard({
       setDraftPrompt(selectedNode.promptInput ?? "");
       setDraftStoryboardSettings(normalizeStoryboardNodeSettings(selectedNode.settingsJson));
       setSelectedStoryboardShotIndex(0);
+      setDraftStoryboardShot(null);
       setDraftImagePrompt("");
+      setDraftImageSettings(DEFAULT_IMAGE_NODE_SETTINGS);
+      setDraftImageModelKey("");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
       setDraftVideoModelKey("");
@@ -1253,6 +1277,8 @@ export function InfiniteCanvasBoard({
       setSelectedStoryboardShotIndex(0);
       setDraftStoryboardShot(null);
       setDraftImagePrompt(selectedNode.promptInput ?? "");
+      setDraftImageSettings(normalizeImageNodeSettings(selectedNode.settingsJson));
+      setDraftImageModelKey(selectedNode.modelKey ?? "");
       setDraftVideoPrompt("");
       setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
       setDraftVideoModelKey("");
@@ -1269,6 +1295,8 @@ export function InfiniteCanvasBoard({
       setSelectedStoryboardShotIndex(0);
       setDraftStoryboardShot(null);
       setDraftImagePrompt("");
+      setDraftImageSettings(DEFAULT_IMAGE_NODE_SETTINGS);
+      setDraftImageModelKey("");
       setDraftVideoPrompt(selectedNode.promptInput ?? "");
       setDraftVideoSettings(normalizeVideoSettingsByModel(normalizeVideoNodeSettings(selectedNode.settingsJson), selectedNode.modelKey ?? ""));
       setDraftVideoModelKey(selectedNode.modelKey ?? "");
@@ -1284,6 +1312,8 @@ export function InfiniteCanvasBoard({
     setSelectedStoryboardShotIndex(0);
     setDraftStoryboardShot(null);
     setDraftImagePrompt("");
+    setDraftImageSettings(DEFAULT_IMAGE_NODE_SETTINGS);
+    setDraftImageModelKey("");
     setDraftVideoPrompt("");
     setDraftVideoSettings(DEFAULT_VIDEO_NODE_SETTINGS);
     setDraftVideoModelKey("");
@@ -1295,6 +1325,12 @@ export function InfiniteCanvasBoard({
   const handleVideoModelKeyChange = useCallback((value: string) => {
     setDraftVideoModelKey(value);
     setDraftVideoSettings((current) => normalizeVideoSettingsByModel(current, value));
+  }, []);
+  const handleImageModelKeyChange = useCallback((value: string) => {
+    setDraftImageModelKey(value);
+  }, []);
+  const handleImageSettingsChange = useCallback((updater: (current: ImageNodeSettings) => ImageNodeSettings) => {
+    setDraftImageSettings((current) => updater(current));
   }, []);
 
   useEffect(() => {
@@ -3979,7 +4015,9 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftImagePrompt,
+          modelKey: draftImageModelKey.trim() || null,
           resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt),
+          settingsJson: buildNodeSettingsPayload(selectedNode, serializeImageNodeSettings(draftImageSettings)),
         },
         "图片节点提示词保存失败。",
       );
@@ -4007,7 +4045,9 @@ export function InfiniteCanvasBoard({
         selectedNode.id,
         {
           promptInput: draftImagePrompt,
+          modelKey: draftImageModelKey.trim() || null,
           resourceRefs: mergePromptMentionAssetIds(draftResourceRefs, draftImagePrompt),
+          settingsJson: buildNodeSettingsPayload(selectedNode, serializeImageNodeSettings(draftImageSettings)),
         },
         "图片提示词保存失败。",
       );
@@ -5117,6 +5157,8 @@ export function InfiniteCanvasBoard({
           canGenerate={canGenerate}
           generateLabel={selectedNodeAutoBatchEnabled ? "批量生成图片" : undefined}
           draftImagePrompt={draftImagePrompt}
+          draftImageSettings={draftImageSettings}
+          draftImageModelKey={draftImageModelKey}
           imageUploadInputRef={imageUploadInputRef}
           isGenerating={isSelectedImageNodeGenerating}
           isSavingImagePrompt={isSavingImagePrompt}
@@ -5131,6 +5173,7 @@ export function InfiniteCanvasBoard({
             void triggerImageNodeGeneration();
           }}
           onLinkPromptAsset={linkPromptAsset}
+          onModelKeyChange={handleImageModelKeyChange}
           onPromptChange={setDraftImagePrompt}
           onRemoveReferenceImage={(assetId) => {
             void removeReferenceImage(assetId);
@@ -5138,6 +5181,7 @@ export function InfiniteCanvasBoard({
           onSavePrompt={() => {
             void saveImageNodePrompt();
           }}
+          onSettingsChange={handleImageSettingsChange}
           onUploadReferenceImages={(files) => {
             void uploadReferenceImages(files);
           }}

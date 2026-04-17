@@ -6,6 +6,11 @@ import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { createGeneratedAsset, listAssetsByOwner } from "@/application/services/asset-service";
+import {
+  buildUnifiedImageArtifacts,
+  extractImageTraceMeta,
+  normalizeUnifiedImageOutput,
+} from "@/application/services/task-image-payload";
 import { db } from "@/infrastructure/db/client";
 import {
   assets,
@@ -28,6 +33,7 @@ import {
   generateVideoWithCloubic,
   getVideoStatusWithCloubic,
 } from "@/infrastructure/ai/cloubic-client";
+import { generateImageWithVolcengine } from "@/infrastructure/ai/volcengine-image-client";
 import { getVideoStatusThroughGateway, submitVideoThroughGateway } from "@/infrastructure/ai/gateway-video-client";
 import { ApiError } from "@/lib/api";
 import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
@@ -37,6 +43,7 @@ import { logRuntimeEvent, recordRuntimeMetric } from "@/lib/runtime-observabilit
 
 const runNodeMergeStrategySchema = z.enum(["previous_only", "merge_all", "custom"]);
 const runnableNodeTypes = new Set(["text", "image", "video", "storyboard"]);
+const VOLCENGINE_IMAGE_MODEL = "doubao-seedream-4-5-251128";
 
 function isRunnableNodeType(nodeType: string) {
   return runnableNodeTypes.has(nodeType);
@@ -233,6 +240,19 @@ function resolveVideoProvider(model: string | null | undefined) {
   return "cloubic" as const;
 }
 
+function resolveImageProvider(model: string | null | undefined) {
+  const normalizedModel = toNonEmptyString(model)?.toLowerCase();
+
+  if (
+    normalizedModel === "doubao-seedream-4-5-251128" ||
+    normalizedModel === "doubao-seedream-5-0-260128"
+  ) {
+    return "volcengine" as const;
+  }
+
+  return "cloubic" as const;
+}
+
 const PROMPT_ASSET_MENTION_REGEX = /@\[([^\]]+)\]\{asset:([0-9a-f-]+)\}/gi;
 
 function getPromptMentionAssetIds(prompt: string | null | undefined) {
@@ -275,6 +295,20 @@ function normalizeRecord(value: unknown) {
   }
 
   return {};
+}
+
+function toFiniteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function getImageOutputDimensions(resultMeta: Record<string, unknown>) {
+  const outputItems = Array.isArray(resultMeta.output) ? resultMeta.output : [];
+  const primaryOutput = normalizeRecord(outputItems[0]);
+
+  return {
+    width: toFiniteNumber(primaryOutput.width) ?? toFiniteNumber(resultMeta.width),
+    height: toFiniteNumber(primaryOutput.height) ?? toFiniteNumber(resultMeta.height),
+  };
 }
 
 type CombinationBindingRecord = {
@@ -1148,6 +1182,11 @@ function extractImageSourceFromSnapshot(outputSnapshot: Record<string, unknown> 
       : null;
 
   const candidateValues = [
+    ...(Array.isArray(structuredData?.output)
+      ? structuredData.output.map((item) =>
+          item && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>).url : undefined,
+        )
+      : []),
     structuredData?.imageUrl,
     structuredData?.dataUri,
     structuredData?.url,
@@ -1349,6 +1388,7 @@ function buildOutputSnapshotFromNodeRun(run: {
   const generatedAt = (run.finishedAt ?? new Date()).toISOString();
 
   if (run.resultType === "image") {
+    const imageDimensions = getImageOutputDimensions(resultMeta);
     const imageUrl =
       assetFileUrl ??
       (typeof resultMeta.imageUrl === "string" && resultMeta.imageUrl.trim().length > 0 ? resultMeta.imageUrl : null) ??
@@ -1369,6 +1409,8 @@ function buildOutputSnapshotFromNodeRun(run: {
               assetType: "image",
               url: imageUrl,
               mimeType: run.assetMimeType ?? undefined,
+              ...(imageDimensions.width !== undefined ? { width: imageDimensions.width } : {}),
+              ...(imageDimensions.height !== undefined ? { height: imageDimensions.height } : {}),
             },
           ]
         : undefined,
@@ -1376,6 +1418,8 @@ function buildOutputSnapshotFromNodeRun(run: {
         ...resultMeta,
         imageUrl,
         assetId: run.assetId ?? resultMeta.assetId ?? undefined,
+        ...(imageDimensions.width !== undefined ? { width: imageDimensions.width } : {}),
+        ...(imageDimensions.height !== undefined ? { height: imageDimensions.height } : {}),
       },
       generatedAt,
     };
@@ -1954,6 +1998,12 @@ async function buildExecutionPayload(
           mergedReferenceImages,
         })
       : [];
+  const provider =
+    node.type === "image"
+      ? resolveImageProvider(node.modelKey)
+      : node.type === "video"
+        ? resolveVideoProvider(node.modelKey)
+        : "internal";
 
   return {
     workspaceId: input.workspaceId,
@@ -1961,7 +2011,7 @@ async function buildExecutionPayload(
     nodeId: input.nodeId,
     requestId: input.requestId,
     taskType: node.type,
-    provider: "internal",
+    provider,
     model: node.modelKey ?? "unassigned",
     prompt: promptSegments.filter(Boolean).join("\n\n"),
     settings: {
@@ -3424,12 +3474,15 @@ async function executeTask(taskId: string) {
     }
 
     if (task.taskType === "image") {
+      const imageProvider = resolveImageProvider(task.model === "unassigned" ? null : task.model);
+
       console.info("[canvas-image] request prepared", {
         workspaceId: task.workspaceId,
         canvasId: task.canvasId,
         taskId: task.id,
         nodeId: node.id,
         nodeTitle: node.title,
+        provider: imageProvider,
         model: task.model === "unassigned" ? null : task.model,
         promptPreview: prompt.slice(0, 800),
         promptLength: prompt.length,
@@ -3437,13 +3490,35 @@ async function executeTask(taskId: string) {
         referenceImagesPreview: referenceImages.slice(0, 3),
       });
 
-      const output = await generateImageWithCloubic({
-        prompt,
-        model: task.model === "unassigned" ? undefined : task.model,
-        settings,
-        referenceImages,
-      });
-      const imageSourceType = output.dataUri ? "data_uri" : output.imageUrl ? "remote_url" : "markdown_only";
+      const output =
+        imageProvider === "volcengine"
+          ? await generateImageWithVolcengine({
+              prompt,
+              model: task.model === "unassigned" ? undefined : task.model,
+              settings,
+              assets: referenceImages.map((url) => ({
+                kind: "image" as const,
+                url,
+                role: "reference" as const,
+              })),
+            })
+          : await generateImageWithCloubic({
+              prompt,
+              model: task.model === "unassigned" ? undefined : task.model,
+              settings,
+              referenceImages,
+            });
+      const primaryOutputUrl = "output" in output ? (output.output[0]?.url ?? output.imageUrl) : output.imageUrl;
+      const markdown =
+        "markdown" in output ? output.markdown : primaryOutputUrl ? `![generated image](${primaryOutputUrl})` : "";
+      const dataUri = "dataUri" in output ? output.dataUri : undefined;
+      const usage = "usage" in output ? output.usage : undefined;
+      const providerTrace = "trace" in output ? output.trace : undefined;
+      const responseFormat = "responseFormat" in output ? output.responseFormat : undefined;
+      const responseSize = "size" in output ? output.size : undefined;
+      const providerOutput = "output" in output ? output.output : undefined;
+      const primaryProviderOutput = providerOutput?.[0];
+      const imageSourceType = dataUri ? "data_uri" : primaryOutputUrl ? "remote_url" : "markdown_only";
 
       console.info("[canvas-image] provider output ready", {
         workspaceId: task.workspaceId,
@@ -3454,9 +3529,9 @@ async function executeTask(taskId: string) {
         provider: output.provider,
         model: output.model,
         sourceType: imageSourceType,
-        hasDataUri: Boolean(output.dataUri),
-        hasImageUrl: Boolean(output.imageUrl),
-        contentPreview: output.markdown.slice(0, 400),
+        hasDataUri: Boolean(dataUri),
+        hasImageUrl: Boolean(primaryOutputUrl),
+        contentPreview: markdown.slice(0, 400),
       });
 
       const generatedAsset = await createGeneratedAsset({
@@ -3464,8 +3539,11 @@ async function executeTask(taskId: string) {
         ownerType: "canvas_node",
         ownerId: node.id,
         fileName: `${node.title || "image-node"}-${Date.now()}`,
-        sourceUrl: output.imageUrl,
-        dataUri: output.dataUri,
+        sourceUrl: primaryOutputUrl,
+        dataUri,
+        mimeType: primaryProviderOutput?.mimeType,
+        width: primaryProviderOutput?.width,
+        height: primaryProviderOutput?.height,
         meta: {
           provider: output.provider,
           model: output.model,
@@ -3473,6 +3551,9 @@ async function executeTask(taskId: string) {
           canvasId: task.canvasId,
           nodeId: node.id,
           referenceImages,
+          ...(responseSize ? { size: responseSize } : {}),
+          ...(responseFormat ? { responseFormat } : {}),
+          ...(providerTrace ? { trace: providerTrace } : {}),
         },
       });
 
@@ -3488,29 +3569,30 @@ async function executeTask(taskId: string) {
       });
 
       const finishedAt = new Date();
-      const outputSnapshot = {
+      const imageArtifacts = buildUnifiedImageArtifacts({
         taskId: task.id,
-        outputType: "image",
-        content: generatedAsset.fileUrl,
-        assets: [
-          {
-            assetId: generatedAsset.id,
-            assetType: "image",
-            url: generatedAsset.fileUrl,
-            mimeType: generatedAsset.mimeType ?? undefined,
-          },
-        ],
-        structuredData: {
-          markdown: output.markdown,
-          dataUri: output.dataUri,
-          imageUrl: generatedAsset.fileUrl,
-          sourceImageUrl: output.imageUrl,
-          assetId: generatedAsset.id,
+        provider: output.provider,
+        model: output.model,
+        markdown,
+        dataUri,
+        sourceImageUrl: primaryOutputUrl,
+        referenceImages,
+        usage,
+        responseFormat,
+        size: responseSize,
+        trace: providerTrace,
+        rawResponse: output.rawResponse,
+        providerOutput,
+        asset: {
+          id: generatedAsset.id,
+          fileUrl: generatedAsset.fileUrl,
           storageKey: generatedAsset.storageKey,
-          referenceImages,
+          mimeType: generatedAsset.mimeType,
+          width: generatedAsset.width,
+          height: generatedAsset.height,
         },
         generatedAt: finishedAt.toISOString(),
-      };
+      });
 
       await db.transaction(async (tx) => {
         await tx.insert(taskResults).values({
@@ -3523,24 +3605,14 @@ async function executeTask(taskId: string) {
           combinationItemId: task.combinationItemId,
           combinationShardId: task.combinationShardId,
           resultType: "image",
-          contentText: output.markdown,
+          contentText: markdown,
           assetId: generatedAsset.id,
           sourceBatchItemKey: task.sourceBatchItemKey,
           displayOrder: task.displayOrder,
           inputBindingSummaryJson: Array.isArray(requestPayload.inputBindingSummary)
             ? requestPayload.inputBindingSummary.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object"))
             : [],
-          meta: {
-            provider: output.provider,
-            model: output.model,
-            usage: output.usage,
-            dataUri: output.dataUri,
-            imageUrl: generatedAsset.fileUrl,
-            sourceImageUrl: output.imageUrl,
-            assetId: generatedAsset.id,
-            storageKey: generatedAsset.storageKey,
-            referenceImages,
-          },
+          meta: imageArtifacts.taskResultMeta,
         });
 
         await tx
@@ -3549,17 +3621,7 @@ async function executeTask(taskId: string) {
             status: "succeeded",
             provider: output.provider,
             model: output.model,
-            responsePayload: {
-              content: output.markdown,
-              dataUri: output.dataUri,
-              imageUrl: generatedAsset.fileUrl,
-              sourceImageUrl: output.imageUrl,
-              assetId: generatedAsset.id,
-              storageKey: generatedAsset.storageKey,
-              referenceImages,
-              usage: output.usage,
-              rawResponse: output.rawResponse,
-            },
+            responsePayload: imageArtifacts.responsePayload,
             errorCode: null,
             errorMessage: null,
             finishedAt,
@@ -3571,7 +3633,7 @@ async function executeTask(taskId: string) {
           .update(canvasNodes)
           .set({
             status: "succeeded",
-            outputSnapshot,
+            outputSnapshot: imageArtifacts.outputSnapshot,
             updatedAt: finishedAt,
           })
           .where(eq(canvasNodes.id, node.id));
@@ -3581,18 +3643,9 @@ async function executeTask(taskId: string) {
         taskId: task.id,
         status: "succeeded",
         resultType: "image",
-        contentText: output.markdown,
+        contentText: markdown,
         assetId: generatedAsset.id,
-        resultMeta: {
-          provider: output.provider,
-          model: output.model,
-          usage: output.usage,
-          imageUrl: generatedAsset.fileUrl,
-          sourceImageUrl: output.imageUrl,
-          assetId: generatedAsset.id,
-          storageKey: generatedAsset.storageKey,
-          referenceImages,
-        },
+        resultMeta: imageArtifacts.nodeRunResultMeta,
         errorCode: null,
         errorMessage: null,
         finishedAt,
@@ -3860,7 +3913,7 @@ export async function runNode(input: z.infer<typeof runNodeInputSchema>) {
         displayOrder: parsed.displayOrder ?? nodeRun.displayOrder ?? combinationContext?.itemIndex ?? null,
         requestId: parsed.requestId,
         taskType: node.type,
-        provider: "internal",
+        provider: typeof requestPayload.provider === "string" ? requestPayload.provider : "internal",
         model: node.modelKey ?? "unassigned",
         status: "queued",
         requestPayload,
@@ -4044,6 +4097,8 @@ export async function runLibraryItemImageGeneration(
       },
       referenceImages,
     });
+    const providerOutput = normalizeUnifiedImageOutput([], output.imageUrl ?? output.dataUri ?? null);
+    const primaryProviderOutput = providerOutput[0];
     const generatedAsset = await createGeneratedAsset({
       workspaceId: parsed.workspaceId,
       ownerType: "library_item",
@@ -4051,6 +4106,9 @@ export async function runLibraryItemImageGeneration(
       fileName: `${item.name}-${Date.now()}`,
       sourceUrl: output.imageUrl,
       dataUri: output.dataUri,
+      mimeType: primaryProviderOutput?.mimeType,
+      width: primaryProviderOutput?.width,
+      height: primaryProviderOutput?.height,
       meta: {
         provider: output.provider,
         model: output.model,
@@ -4059,6 +4117,37 @@ export async function runLibraryItemImageGeneration(
       },
     });
     const finishedAt = new Date();
+    const imageArtifacts = buildUnifiedImageArtifacts({
+      taskId: task.id,
+      provider: output.provider,
+      model: output.model,
+      markdown: output.markdown,
+      dataUri: output.dataUri,
+      sourceImageUrl: output.imageUrl,
+      referenceImages,
+      usage: output.usage,
+      rawResponse: output.rawResponse,
+      providerOutput,
+      asset: {
+        id: generatedAsset.id,
+        fileUrl: generatedAsset.fileUrl,
+        storageKey: generatedAsset.storageKey,
+        mimeType: generatedAsset.mimeType,
+        width: generatedAsset.width,
+        height: generatedAsset.height,
+      },
+      generatedAt: finishedAt.toISOString(),
+    });
+    const libraryImageMeta = {
+      ...imageArtifacts.taskResultMeta,
+      instructionPresetId: instructionPreset?.id ?? null,
+      generationMode: parsed.mode,
+    };
+    const libraryImageResponsePayload = {
+      ...imageArtifacts.responsePayload,
+      instructionPresetId: instructionPreset?.id ?? null,
+      generationMode: parsed.mode,
+    };
 
     await db.transaction(async (tx) => {
       await tx.insert(taskResults).values({
@@ -4067,12 +4156,7 @@ export async function runLibraryItemImageGeneration(
         resultType: "image",
         contentText: output.markdown,
         assetId: generatedAsset.id,
-        meta: {
-          provider: output.provider,
-          model: output.model,
-          imageUrl: generatedAsset.fileUrl,
-          referenceImages,
-        },
+        meta: libraryImageMeta,
       });
 
       await tx
@@ -4081,14 +4165,7 @@ export async function runLibraryItemImageGeneration(
           status: "succeeded",
           provider: output.provider,
           model: output.model,
-          responsePayload: {
-            markdown: output.markdown,
-            imageUrl: generatedAsset.fileUrl,
-            sourceImageUrl: output.imageUrl,
-            referenceImages,
-            usage: output.usage,
-            rawResponse: output.rawResponse,
-          },
+          responsePayload: libraryImageResponsePayload,
           errorCode: null,
           errorMessage: null,
           finishedAt,
@@ -4111,16 +4188,7 @@ export async function runLibraryItemImageGeneration(
       resultType: "image",
       contentText: output.markdown,
       assetId: generatedAsset.id,
-      resultMeta: {
-        provider: output.provider,
-        model: output.model,
-        usage: output.usage,
-        imageUrl: generatedAsset.fileUrl,
-        sourceImageUrl: output.imageUrl,
-        assetId: generatedAsset.id,
-        storageKey: generatedAsset.storageKey,
-        referenceImages,
-      },
+      resultMeta: libraryImageMeta,
       errorCode: null,
       errorMessage: null,
       finishedAt,
@@ -4203,14 +4271,17 @@ export async function getTaskStatus(input: z.infer<typeof getTaskInputSchema>) {
       ? ((resultOutput.meta as Record<string, unknown>).output as unknown[])
       : [];
   const outputFromPayload = Array.isArray(responsePayload?.output) ? responsePayload.output : [];
-  const normalizedOutput = normalizeUnifiedVideoOutput(
-    outputFromResult.length > 0 ? outputFromResult : outputFromPayload,
-    toNonEmptyString(responsePayload?.videoUrl),
-  );
-  const providerTrace =
-    (resultOutput?.meta && typeof resultOutput.meta === "object"
-      ? extractVideoTraceMeta((resultOutput.meta as Record<string, unknown>).trace)
-      : null) ?? extractVideoTraceMeta(responsePayload?.trace);
+  const isVideoTask = task.taskType === "video";
+  const normalizedOutput = isVideoTask
+    ? normalizeUnifiedVideoOutput(outputFromResult.length > 0 ? outputFromResult : outputFromPayload, toNonEmptyString(responsePayload?.videoUrl))
+    : normalizeUnifiedImageOutput(outputFromResult.length > 0 ? outputFromResult : outputFromPayload, toNonEmptyString(responsePayload?.imageUrl));
+  const providerTrace = isVideoTask
+    ? (resultOutput?.meta && typeof resultOutput.meta === "object"
+        ? extractVideoTraceMeta((resultOutput.meta as Record<string, unknown>).trace)
+        : null) ?? extractVideoTraceMeta(responsePayload?.trace)
+    : (resultOutput?.meta && typeof resultOutput.meta === "object"
+        ? extractImageTraceMeta((resultOutput.meta as Record<string, unknown>).trace)
+        : null) ?? extractImageTraceMeta(responsePayload?.trace);
 
   return {
     task_id: task.id,

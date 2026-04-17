@@ -74,6 +74,9 @@
 | `IMAGE_PROVIDER_DEFAULT` | 默认图片供应商 |
 | `IMAGE_PROVIDER_A_API_KEY` | 图片供应商 A Key |
 | `IMAGE_PROVIDER_B_API_KEY` | 图片供应商 B Key |
+| `VOLCENGINE_ARK_API_KEY` | 火山引擎 Ark 图片生成 Key |
+| `VOLCENGINE_ARK_BASE_URL` | 火山引擎 Ark 接口地址，默认 `https://ark.cn-beijing.volces.com/api/v3` |
+| `VOLCENGINE_ARK_IMAGE_MODEL` | 火山引擎默认图片模型，默认 `doubao-seedream-4-5-251128` |
 
 ### 5.3 视频模型配置
 

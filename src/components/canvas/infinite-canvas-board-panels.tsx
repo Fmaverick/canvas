@@ -30,6 +30,7 @@ import {
   formatCanvasDateTime,
   getCombinationPlanDetail,
   getInputNodeOutputSummary,
+  DEFAULT_IMAGE_NODE_SETTINGS,
   DEFAULT_STORYBOARD_NODE_SETTINGS,
   DEFAULT_VIDEO_NODE_SETTINGS,
   DEFAULT_INPUT_NODE_SETTINGS,
@@ -51,6 +52,7 @@ import {
   type CanvasBatchRunResult,
   type CanvasNode,
   type CanvasNodeReferenceAsset,
+  type ImageNodeSettings,
   type InstructionPresetOption,
   type LibraryItemOption,
   type StoryboardShot,
@@ -79,6 +81,21 @@ const VIDEO_MODEL_PRESET_OPTIONS = [
   {
     value: "kling-v3-std",
     label: "Kling V3 Standard",
+  },
+] as const;
+
+const IMAGE_MODEL_PRESET_OPTIONS = [
+  {
+    value: "",
+    label: "默认模型",
+  },
+  {
+    value: "doubao-seedream-5-0-260128",
+    label: "火山引擎 Doubao Seedream 5.0",
+  },
+  {
+    value: "doubao-seedream-4-5-251128",
+    label: "火山引擎 Doubao Seedream 4.5",
   },
 ] as const;
 
@@ -1757,12 +1774,16 @@ type ImageNodePanelProps = {
   generateLabel?: string;
   imageUploadInputRef: React.RefObject<HTMLInputElement | null>;
   draftImagePrompt: string;
+  draftImageSettings: ImageNodeSettings;
+  draftImageModelKey: string;
   isSavingImagePrompt: boolean;
   isUploadingReferenceImages: boolean;
   isGenerating: boolean;
   isTaskActive: boolean;
   selectedImageOutputSource: string | null;
   onPromptChange: (value: string) => void;
+  onModelKeyChange: (value: string) => void;
+  onSettingsChange: (updater: (current: ImageNodeSettings) => ImageNodeSettings) => void;
   onUploadReferenceImages: (files: FileList | null) => void;
   onSavePrompt: () => void;
   onGenerate: () => void;
@@ -1781,12 +1802,16 @@ export function ImageNodePanel({
   generateLabel,
   imageUploadInputRef,
   draftImagePrompt,
+  draftImageSettings,
+  draftImageModelKey,
   isSavingImagePrompt,
   isUploadingReferenceImages,
   isGenerating,
   isTaskActive,
   selectedImageOutputSource,
   onPromptChange,
+  onModelKeyChange,
+  onSettingsChange,
   onUploadReferenceImages,
   onSavePrompt,
   onGenerate,
@@ -1797,6 +1822,10 @@ export function ImageNodePanel({
   onLinkPromptAsset,
   availablePromptAssets,
 }: ImageNodePanelProps) {
+  const hasPresetImageModel = IMAGE_MODEL_PRESET_OPTIONS.some((option) => option.value === draftImageModelKey);
+  const selectedImageModelPreset =
+    draftImageModelKey.length === 0 || hasPresetImageModel ? draftImageModelKey : "__custom__";
+
   return (
     <div className="absolute inset-x-0 bottom-6 z-20 flex justify-center px-6">
       <div className="w-full max-w-5xl rounded-[24px] border bg-background/96 p-3 shadow-lg">
@@ -1863,11 +1892,85 @@ export function ImageNodePanel({
             }}
           />
 
+          <div className="grid gap-3 rounded-2xl bg-muted/25 p-3 md:grid-cols-3">
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>图片模型</span>
+              <select
+                className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                disabled={!canEdit}
+                value={selectedImageModelPreset}
+                onChange={(event) =>
+                  onModelKeyChange(event.target.value === "__custom__" ? draftImageModelKey : event.target.value)
+                }
+              >
+                {IMAGE_MODEL_PRESET_OPTIONS.map((option) => (
+                  <option key={option.value || "default"} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+                <option value="__custom__">自定义模型</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>分辨率等级</span>
+              <select
+                className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                disabled={!canEdit}
+                value={draftImageSettings.size}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    size: event.target.value === "4K" ? "4K" : "2K",
+                  }))
+                }
+              >
+                <option value="2K">2K</option>
+                <option value="4K">4K</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>宽高比</span>
+              <select
+                className="flex h-9 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+                disabled={!canEdit}
+                value={draftImageSettings.aspectRatio}
+                onChange={(event) =>
+                  onSettingsChange((current) => ({
+                    ...current,
+                    aspectRatio: event.target.value as any,
+                  }))
+                }
+              >
+                <option value="1:1">1:1</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16</option>
+                <option value="3:2">3:2</option>
+                <option value="2:3">2:3</option>
+                <option value="21:9">21:9</option>
+              </select>
+            </label>
+          </div>
+
+          {selectedImageModelPreset === "__custom__" ? (
+            <label className="block space-y-1 text-xs text-muted-foreground">
+              <span>自定义模型 Key</span>
+              <Input
+                placeholder="例如：doubao-seedream-4-5-251128"
+                value={draftImageModelKey}
+                onChange={(event) => onModelKeyChange(event.target.value)}
+              />
+            </label>
+          ) : null}
+
           <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-muted-foreground">
               {(selectedNode.referenceAssets?.length ?? 0) > 0
                 ? `已关联 ${selectedNode.referenceAssets?.length ?? 0} 张参考图`
                 : "当前没有参考图，直接按提示词出图"}
+              {draftImageModelKey.trim() ? ` · 当前模型 ${draftImageModelKey.trim()}` : " · 当前使用默认图片模型"}
+              {` · 当前尺寸 ${draftImageSettings.size} (${draftImageSettings.aspectRatio})`}
               {selectedImageOutputSource ? " · 结果会直接显示在节点上。" : "。"}
             </p>
             <div className="flex shrink-0 items-center gap-2">

@@ -1,13 +1,14 @@
 import { z } from "zod";
 
 import { ApiError, getRequestId, jsonError } from "@/lib/api";
+import { generateImageWithVolcengine } from "@/infrastructure/ai/volcengine-image-client";
 import { generateVideoWithSeedance20 } from "@/infrastructure/ai/seedance20-client";
 import { assertGatewayClientKey } from "@/lib/gateway-client-keys";
 import { createGatewayVideoTask } from "@/lib/gateway-task-store";
 import { assertModelEnabled } from "@/lib/gateway-provider-registry";
 
 const gatewayPayloadSchema = z.object({
-  modality: z.enum(["llm", "video"]),
+  modality: z.enum(["llm", "image", "video"]),
   model: z.string().min(1),
   operation: z.string().optional(),
   prompt: z.string().optional(),
@@ -89,7 +90,39 @@ export async function POST(request: Request) {
     }
 
     if (!payload.prompt || payload.prompt.trim().length === 0) {
-      throw new ApiError(400, "VALIDATION_ERROR", "prompt is required for video modality.");
+      throw new ApiError(400, "VALIDATION_ERROR", "prompt is required for image or video modality.");
+    }
+
+    if (payload.modality === "image") {
+      const provider = "volcengine";
+      assertModelEnabled({
+        modelId: payload.model,
+        provider,
+        modality: "image",
+      });
+
+      const output = await generateImageWithVolcengine({
+        prompt: payload.prompt,
+        model: payload.model,
+        settings: {
+          ...(payload.settings ?? {}),
+          ...(payload.operation ? { operation: payload.operation } : {}),
+        },
+        assets: payload.assets,
+      });
+
+      return Response.json({
+        requestId,
+        modality: "image",
+        model: output.model,
+        provider: output.provider,
+        output: output.output,
+        metadata: {
+          size: output.size,
+          responseFormat: output.responseFormat,
+          trace: output.trace ?? {},
+        },
+      });
     }
 
     const provider = "seedance2.0";

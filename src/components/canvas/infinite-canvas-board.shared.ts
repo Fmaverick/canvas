@@ -308,6 +308,13 @@ export type InfiniteCanvasBoardProps = {
 export type VideoGenerationMode = "reference" | "first_last" | "multi_shot" | "smart_storyboard";
 export type VideoAspectSize = "9:16" | "16:9" | "1:1";
 export type StoryboardGenerationMode = "smart_storyboard" | "standard";
+export type ImageNodeSize = "2K" | "4K";
+export type ImageAspectRatio = "1:1" | "4:3" | "3:4" | "16:9" | "9:16" | "3:2" | "2:3" | "21:9";
+
+export type ImageNodeSettings = {
+  size: ImageNodeSize;
+  aspectRatio: ImageAspectRatio;
+};
 
 export type VideoNodeSettings = {
   generationMode: VideoGenerationMode;
@@ -356,6 +363,11 @@ export type StoryboardShot = {
 export const DEFAULT_INPUT_NODE_SETTINGS: CanvasInputNodeSettings = {
   sourceType: "text",
   allowMixedSources: false,
+};
+
+export const DEFAULT_IMAGE_NODE_SETTINGS: ImageNodeSettings = {
+  size: "2K",
+  aspectRatio: "1:1",
 };
 
 export const DEFAULT_COMBINATION_NODE_SETTINGS: CanvasCombinationNodeSettings = {
@@ -442,6 +454,36 @@ export const DEFAULT_STORYBOARD_NODE_SETTINGS: StoryboardNodeSettings = {
   responseFormat: "json",
   templateFile: "shotOutFormat.md",
 };
+
+export function normalizeImageNodeSettings(
+  settingsJson: Record<string, unknown> | null | undefined,
+): ImageNodeSettings {
+  const size = settingsJson?.size === "4K" ? "4K" : DEFAULT_IMAGE_NODE_SETTINGS.size;
+  const aspectRatioCandidate = settingsJson?.aspectRatio;
+  const aspectRatio: ImageAspectRatio =
+    aspectRatioCandidate === "1:1" ||
+    aspectRatioCandidate === "4:3" ||
+    aspectRatioCandidate === "3:4" ||
+    aspectRatioCandidate === "16:9" ||
+    aspectRatioCandidate === "9:16" ||
+    aspectRatioCandidate === "3:2" ||
+    aspectRatioCandidate === "2:3" ||
+    aspectRatioCandidate === "21:9"
+      ? (aspectRatioCandidate as ImageAspectRatio)
+      : DEFAULT_IMAGE_NODE_SETTINGS.aspectRatio;
+
+  return {
+    size,
+    aspectRatio,
+  };
+}
+
+export function serializeImageNodeSettings(settings: ImageNodeSettings) {
+  return {
+    size: settings.size,
+    aspectRatio: settings.aspectRatio,
+  };
+}
 
 export const quickCreateOptions: QuickCreateOption[] = [
   {
@@ -626,6 +668,10 @@ export function canCanvasNodeRun(nodeType: string): nodeType is CanvasRunnableNo
 }
 
 export function getDefaultCanvasNodeSettings(type: CanvasNodeType): Record<string, unknown> | undefined {
+  if (type === "image") {
+    return serializeImageNodeSettings(DEFAULT_IMAGE_NODE_SETTINGS);
+  }
+
   if (type === "storyboard") {
     return serializeStoryboardNodeSettings(DEFAULT_STORYBOARD_NODE_SETTINGS);
   }

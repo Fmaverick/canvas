@@ -7,10 +7,14 @@ type ProviderKey = {
 };
 
 export type ProviderStatusView = {
+  id: string;
   name: string;
+  displayName: string;
   available: boolean;
   readOnly: boolean;
   baseUrl: string | null;
+  modalities: GatewayModelView["modality"][];
+  models: string[];
   keys: Array<{
     id: string;
     label: string;
@@ -27,6 +31,7 @@ export type GatewayModelView = {
 
 type ProviderRecord = {
   name: string;
+  displayName: string;
   baseUrl: string | null;
   keys: ProviderKey[];
   available: boolean;
@@ -34,7 +39,9 @@ type ProviderRecord = {
 };
 
 export type ProviderRuntimeConfig = {
+  id: string;
   name: string;
+  displayName: string;
   baseUrl: string | null;
   keys: Array<{
     id: string;
@@ -66,11 +73,19 @@ const MODEL_CATALOG: GatewayModelView[] = [
     async: true,
     providers: ["seedance2.0"],
   },
+  {
+    id: "doubao-seedream-4-5-251128",
+    modality: "image",
+    capability: "generate",
+    async: false,
+    providers: ["volcengine"],
+  },
 ];
 
 const DEFAULT_PROVIDER_RECORDS: ProviderRecord[] = [
   {
     name: "seedance2.0",
+    displayName: "Seedance 2.0",
     baseUrl: null,
     keys: [],
     available: false,
@@ -88,11 +103,17 @@ function maskKeyLabel(value: string) {
   return `${trimmed.slice(0, 4)}***${trimmed.slice(-4)}`;
 }
 
-function createProviderKey(index: number, value: string): ProviderKey {
+function slugifyProviderName(providerName: string) {
+  const normalized = providerName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+  return normalized.length > 0 ? normalized : "provider";
+}
+
+function createProviderKey(providerName: string, index: number, value: string): ProviderKey {
   const trimmed = value.trim();
 
   return {
-    id: `seedance2-key-${index + 1}`,
+    id: `${slugifyProviderName(providerName)}-key-${index + 1}`,
     value: trimmed,
     label: maskKeyLabel(trimmed),
   };
@@ -117,7 +138,10 @@ function getState(): RegistryState {
 }
 
 export function listGatewayModels(): GatewayModelView[] {
-  return MODEL_CATALOG.map((model) => ({ ...model }));
+  return MODEL_CATALOG.map((model) => ({
+    ...model,
+    providers: [...model.providers],
+  }));
 }
 
 export function assertModelEnabled(input: {
@@ -146,16 +170,26 @@ export function assertModelEnabled(input: {
 export function listProviderStatuses(): ProviderStatusView[] {
   const state = getState();
 
-  return [...state.providers.values()].map((provider) => ({
-    name: provider.name,
-    available: provider.available,
-    readOnly: provider.readOnly,
-    baseUrl: provider.baseUrl,
-    keys: provider.keys.map((key) => ({
-      id: key.id,
-      label: key.label,
-    })),
-  }));
+  return [...state.providers.values()]
+    .map((provider) => {
+      const supportedModels = MODEL_CATALOG.filter((model) => model.providers.includes(provider.name));
+
+      return {
+        id: provider.name,
+        name: provider.name,
+        displayName: provider.displayName,
+        available: provider.available,
+        readOnly: provider.readOnly,
+        baseUrl: provider.baseUrl,
+        modalities: Array.from(new Set(supportedModels.map((model) => model.modality))),
+        models: supportedModels.map((model) => model.id),
+        keys: provider.keys.map((key) => ({
+          id: key.id,
+          label: key.label,
+        })),
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function getProviderRuntimeConfig(provider: string): ProviderRuntimeConfig | null {
@@ -168,7 +202,9 @@ export function getProviderRuntimeConfig(provider: string): ProviderRuntimeConfi
   }
 
   return {
+    id: record.name,
     name: record.name,
+    displayName: record.displayName,
     baseUrl: record.baseUrl,
     available: record.available,
     readOnly: record.readOnly,
@@ -211,13 +247,14 @@ export function updateProviderConfig(input: {
       ? input.keys
           .map((key) => key.trim())
           .filter((key) => key.length > 0)
-          .map((key, index) => createProviderKey(index, key))
+          .map((key, index) => createProviderKey(providerName, index, key))
       : (existing?.keys ?? []);
   const nextReadOnly = input.readOnly ?? existing?.readOnly ?? false;
   const nextAvailable = input.available ?? (nextBaseUrl !== null && nextKeys.length > 0);
 
   const record: ProviderRecord = {
     name: providerName,
+    displayName: existing?.displayName ?? providerName,
     baseUrl: nextBaseUrl,
     keys: nextKeys,
     available: nextAvailable,
@@ -227,13 +264,29 @@ export function updateProviderConfig(input: {
   state.providers.set(providerName, record);
 
   return {
+    id: record.name,
     name: record.name,
+    displayName: record.displayName,
     available: record.available,
     readOnly: record.readOnly,
     baseUrl: record.baseUrl,
+    modalities: Array.from(
+      new Set(MODEL_CATALOG.filter((model) => model.providers.includes(record.name)).map((model) => model.modality)),
+    ),
+    models: MODEL_CATALOG.filter((model) => model.providers.includes(record.name)).map((model) => model.id),
     keys: record.keys.map((key) => ({
       id: key.id,
       label: key.label,
     })),
   };
 }
+
+export const __gatewayProviderRegistryTestUtils = {
+  reset() {
+    const globalRef = globalThis as typeof globalThis & {
+      [REGISTRY_GLOBAL_KEY]?: RegistryState;
+    };
+
+    delete globalRef[REGISTRY_GLOBAL_KEY];
+  },
+};

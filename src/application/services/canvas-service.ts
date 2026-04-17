@@ -431,6 +431,25 @@ function normalizeVideoSettingsForClient(settingsJson: Record<string, unknown> |
   };
 }
 
+function normalizeImageSettingsForClient(settingsJson: Record<string, unknown> | null | undefined) {
+  if (!settingsJson || typeof settingsJson !== "object") {
+    return {
+      size: "2K",
+    };
+  }
+
+  const currentSize = settingsJson.size;
+
+  if (currentSize === "2K" || currentSize === "4K") {
+    return settingsJson;
+  }
+
+  return {
+    ...settingsJson,
+    size: "2K",
+  };
+}
+
 function assertNoCycle(
   edges: Array<{ sourceNodeId: string; targetNodeId: string }>,
   sourceNodeId: string,
@@ -507,7 +526,9 @@ async function hydrateCanvasNodes(workspaceId: string, nodes: CanvasNodeRecord[]
     return {
       ...node,
       settingsJson:
-        node.type === "video"
+        node.type === "image"
+          ? normalizeImageSettingsForClient(node.settingsJson as Record<string, unknown> | null | undefined)
+          : node.type === "video"
           ? normalizeVideoSettingsForClient(node.settingsJson as Record<string, unknown> | null | undefined)
           : node.settingsJson,
       referenceAssets: assetIds

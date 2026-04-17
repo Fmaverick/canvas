@@ -6,6 +6,7 @@
 - 管理端登录与配置
 - 调用方 API Key 生成/撤销
 - LLM 调用
+- 火山引擎图片生成
 - 视频任务提交与轮询
 
 ## 0. 准备变量
@@ -46,6 +47,13 @@ curl -s "$BASE_URL/v1/models"
       "capability": "chat",
       "async": false,
       "providers": ["mock"]
+    },
+    {
+      "id": "doubao-seedream-4-5-251128",
+      "modality": "image",
+      "capability": "generate",
+      "async": false,
+      "providers": ["volcengine"]
     },
     {
       "id": "seedance-2.0",
@@ -144,6 +152,12 @@ curl -s -b cookies.txt "$BASE_URL/admin/status"
   ],
   "providers": [
     {
+      "name": "volcengine",
+      "available": true,
+      "readOnly": false,
+      "baseUrl": "mock://volcengine"
+    },
+    {
       "name": "seedance2.0",
       "available": true,
       "readOnly": false,
@@ -184,7 +198,39 @@ curl -s -b cookies.txt \
 
 说明：使用 `mock://seedance2.0` 可在本地完成可复现联调（提交 + 轮询成功），无需真实第三方网络。
 
-## 8. LLM 调用（OpenAI messages 格式）
+## 8. 更新 volcengine 图片供应商配置
+
+```bash
+curl -s -b cookies.txt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "baseUrl": "mock://volcengine",
+    "keys": ["your-volcengine-key-1"]
+  }' \
+  "$BASE_URL/admin/providers/volcengine"
+```
+
+响应示例（节选）：
+
+```json
+{
+  "ok": true,
+  "provider": {
+    "name": "volcengine",
+    "available": true,
+    "baseUrl": "mock://volcengine",
+    "modalities": ["image"],
+    "models": ["doubao-seedream-4-5-251128"],
+    "keys": [
+      { "id": "volcengine-key-1", "label": "your***ey-1" }
+    ]
+  }
+}
+```
+
+说明：使用 `mock://volcengine` 可在本地完成可复现联调，无需真实火山引擎网络。
+
+## 9. LLM 调用（OpenAI messages 格式）
 
 先使用第 4 步生成一个调用方 key，假设为：
 
@@ -228,7 +274,107 @@ curl -s \
 }
 ```
 
-## 9. 视频任务提交
+## 10. 火山引擎图片生成（2K）
+
+先使用第 4 步生成一个调用方 key，假设为：
+
+```bash
+CLIENT_KEY="agw_xxxxxxxxxxxxxxxxxxxxx"
+```
+
+调用：
+
+```bash
+curl -s \
+  -H "x-gateway-api-key: $CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -H "x-request-id: req_volc_image_2k" \
+  -d '{
+    "modality": "image",
+    "model": "doubao-seedream-4-5-251128",
+    "prompt": "生成一张白底电商商品主图",
+    "settings": {
+      "size": "2K",
+      "watermark": false
+    }
+  }' \
+  "$BASE_URL/v1/gateway"
+```
+
+响应示例：
+
+```json
+{
+  "requestId": "req_volc_image_2k",
+  "modality": "image",
+  "model": "doubao-seedream-4-5-251128",
+  "provider": "volcengine",
+  "output": [
+    {
+      "kind": "url",
+      "url": "https://mock.volcengine.local/generated-2k.png",
+      "width": 2048,
+      "height": 2048
+    }
+  ],
+  "metadata": {
+    "size": "2K",
+    "responseFormat": "url",
+    "trace": {
+      "requestId": "mock-request-id",
+      "keyId": "volcengine-key-1"
+    }
+  }
+}
+```
+
+## 11. 火山引擎图片生成（4K）
+
+```bash
+curl -s \
+  -H "x-gateway-api-key: $CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -H "x-request-id: req_volc_image_4k" \
+  -d '{
+    "modality": "image",
+    "model": "doubao-seedream-4-5-251128",
+    "prompt": "生成一张高质感 4K 商品海报",
+    "settings": {
+      "size": "4K",
+      "watermark": true
+    }
+  }' \
+  "$BASE_URL/v1/gateway"
+```
+
+响应示例：
+
+```json
+{
+  "requestId": "req_volc_image_4k",
+  "modality": "image",
+  "model": "doubao-seedream-4-5-251128",
+  "provider": "volcengine",
+  "output": [
+    {
+      "kind": "url",
+      "url": "https://mock.volcengine.local/generated-4k.png",
+      "width": 4096,
+      "height": 4096
+    }
+  ],
+  "metadata": {
+    "size": "4K",
+    "responseFormat": "url",
+    "trace": {
+      "requestId": "mock-request-id",
+      "keyId": "volcengine-key-1"
+    }
+  }
+}
+```
+
+## 12. 视频任务提交
 
 ```bash
 curl -s \
@@ -261,7 +407,7 @@ curl -s \
 }
 ```
 
-## 10. 视频任务轮询
+## 13. 视频任务轮询
 
 ```bash
 TASK_ID="上一步返回的task.id"
@@ -292,7 +438,7 @@ curl -s \
 }
 ```
 
-## 11. 参考图生视频（image-to-video）
+## 14. 参考图生视频（image-to-video）
 
 关键参数：
 - `modality`: `"video"`
@@ -363,7 +509,7 @@ curl -s \
 - `filePath` 必须是网关服务所在机器可访问的绝对路径
 - 提交后用“视频任务轮询”接口查询结果
 
-## 12. 常见错误示例
+## 15. 常见错误示例
 
 ### 12.1 未携带调用方 API key
 
@@ -391,7 +537,20 @@ curl -s \
 }
 ```
 
-### 12.3 模型未启用
+### 12.3 参数校验失败（火山引擎图片 size）
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "size 仅支持 2K 或 4K。"
+  }
+}
+```
+
+### 12.4 模型未启用
 
 ```json
 {
@@ -404,7 +563,7 @@ curl -s \
 }
 ```
 
-### 12.4 参数校验失败（参考图参数）
+### 12.5 参数校验失败（参考图参数）
 
 ```json
 {

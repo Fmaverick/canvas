@@ -1,0 +1,8 @@
+- [x] Admin 可新增并保存火山引擎 Ark 图片供应商配置，且管理状态可见 `available` 状态
+- [x] 模型目录返回 `doubao-seedream-4-5-251128`，且字段满足 `modality=image`、`capability=generate`、`async=false`
+- [x] 图片节点可选择火山引擎模型，并支持 `size` 参数的保存与回显
+- [x] 火山引擎模型的 `size` 仅支持 `2K` 与 `4K`，其他取值返回 `VALIDATION_ERROR`
+- [x] 统一图片网关请求可正确映射到火山引擎 `images/generations` 协议
+- [x] 图片生成成功后可将返回 URL 归一为平台输出，并写入图片资产元数据
+- [x] 供应商不可用、模型未启用、非法尺寸三类场景分别返回标准错误码
+- [x] 端到端联调可覆盖 `size=2K` 与 `size=4K` 两条成功路径并得到可复现结果
