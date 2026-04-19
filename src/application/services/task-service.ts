@@ -33,8 +33,8 @@ import {
   generateVideoWithCloubic,
   getVideoStatusWithCloubic,
 } from "@/infrastructure/ai/cloubic-client";
+import { generateVideoWithSeedance20, getVideoStatusWithSeedance20 } from "@/infrastructure/ai/seedance20-client";
 import { generateImageWithVolcengine } from "@/infrastructure/ai/volcengine-image-client";
-import { getVideoStatusThroughGateway, submitVideoThroughGateway } from "@/infrastructure/ai/gateway-video-client";
 import { ApiError } from "@/lib/api";
 import { notifyCanvasRuntimeChanged } from "@/lib/canvas-runtime-events";
 import { deriveProviderCircuitState, evaluateSchedulerCapacity } from "@/lib/combination-runtime";
@@ -43,7 +43,6 @@ import { logRuntimeEvent, recordRuntimeMetric } from "@/lib/runtime-observabilit
 
 const runNodeMergeStrategySchema = z.enum(["previous_only", "merge_all", "custom"]);
 const runnableNodeTypes = new Set(["text", "image", "video", "storyboard"]);
-const VOLCENGINE_IMAGE_MODEL = "doubao-seedream-4-5-251128";
 
 function isRunnableNodeType(nodeType: string) {
   return runnableNodeTypes.has(nodeType);
@@ -234,7 +233,7 @@ function resolveVideoProvider(model: string | null | undefined) {
   const normalizedModel = toNonEmptyString(model)?.toLowerCase();
 
   if (normalizedModel === "seedance-2.0") {
-    return "gateway" as const;
+    return "volcengine" as const;
   }
 
   return "cloubic" as const;
@@ -3687,8 +3686,8 @@ async function executeTask(taskId: string) {
       });
 
       const output =
-        provider === "gateway"
-          ? await submitVideoThroughGateway({
+        provider === "volcengine"
+          ? await generateVideoWithSeedance20({
               prompt,
               model: taskModel ?? "seedance-2.0",
               settings,
@@ -4318,8 +4317,8 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
   }
 
   const providerStatus =
-    resolveVideoProvider(task.model) === "gateway"
-      ? await getVideoStatusThroughGateway(task.providerTaskId)
+    resolveVideoProvider(task.model) === "volcengine"
+      ? await getVideoStatusWithSeedance20(task.providerTaskId)
       : await getVideoStatusWithCloubic(task.providerTaskId);
   const pollCount = (task.pollCount ?? 0) + 1;
   const providerTrace = extractVideoTraceMeta(providerStatus.rawResponse);
@@ -4368,6 +4367,10 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           providerTaskId: providerStatus.providerTaskId,
           progress: providerStatus.progress,
           output: normalizedOutput,
+          ...((providerStatus as { metadata?: unknown }).metadata &&
+          typeof (providerStatus as { metadata?: unknown }).metadata === "object"
+            ? { providerMeta: (providerStatus as { metadata: Record<string, unknown> }).metadata }
+            : {}),
           ...(providerTrace ? { trace: providerTrace } : {}),
         },
       });
@@ -4382,6 +4385,10 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
             videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
             progress: providerStatus.progress,
             output: normalizedOutput,
+            ...((providerStatus as { metadata?: unknown }).metadata &&
+            typeof (providerStatus as { metadata?: unknown }).metadata === "object"
+              ? { providerMeta: (providerStatus as { metadata: Record<string, unknown> }).metadata }
+              : {}),
             tracking: {
               providerTaskId: providerStatus.providerTaskId,
               pollCount,
@@ -4450,6 +4457,10 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
         videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
         progress: providerStatus.progress,
         output: normalizedOutput,
+        ...((providerStatus as { metadata?: unknown }).metadata &&
+        typeof (providerStatus as { metadata?: unknown }).metadata === "object"
+          ? { providerMeta: (providerStatus as { metadata: Record<string, unknown> }).metadata }
+          : {}),
         tracking: {
           providerTaskId: providerStatus.providerTaskId,
           pollCount,
@@ -4466,6 +4477,10 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
         videoUrl: primaryOutput?.url ?? providerStatus.videoUrl,
         progress: providerStatus.progress,
         output: normalizedOutput,
+        ...((providerStatus as { metadata?: unknown }).metadata &&
+        typeof (providerStatus as { metadata?: unknown }).metadata === "object"
+          ? { providerMeta: (providerStatus as { metadata: Record<string, unknown> }).metadata }
+          : {}),
         tracking: {
           providerTaskId: providerStatus.providerTaskId,
           pollCount,
@@ -4496,6 +4511,10 @@ export async function pollTask(input: z.infer<typeof pollTaskInputSchema>) {
           poll: providerStatus.rawResponse,
           progress: providerStatus.progress,
           output: normalizedOutput,
+          ...((providerStatus as { metadata?: unknown }).metadata &&
+          typeof (providerStatus as { metadata?: unknown }).metadata === "object"
+            ? { providerMeta: (providerStatus as { metadata: Record<string, unknown> }).metadata }
+            : {}),
           tracking: {
             providerTaskId: providerStatus.providerTaskId,
             pollCount,

@@ -31,6 +31,37 @@ const gatewayPayloadSchema = z.object({
       }),
     )
     .optional(),
+  content: z
+    .array(
+      z.union([
+        z.object({
+          type: z.literal("text"),
+          text: z.string().min(1),
+        }),
+        z.object({
+          type: z.literal("image_url"),
+          image_url: z.object({
+            url: z.string().min(1),
+          }),
+          role: z.string().optional(),
+        }),
+        z.object({
+          type: z.literal("video_url"),
+          video_url: z.object({
+            url: z.string().min(1),
+          }),
+          role: z.string().optional(),
+        }),
+        z.object({
+          type: z.literal("audio_url"),
+          audio_url: z.object({
+            url: z.string().min(1),
+          }),
+          role: z.string().optional(),
+        }),
+      ]),
+    )
+    .optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -89,11 +120,11 @@ export async function POST(request: Request) {
       return Response.json(handleLlmRequest(payload));
     }
 
-    if (!payload.prompt || payload.prompt.trim().length === 0) {
-      throw new ApiError(400, "VALIDATION_ERROR", "prompt is required for image or video modality.");
-    }
-
     if (payload.modality === "image") {
+      if (!payload.prompt || payload.prompt.trim().length === 0) {
+        throw new ApiError(400, "VALIDATION_ERROR", "prompt is required for image modality.");
+      }
+
       const provider = "volcengine";
       assertModelEnabled({
         modelId: payload.model,
@@ -125,7 +156,14 @@ export async function POST(request: Request) {
       });
     }
 
-    const provider = "seedance2.0";
+    const hasTextContent =
+      Array.isArray(payload.content) && payload.content.some((item) => item.type === "text" && item.text.trim().length > 0);
+
+    if ((!payload.prompt || payload.prompt.trim().length === 0) && !hasTextContent) {
+      throw new ApiError(400, "VALIDATION_ERROR", "prompt or content(text) is required for video modality.");
+    }
+
+    const provider = "volcengine";
     assertModelEnabled({
       modelId: payload.model,
       provider,
@@ -135,18 +173,16 @@ export async function POST(request: Request) {
     const submitResult = await generateVideoWithSeedance20({
       prompt: payload.prompt,
       model: payload.model,
-      settings: {
-        ...(payload.settings ?? {}),
-        ...(payload.operation ? { operation: payload.operation } : {}),
-      },
+      settings: payload.settings,
       assets: payload.assets,
+      content: payload.content,
     });
     const task = createGatewayVideoTask({
       model: submitResult.model,
       provider: submitResult.provider,
       providerTaskId: submitResult.providerTaskId,
       status: normalizeGatewayVideoTaskStatus(submitResult.status),
-      providerTask: submitResult.trace ?? {},
+      providerTask: {},
     });
 
     return Response.json(

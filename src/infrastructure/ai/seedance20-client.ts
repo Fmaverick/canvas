@@ -1,5 +1,5 @@
 import { ApiError } from "@/lib/api";
-import { assertProviderAvailable } from "@/lib/gateway-provider-registry";
+import { getProviderRuntimeConfig } from "@/lib/gateway-provider-registry";
 
 type StandardVideoAsset = {
   kind: "image";
@@ -9,70 +9,80 @@ type StandardVideoAsset = {
   label?: string;
 };
 
+type VolcengineContentItem =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image_url";
+      image_url: {
+        url: string;
+      };
+      role?: string;
+    }
+  | {
+      type: "video_url";
+      video_url: {
+        url: string;
+      };
+      role?: string;
+    }
+  | {
+      type: "audio_url";
+      audio_url: {
+        url: string;
+      };
+      role?: string;
+    };
+
 type GenerateVideoInput = {
-  prompt: string;
+  prompt?: string;
   model?: string;
   settings?: Record<string, unknown>;
   assets?: StandardVideoAsset[];
-};
-
-type GenerateVideoOutput = {
-  provider: "seedance2.0";
-  model: string;
-  providerTaskId: string;
-  status: "pending" | "processing" | "completed" | "failed";
-  trace?: {
-    jobId?: string;
-    traceId?: string;
-    keyId?: string;
-  };
-  rawResponse: unknown;
+  content?: VolcengineContentItem[];
 };
 
 type VideoOutputItem = {
   kind: "url";
   url: string;
-  mimeType?: string;
-  width?: number;
-  height?: number;
-  durationMs?: number;
+};
+
+type GenerateVideoOutput = {
+  provider: "volcengine";
+  model: string;
+  providerTaskId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  rawResponse: unknown;
 };
 
 type VideoStatusOutput = {
-  provider: "seedance2.0";
+  provider: "volcengine";
   providerTaskId: string;
   status: "pending" | "processing" | "completed" | "failed";
   output: VideoOutputItem[];
   videoUrl?: string;
   progress?: number;
-  trace?: {
-    jobId?: string;
-    traceId?: string;
-    keyId?: string;
-  };
+  metadata: Record<string, unknown>;
   rawResponse: unknown;
 };
 
 type CancelVideoOutput = {
-  provider: "seedance2.0";
+  provider: "volcengine";
   providerTaskId: string;
   status: "canceled" | "processing";
   rawResponse: unknown;
 };
 
-type NormalizedReferenceAsset = {
-  url: string;
-  label?: string;
-  role: "reference" | "first_frame" | "last_frame";
-};
+const VOLCENGINE_PROVIDER = "volcengine";
+const SUPPORTED_MODEL_KEYS = new Set(["seedance-2.0"]);
+const MOCK_PROVIDER_BASE_URL_PREFIX = "mock://volcengine";
+const MOCK_VOLCENGINE_GLOBAL_KEY = "__volcengine_seedance20_mock_provider__";
+const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const DEFAULT_MODEL_ID = "doubao-seedance-2-0-260128";
 
-const SEEDANCE_PROVIDER = "seedance2.0";
-const SUPPORTED_MODELS = new Set(["seedance-2.0"]);
-const MAX_REFERENCE_IMAGES = 10;
-const MOCK_PROVIDER_BASE_URL_PREFIX = "mock://seedance";
-const MOCK_SEEDANCE_GLOBAL_KEY = "__seedance20_mock_provider__";
-
-type MockSeedanceTask = {
+type MockVolcengineTask = {
   id: string;
   pollCount: number;
 };
@@ -85,15 +95,35 @@ function toNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function toBoolean(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (normalized === "true" || normalized === "1") {
+      return true;
+    }
+
+    if (normalized === "false" || normalized === "0") {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
 function toRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function isValidReferenceUrl(value: string) {
-  return /^https?:\/\//i.test(value) || /^data:image\//i.test(value);
+function isValidUrl(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:/i.test(value);
 }
 
-function mapSeedanceStatus(value: unknown): "pending" | "processing" | "completed" | "failed" {
+function mapVolcengineTaskStatus(value: unknown): "pending" | "processing" | "completed" | "failed" {
   const status = toString(value)?.toLowerCase() ?? "pending";
 
   if (status === "succeeded" || status === "completed" || status === "done") {
@@ -111,76 +141,6 @@ function mapSeedanceStatus(value: unknown): "pending" | "processing" | "complete
   return "pending";
 }
 
-function pickTraceMeta(raw: unknown) {
-  const record = toRecord(raw);
-  const dataRecord = toRecord(record?.data);
-  const traceId = toString(record?.traceId) ?? toString(record?.trace_id) ?? toString(dataRecord?.traceId);
-  const jobId = toString(record?.jobId) ?? toString(record?.job_id) ?? toString(dataRecord?.jobId);
-  const keyId = toString(record?.keyId) ?? toString(record?.key_id) ?? toString(dataRecord?.keyId);
-
-  return {
-    ...(jobId ? { jobId } : {}),
-    ...(traceId ? { traceId } : {}),
-    ...(keyId ? { keyId } : {}),
-  };
-}
-
-function normalizeVideoOutputItems(raw: unknown): VideoOutputItem[] {
-  const responseRecord = toRecord(raw);
-  const dataRecord = toRecord(responseRecord?.data);
-  const rawOutputList = Array.isArray(dataRecord?.output)
-    ? dataRecord.output
-    : Array.isArray(responseRecord?.output)
-      ? responseRecord.output
-      : [];
-  const normalized: VideoOutputItem[] = [];
-  const seen = new Set<string>();
-
-  for (const item of rawOutputList) {
-    const outputRecord = toRecord(item);
-
-    if (!outputRecord) {
-      continue;
-    }
-
-    const rawKind = toString(outputRecord.kind)?.toLowerCase();
-    const candidateUrl =
-      toString(outputRecord.url) ??
-      toString(outputRecord.videoUrl) ??
-      toString(outputRecord.video_url) ??
-      toString(outputRecord.fileUrl) ??
-      toString(outputRecord.file_url);
-
-    if (!candidateUrl) {
-      continue;
-    }
-
-    if (rawKind && rawKind !== "video" && rawKind !== "url") {
-      continue;
-    }
-
-    if (seen.has(candidateUrl)) {
-      continue;
-    }
-
-    seen.add(candidateUrl);
-    normalized.push({
-      kind: "url",
-      url: candidateUrl,
-      ...(toString(outputRecord.mimeType) ?? toString(outputRecord.mime_type)
-        ? { mimeType: toString(outputRecord.mimeType) ?? toString(outputRecord.mime_type) }
-        : {}),
-      ...(toNumber(outputRecord.width) !== undefined ? { width: toNumber(outputRecord.width) } : {}),
-      ...(toNumber(outputRecord.height) !== undefined ? { height: toNumber(outputRecord.height) } : {}),
-      ...(toNumber(outputRecord.durationMs) ?? toNumber(outputRecord.duration_ms)
-        ? { durationMs: toNumber(outputRecord.durationMs) ?? toNumber(outputRecord.duration_ms) }
-        : {}),
-    });
-  }
-
-  return normalized;
-}
-
 function mapProviderError(status: number, body: unknown, fallbackMessage: string): ApiError {
   const payload = toRecord(body);
   const providerError = toRecord(payload?.error);
@@ -193,6 +153,7 @@ function mapProviderError(status: number, body: unknown, fallbackMessage: string
   const message =
     toString(providerError?.message) ??
     toString(payload?.message) ??
+    toString(payload?.error_msg) ??
     fallbackMessage;
   const normalizedCode = providerCode.toUpperCase();
 
@@ -200,7 +161,14 @@ function mapProviderError(status: number, body: unknown, fallbackMessage: string
     return new ApiError(409, "MODEL_NOT_ENABLED", message);
   }
 
-  if (status === 400 || status === 422 || normalizedCode.includes("INVALID") || normalizedCode.includes("VALIDATION")) {
+  if (
+    status === 400 ||
+    status === 422 ||
+    normalizedCode.includes("INVALID") ||
+    normalizedCode.includes("VALIDATION") ||
+    normalizedCode.includes("BAD_REQUEST") ||
+    normalizedCode.includes("PARAM")
+  ) {
     return new ApiError(400, "VALIDATION_ERROR", message);
   }
 
@@ -211,172 +179,234 @@ function mapProviderError(status: number, body: unknown, fallbackMessage: string
   return new ApiError(502, "TASK_EXECUTION_FAILED", message);
 }
 
-function normalizeReferenceAssets(input: GenerateVideoInput) {
+function resolveVolcengineVideoModelId(inputModel?: string) {
+  const modelKey = toString(inputModel) ?? "seedance-2.0";
+
+  if (!SUPPORTED_MODEL_KEYS.has(modelKey)) {
+    throw new ApiError(409, "MODEL_NOT_ENABLED", `Model ${modelKey} is not enabled for volcengine.`);
+  }
+
+  return toString(process.env.VOLCENGINE_ARK_VIDEO_MODEL) ?? DEFAULT_MODEL_ID;
+}
+
+function resolveVolcengineArkRuntimeConfig() {
+  const runtimeConfig = getProviderRuntimeConfig(VOLCENGINE_PROVIDER);
+  const keyFromRuntime = runtimeConfig?.keys[0]?.value;
+  const baseUrlFromRuntime = toString(runtimeConfig?.baseUrl);
+
+  const keyFromEnv =
+    toString(process.env.VOLCENGINE_ARK_VIDEO_API_KEY) ??
+    toString(process.env.VOLCENGINE_ARK_API_KEY);
+  const baseUrlFromEnv = toString(process.env.VOLCENGINE_ARK_BASE_URL) ?? DEFAULT_BASE_URL;
+
+  const key = keyFromEnv ?? keyFromRuntime;
+  const baseUrl = baseUrlFromRuntime ?? baseUrlFromEnv;
+
+  return { key, baseUrl };
+}
+
+function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
   const settings = input.settings ?? {};
   const seen = new Set<string>();
-  const normalized: NormalizedReferenceAsset[] = [];
+  const normalized: VolcengineContentItem[] = [];
 
-  const pushAsset = (asset: {
-    url?: string;
-    label?: string;
-    role?: "reference" | "first_frame" | "last_frame";
-  }) => {
-    const rawUrl = toString(asset.url);
-
-    if (!rawUrl) {
-      return;
-    }
-
-    if (!isValidReferenceUrl(rawUrl)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image url: ${rawUrl}`);
-    }
-
-    const key = `${asset.role ?? "reference"}::${rawUrl}`;
+  const pushItem = (item: VolcengineContentItem) => {
+    const key = JSON.stringify(item);
 
     if (seen.has(key)) {
       return;
     }
 
     seen.add(key);
-    normalized.push({
-      url: rawUrl,
-      role: asset.role ?? "reference",
-      ...(asset.label ? { label: asset.label } : {}),
-    });
+    normalized.push(item);
   };
 
+  if (Array.isArray(input.content)) {
+    for (const item of input.content) {
+      const record = toRecord(item);
+      const type = toString(record?.type);
+
+      if (type === "text") {
+        const text = toString(record?.text);
+        if (!text) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.text is required for type=text.");
+        }
+        pushItem({ type: "text", text });
+        continue;
+      }
+
+      if (type === "image_url") {
+        const imageUrl = toRecord(record?.image_url);
+        const url = toString(imageUrl?.url);
+        if (!url || !isValidUrl(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.image_url.url must be a valid url.");
+        }
+        pushItem({ type: "image_url", image_url: { url }, role: toString(record?.role) ?? "reference_image" });
+        continue;
+      }
+
+      if (type === "video_url") {
+        const videoUrl = toRecord(record?.video_url);
+        const url = toString(videoUrl?.url);
+        if (!url || !isValidUrl(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.video_url.url must be a valid url.");
+        }
+        pushItem({ type: "video_url", video_url: { url }, role: toString(record?.role) ?? "reference_video" });
+        continue;
+      }
+
+      if (type === "audio_url") {
+        const audioUrl = toRecord(record?.audio_url);
+        const url = toString(audioUrl?.url);
+        if (!url || !isValidUrl(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.audio_url.url must be a valid url.");
+        }
+        pushItem({ type: "audio_url", audio_url: { url }, role: toString(record?.role) ?? "reference_audio" });
+        continue;
+      }
+
+      throw new ApiError(400, "VALIDATION_ERROR", `Unsupported content type: ${type ?? "unknown"}`);
+    }
+  }
+
+  const promptText = toString(input.prompt);
+  if (promptText) {
+    pushItem({ type: "text", text: promptText });
+  }
+
+  const referenceImageUrls: Array<{ url: string; role?: string }> = [];
+
   for (const asset of input.assets ?? []) {
-    if (asset.kind !== "image") {
+    const url = toString(asset.url) ?? toString(asset.filePath);
+    if (!url) {
       continue;
     }
-
-    pushAsset({
-      url: toString(asset.url) ?? toString(asset.filePath),
-      label: toString(asset.label),
-      role: asset.role ?? "reference",
-    });
+    if (!isValidUrl(url)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image url: ${url}`);
+    }
+    referenceImageUrls.push({ url, role: "reference_image" });
   }
 
-  const firstFrameImageUrl = toString(settings.firstFrameImageUrl) ?? toString(settings.imageUrl);
-  const lastFrameImageUrl = toString(settings.lastFrameImageUrl);
-
-  if (firstFrameImageUrl) {
-    pushAsset({
-      url: firstFrameImageUrl,
-      role: "first_frame",
-    });
+  const firstFrameUrl = toString(settings.firstFrameImageUrl) ?? toString(settings.imageUrl);
+  const lastFrameUrl = toString(settings.lastFrameImageUrl);
+  if (firstFrameUrl) {
+    if (!isValidUrl(firstFrameUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid first frame url: ${firstFrameUrl}`);
+    }
+    referenceImageUrls.push({ url: firstFrameUrl, role: "reference_image" });
   }
-
-  if (lastFrameImageUrl) {
-    pushAsset({
-      url: lastFrameImageUrl,
-      role: "last_frame",
-    });
+  if (lastFrameUrl) {
+    if (!isValidUrl(lastFrameUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid last frame url: ${lastFrameUrl}`);
+    }
+    referenceImageUrls.push({ url: lastFrameUrl, role: "reference_image" });
   }
 
   if (Array.isArray(settings.referenceImages)) {
     for (const imageUrl of settings.referenceImages) {
-      pushAsset({
-        url: toString(imageUrl),
-        role: "reference",
-      });
+      const url = toString(imageUrl);
+      if (!url) {
+        continue;
+      }
+      if (!isValidUrl(url)) {
+        throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image url: ${url}`);
+      }
+      referenceImageUrls.push({ url, role: "reference_image" });
     }
   }
 
-  if (Array.isArray(settings.referenceImageEntries)) {
-    for (const entry of settings.referenceImageEntries) {
-      const record = toRecord(entry);
-      pushAsset({
-        url: toString(record?.url) ?? toString(record?.imageUrl) ?? toString(record?.image_url),
-        label: toString(record?.label),
-        role: "reference",
-      });
-    }
+  for (const entry of referenceImageUrls) {
+    pushItem({ type: "image_url", image_url: { url: entry.url }, role: entry.role ?? "reference_image" });
   }
 
-  if (normalized.length > MAX_REFERENCE_IMAGES) {
-    throw new ApiError(
-      400,
-      "VALIDATION_ERROR",
-      `Reference image count exceeds ${MAX_REFERENCE_IMAGES}.`,
-    );
+  const referenceVideoUrl =
+    toString(settings.referenceVideoUrl) ?? toString(settings.reference_video_url) ?? toString(settings.videoUrl);
+  if (referenceVideoUrl) {
+    if (!isValidUrl(referenceVideoUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference video url: ${referenceVideoUrl}`);
+    }
+    pushItem({ type: "video_url", video_url: { url: referenceVideoUrl }, role: "reference_video" });
+  }
+
+  const referenceAudioUrl =
+    toString(settings.referenceAudioUrl) ?? toString(settings.reference_audio_url) ?? toString(settings.audioUrl);
+  if (referenceAudioUrl) {
+    if (!isValidUrl(referenceAudioUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference audio url: ${referenceAudioUrl}`);
+    }
+    pushItem({ type: "audio_url", audio_url: { url: referenceAudioUrl }, role: "reference_audio" });
+  }
+
+  if (!normalized.some((item) => item.type === "text")) {
+    throw new ApiError(400, "VALIDATION_ERROR", "Video request requires at least one text content item.");
   }
 
   return normalized;
 }
 
-function resolveOperation(settings: Record<string, unknown>, referenceAssets: NormalizedReferenceAsset[]) {
-  const explicitOperation = toString(settings.operation)?.toLowerCase();
-  const hasReferenceImage = referenceAssets.some((asset) => asset.role === "reference");
+function buildRequestBody(input: GenerateVideoInput) {
+  const settings = input.settings ?? {};
+  const modelId = resolveVolcengineVideoModelId(input.model);
+  const content = normalizeContent(input);
+  const generateAudio = toBoolean(settings.generate_audio ?? settings.generateAudio);
+  const ratio = toString(settings.ratio);
+  const duration = toNumber(settings.duration);
+  const watermark = toBoolean(settings.watermark);
 
-  if (explicitOperation === "image-to-video" || explicitOperation === "image_to_video") {
-    if (!hasReferenceImage) {
-      throw new ApiError(400, "VALIDATION_ERROR", "operation=image-to-video requires at least one reference image.");
-    }
+  const body: Record<string, unknown> = {
+    model: modelId,
+    content,
+  };
 
-    return "image-to-video";
+  if (generateAudio !== undefined) {
+    body.generate_audio = generateAudio;
+  }
+  if (ratio) {
+    body.ratio = ratio;
+  }
+  if (duration !== undefined) {
+    body.duration = duration;
+  }
+  if (watermark !== undefined) {
+    body.watermark = watermark;
   }
 
-  return hasReferenceImage ? "image-to-video" : "generate";
-}
-
-function buildRequestBody(input: GenerateVideoInput, model: string) {
-  const settings = input.settings ?? {};
-  const referenceAssets = normalizeReferenceAssets(input);
-  const operation = resolveOperation(settings, referenceAssets);
-  const durationSec = toNumber(settings.durationSec) ?? toNumber(settings.duration);
-  const resolution = toString(settings.resolution) ?? toString(settings.size);
-
   return {
-    operation,
-    body: {
-      model,
-      prompt: input.prompt,
-      ...(typeof durationSec === "number" ? { durationSec } : {}),
-      ...(resolution ? { resolution } : {}),
-      assets: referenceAssets.map((asset) => ({
-        kind: "image",
-        url: asset.url,
-        role: asset.role,
-        ...(asset.label ? { label: asset.label } : {}),
-      })),
-      settings: {
-        ...(settings ?? {}),
-        referenceImageCount: referenceAssets.length,
-      },
-    },
+    modelId,
+    body,
   };
 }
 
 export const __seedance20TestUtils = {
-  normalizeReferenceAssets,
-  resolveOperation,
   buildRequestBody,
-  normalizeVideoOutputItems,
-  pickTraceMeta,
+  mapProviderError,
+  mapVolcengineTaskStatus,
+  normalizeContent,
+  resolveVolcengineArkRuntimeConfig,
+  resolveVolcengineVideoModelId,
 };
 
-function getMockSeedanceTaskState() {
+function getMockVolcengineTaskState() {
   const globalRef = globalThis as typeof globalThis & {
-    [MOCK_SEEDANCE_GLOBAL_KEY]?: Map<string, MockSeedanceTask>;
+    [MOCK_VOLCENGINE_GLOBAL_KEY]?: Map<string, MockVolcengineTask>;
   };
 
-  if (!globalRef[MOCK_SEEDANCE_GLOBAL_KEY]) {
-    globalRef[MOCK_SEEDANCE_GLOBAL_KEY] = new Map<string, MockSeedanceTask>();
+  if (!globalRef[MOCK_VOLCENGINE_GLOBAL_KEY]) {
+    globalRef[MOCK_VOLCENGINE_GLOBAL_KEY] = new Map<string, MockVolcengineTask>();
   }
 
-  return globalRef[MOCK_SEEDANCE_GLOBAL_KEY]!;
+  return globalRef[MOCK_VOLCENGINE_GLOBAL_KEY]!;
 }
 
-function isMockSeedanceBaseUrl(baseUrl: string) {
+function isMockVolcengineBaseUrl(baseUrl: string) {
   return baseUrl.toLowerCase().startsWith(MOCK_PROVIDER_BASE_URL_PREFIX);
 }
 
-function requestMockSeedance(path: string, method: string) {
-  const tasks = getMockSeedanceTaskState();
+function requestMockVolcengine(path: string, method: string) {
+  const tasks = getMockVolcengineTaskState();
 
-  if (path === "/video/generations" && method === "POST") {
-    const id = `mock-provider-task-${crypto.randomUUID()}`;
+  if (path === "/contents/generations/tasks" && method === "POST") {
+    const id = `cgt-mock-${crypto.randomUUID()}`;
     tasks.set(id, {
       id,
       pollCount: 0,
@@ -384,17 +414,11 @@ function requestMockSeedance(path: string, method: string) {
 
     return {
       id,
-      status: "pending",
-      data: {
-        id,
-        traceId: `trace-${id}`,
-        keyId: "seedance2-key-1",
-      },
     };
   }
 
-  if (path.startsWith("/video/generations/") && method === "GET") {
-    const providerTaskId = path.replace("/video/generations/", "");
+  if (path.startsWith("/contents/generations/tasks/") && method === "GET") {
+    const providerTaskId = path.replace("/contents/generations/tasks/", "");
     const task = tasks.get(providerTaskId);
 
     if (!task) {
@@ -411,38 +435,31 @@ function requestMockSeedance(path: string, method: string) {
       return {
         id: providerTaskId,
         status: "processing",
-        data: {
-          progress: 60,
-          traceId: `trace-${providerTaskId}`,
-          keyId: "seedance2-key-1",
-        },
+        updated_at: Math.floor(Date.now() / 1000),
       };
     }
 
     return {
       id: providerTaskId,
-      status: "completed",
-      data: {
-        progress: 100,
-        traceId: `trace-${providerTaskId}`,
-        keyId: "seedance2-key-1",
-        output: [
-          {
-            kind: "video",
-            url: `https://mock.seedance.local/${providerTaskId}.mp4`,
-            mime_type: "video/mp4",
-            width: 1280,
-            height: 720,
-            duration_ms: 5000,
-          },
-        ],
+      model: DEFAULT_MODEL_ID,
+      status: "succeeded",
+      content: {
+        video_url: `https://mock.volcengine.local/${providerTaskId}.mp4`,
       },
-    };
-  }
-
-  if (path.endsWith("/cancel") && method === "POST") {
-    return {
-      status: "canceled",
+      usage: {
+        total_tokens: 100,
+      },
+      created_at: Math.floor(Date.now() / 1000) - 5,
+      updated_at: Math.floor(Date.now() / 1000),
+      seed: 42,
+      resolution: "720p",
+      ratio: "16:9",
+      duration: 5,
+      framespersecond: 24,
+      service_tier: "default",
+      execution_expires_after: 172800,
+      generate_audio: true,
+      draft: false,
     };
   }
 
@@ -451,15 +468,15 @@ function requestMockSeedance(path: string, method: string) {
   };
 }
 
-async function requestSeedance(
+async function requestVolcengine(
   path: string,
   init: RequestInit & {
     key: string;
     baseUrl: string;
   },
 ) {
-  if (isMockSeedanceBaseUrl(init.baseUrl)) {
-    return requestMockSeedance(path, (init.method ?? "GET").toUpperCase());
+  if (isMockVolcengineBaseUrl(init.baseUrl)) {
+    return requestMockVolcengine(path, (init.method ?? "GET").toUpperCase());
   }
 
   let response: Response;
@@ -477,7 +494,7 @@ async function requestSeedance(
     throw new ApiError(
       503,
       "PROVIDER_UNAVAILABLE",
-      error instanceof Error ? error.message : "Seedance provider request failed.",
+      error instanceof Error ? error.message : "Volcengine provider request failed.",
     );
   }
 
@@ -490,125 +507,104 @@ async function requestSeedance(
   }
 
   if (!response.ok) {
-    throw mapProviderError(response.status, payload, `Seedance request failed with status ${response.status}.`);
+    throw mapProviderError(response.status, payload, `Volcengine request failed with status ${response.status}.`);
   }
 
   return payload;
 }
 
-function resolveSeedanceModel(inputModel?: string) {
-  const model = toString(inputModel) ?? "seedance-2.0";
-
-  if (!SUPPORTED_MODELS.has(model)) {
-    throw new ApiError(409, "MODEL_NOT_ENABLED", `Model ${model} is not enabled for seedance2.0.`);
-  }
-
-  return model;
-}
-
 export async function generateVideoWithSeedance20(input: GenerateVideoInput): Promise<GenerateVideoOutput> {
-  const provider = assertProviderAvailable(SEEDANCE_PROVIDER);
-  const key = provider.keys[0]?.value;
-  const baseUrl = provider.baseUrl;
+  const { key, baseUrl } = resolveVolcengineArkRuntimeConfig();
 
   if (!key || !baseUrl) {
-    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing seedance2.0 provider key.");
+    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing volcengine video provider key.");
   }
 
-  const model = resolveSeedanceModel(input.model);
-  const requestBody = buildRequestBody(input, model);
-  const rawResponse = await requestSeedance("/video/generations", {
+  const requestBody = buildRequestBody(input);
+  const rawResponse = await requestVolcengine("/contents/generations/tasks", {
     method: "POST",
     key,
     baseUrl,
     body: JSON.stringify(requestBody.body),
   });
   const responseRecord = toRecord(rawResponse);
-  const data = toRecord(responseRecord?.data);
-  const providerTaskId = toString(responseRecord?.id) ?? toString(data?.id) ?? toString(data?.taskId) ?? toString(data?.task_id);
-  const trace = pickTraceMeta(rawResponse);
+  const providerTaskId = toString(responseRecord?.id);
 
   if (!providerTaskId) {
-    throw new ApiError(502, "TASK_EXECUTION_FAILED", "Seedance response missing task id.");
+    throw new ApiError(502, "TASK_EXECUTION_FAILED", "Volcengine response missing task id.");
   }
 
   return {
-    provider: "seedance2.0",
-    model,
+    provider: "volcengine",
+    model: toString(input.model) ?? "seedance-2.0",
     providerTaskId,
-    status: mapSeedanceStatus(responseRecord?.status ?? data?.status),
-    ...(Object.keys(trace).length > 0 ? { trace } : {}),
-    rawResponse: {
-      ...(responseRecord ?? {}),
-      trace,
-    },
+    status: "pending",
+    rawResponse,
   };
 }
 
 export async function getVideoStatusWithSeedance20(providerTaskId: string): Promise<VideoStatusOutput> {
-  const provider = assertProviderAvailable(SEEDANCE_PROVIDER);
-  const key = provider.keys[0]?.value;
-  const baseUrl = provider.baseUrl;
+  const { key, baseUrl } = resolveVolcengineArkRuntimeConfig();
 
   if (!key || !baseUrl) {
-    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing seedance2.0 provider key.");
+    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing volcengine video provider key.");
   }
 
-  const rawResponse = await requestSeedance(`/video/generations/${providerTaskId}`, {
+  const rawResponse = await requestVolcengine(`/contents/generations/tasks/${providerTaskId}`, {
     method: "GET",
     key,
     baseUrl,
   });
   const responseRecord = toRecord(rawResponse);
-  const data = toRecord(responseRecord?.data);
-  const output = normalizeVideoOutputItems(rawResponse);
-  const trace = pickTraceMeta(rawResponse);
+  const contentRecord = toRecord(responseRecord?.content);
+  const videoUrl = toString(contentRecord?.video_url);
+  const output = videoUrl ? [{ kind: "url" as const, url: videoUrl }] : [];
+  const metadata: Record<string, unknown> = {};
+
+  const usage = toRecord(responseRecord?.usage);
+  if (usage) {
+    metadata.usage = usage;
+  }
+
+  const model = toString(responseRecord?.model);
+  if (model) {
+    metadata.modelId = model;
+  }
+
+  for (const keyName of [
+    "created_at",
+    "updated_at",
+    "seed",
+    "resolution",
+    "ratio",
+    "duration",
+    "framespersecond",
+    "service_tier",
+    "execution_expires_after",
+    "generate_audio",
+    "draft",
+  ]) {
+    if (responseRecord && keyName in responseRecord) {
+      metadata[keyName] = responseRecord[keyName];
+    }
+  }
 
   return {
-    provider: "seedance2.0",
+    provider: "volcengine",
     providerTaskId,
-    status: mapSeedanceStatus(responseRecord?.status ?? data?.status),
+    status: mapVolcengineTaskStatus(responseRecord?.status),
     output,
-    videoUrl:
-      output[0]?.url ??
-      toString(data?.videoUrl) ??
-      toString(data?.video_url) ??
-      toString(responseRecord?.videoUrl) ??
-      toString(responseRecord?.video_url),
-    progress: toNumber(data?.progress) ?? toNumber(responseRecord?.progress),
-    ...(Object.keys(trace).length > 0 ? { trace } : {}),
-    rawResponse: {
-      ...(responseRecord ?? {}),
-      trace,
-    },
+    ...(videoUrl ? { videoUrl } : {}),
+    metadata,
+    rawResponse,
   };
 }
 
 export async function cancelVideoWithSeedance20(providerTaskId: string): Promise<CancelVideoOutput> {
-  const provider = assertProviderAvailable(SEEDANCE_PROVIDER);
-  const key = provider.keys[0]?.value;
-  const baseUrl = provider.baseUrl;
-
-  if (!key || !baseUrl) {
-    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing seedance2.0 provider key.");
-  }
-
-  const rawResponse = await requestSeedance(`/video/generations/${providerTaskId}/cancel`, {
-    method: "POST",
-    key,
-    baseUrl,
-  });
-  const responseRecord = toRecord(rawResponse);
-  const data = toRecord(responseRecord?.data);
-  const status = toString(responseRecord?.status) ?? toString(data?.status);
-
   return {
-    provider: "seedance2.0",
+    provider: "volcengine",
     providerTaskId,
-    status: status === "canceled" ? "canceled" : "processing",
-    rawResponse: {
-      ...(responseRecord ?? {}),
-      trace: pickTraceMeta(rawResponse),
-    },
+    status: "processing",
+    rawResponse: null,
   };
 }

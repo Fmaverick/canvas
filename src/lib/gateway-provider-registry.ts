@@ -71,7 +71,7 @@ const MODEL_CATALOG: GatewayModelView[] = [
     modality: "video",
     capability: "generate",
     async: true,
-    providers: ["seedance2.0"],
+    providers: ["volcengine"],
   },
   {
     id: "doubao-seedream-4-5-251128",
@@ -84,8 +84,8 @@ const MODEL_CATALOG: GatewayModelView[] = [
 
 const DEFAULT_PROVIDER_RECORDS: ProviderRecord[] = [
   {
-    name: "seedance2.0",
-    displayName: "Seedance 2.0",
+    name: "volcengine",
+    displayName: "Volcengine Ark",
     baseUrl: null,
     keys: [],
     available: false,

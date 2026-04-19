@@ -74,7 +74,8 @@
 | `IMAGE_PROVIDER_DEFAULT` | 默认图片供应商 |
 | `IMAGE_PROVIDER_A_API_KEY` | 图片供应商 A Key |
 | `IMAGE_PROVIDER_B_API_KEY` | 图片供应商 B Key |
-| `VOLCENGINE_ARK_API_KEY` | 火山引擎 Ark 图片生成 Key |
+| `VOLCENGINE_ARK_IMAGE_API_KEY` | 火山引擎 Ark 图片生成 Key |
+| `VOLCENGINE_ARK_API_KEY` | 旧版火山 Ark Key（兼容兜底，若未设置 image/video 专用 key 则使用） |
 | `VOLCENGINE_ARK_BASE_URL` | 火山引擎 Ark 接口地址，默认 `https://ark.cn-beijing.volces.com/api/v3` |
 | `VOLCENGINE_ARK_IMAGE_MODEL` | 火山引擎默认图片模型，默认 `doubao-seedream-4-5-251128` |
 
@@ -85,6 +86,8 @@
 | `VIDEO_PROVIDER_DEFAULT` | 默认视频供应商 |
 | `VIDEO_PROVIDER_A_API_KEY` | 视频供应商 A Key |
 | `VIDEO_PROVIDER_B_API_KEY` | 视频供应商 B Key |
+| `VOLCENGINE_ARK_VIDEO_MODEL` | 火山引擎 Seedance 2.0 视频模型 ID，默认 `doubao-seedance-2-0-260128` |
+| `VOLCENGINE_ARK_VIDEO_API_KEY` | 火山引擎 Seedance 2.0 视频生成 Key（与图片 key 不通用） |
 
 ### 5.4 音频模型配置
 

@@ -383,9 +383,38 @@ curl -s \
   -d '{
     "modality": "video",
     "model": "seedance-2.0",
-    "prompt": "生成一段山谷晨雾短片",
-    "operation": "generate",
-    "assets": []
+    "content": [
+      {
+        "type": "text",
+        "text": "全程使用视频1的第一视角构图，全程使用音频1作为背景音乐。第一人称视角果茶宣传广告；首帧为图片1；尾帧定格为图片2。背景声音统一为女生音色。"
+      },
+      {
+        "type": "image_url",
+        "image_url": { "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/r2v_tea_pic1.jpg" },
+        "role": "reference_image"
+      },
+      {
+        "type": "image_url",
+        "image_url": { "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/r2v_tea_pic2.jpg" },
+        "role": "reference_image"
+      },
+      {
+        "type": "video_url",
+        "video_url": { "url": "https://ark-project.tos-cn-beijing.volces.com/doc_video/r2v_tea_video1.mp4" },
+        "role": "reference_video"
+      },
+      {
+        "type": "audio_url",
+        "audio_url": { "url": "https://ark-project.tos-cn-beijing.volces.com/doc_audio/r2v_tea_audio1.mp3" },
+        "role": "reference_audio"
+      }
+    ],
+    "settings": {
+      "generate_audio": true,
+      "ratio": "16:9",
+      "duration": 11,
+      "watermark": false
+    }
   }' \
   "$BASE_URL/v1/gateway"
 ```
@@ -397,7 +426,7 @@ curl -s \
   "requestId": "uuid",
   "modality": "video",
   "model": "seedance-2.0",
-  "provider": "seedance2.0",
+  "provider": "volcengine",
   "task": {
     "id": "task-uuid",
     "status": "queued",
@@ -427,12 +456,15 @@ curl -s \
     "output": [
       {
         "kind": "url",
-        "url": "https://mock.seedance.local/.../final.mp4"
+        "url": "https://mock.volcengine.local/.../final.mp4"
       }
     ],
     "providerTask": {
-      "traceId": "trace-xxx",
-      "keyId": "seedance2-key-1"
+      "resolution": "720p",
+      "ratio": "16:9",
+      "duration": 11,
+      "framespersecond": 24,
+      "generate_audio": true
     }
   }
 }
@@ -443,7 +475,6 @@ curl -s \
 关键参数：
 - `modality`: `"video"`
 - `model`: `"seedance-2.0"`
-- `operation`: `"image-to-video"`
 - `assets`: 至少包含一项参考图（`kind: "image"`）
 
 ### 11.1 使用图片 URL
@@ -455,7 +486,6 @@ curl -s \
   -d '{
     "modality": "video",
     "model": "seedance-2.0",
-    "operation": "image-to-video",
     "prompt": "让人物缓慢抬头，头发有自然风动，镜头轻推，电影感光影",
     "assets": [
       {
@@ -474,7 +504,7 @@ curl -s \
   "requestId": "uuid",
   "modality": "video",
   "model": "seedance-2.0",
-  "provider": "seedance2.0",
+  "provider": "volcengine",
   "task": {
     "id": "task-uuid",
     "status": "queued",
@@ -493,7 +523,6 @@ curl -s \
   -d '{
     "modality": "video",
     "model": "seedance-2.0",
-    "operation": "image-to-video",
     "prompt": "保持人物一致性，生成5秒自然运镜镜头",
     "assets": [
       {

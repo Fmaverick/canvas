@@ -433,12 +433,12 @@ async function requestVolcengine(
 }
 
 export async function generateImageWithVolcengine(input: GenerateImageInput): Promise<GenerateImageOutput> {
-  const key = toString(process.env.VOLCENGINE_ARK_API_KEY);
+  const key = toString(process.env.VOLCENGINE_ARK_IMAGE_API_KEY) ?? toString(process.env.VOLCENGINE_ARK_API_KEY);
   const baseUrl = toString(process.env.VOLCENGINE_ARK_BASE_URL) ?? DEFAULT_BASE_URL;
   const model = resolveVolcengineModel(input.model);
 
   if (!key) {
-    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing volcengine provider key.");
+    throw new ApiError(503, "PROVIDER_UNAVAILABLE", "Missing volcengine image provider key.");
   }
 
   const requestBody = buildRequestBody(input, model);

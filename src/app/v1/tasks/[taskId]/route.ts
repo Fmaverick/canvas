@@ -41,14 +41,15 @@ export async function GET(request: Request, context: RouteContext) {
       throw new ApiError(404, "TASK_NOT_FOUND", `Task ${taskId} not found.`);
     }
 
-    const canPollProvider = task.provider === "seedance2.0" && task.providerTaskId && task.status !== "succeeded" && task.status !== "failed";
+    const canPollProvider =
+      task.provider === "volcengine" && task.providerTaskId && task.status !== "succeeded" && task.status !== "failed";
 
     if (canPollProvider) {
       const statusResult = await getVideoStatusWithSeedance20(task.providerTaskId);
       updateGatewayTask(task.id, {
         status: normalizePolledStatus(statusResult.status),
         output: statusResult.output,
-        providerTask: statusResult.trace ?? {},
+        providerTask: statusResult.metadata ?? {},
       });
     }
 

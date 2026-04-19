@@ -4,94 +4,68 @@ import test from "node:test";
 import { ApiError } from "@/lib/api";
 import { __seedance20TestUtils } from "@/infrastructure/ai/seedance20-client";
 
-test("seedance2.0 参考图映射：合并 assets 与 settings 字段", () => {
-  const payload = __seedance20TestUtils.buildRequestBody(
-    {
-      prompt: "生成视频",
-      model: "seedance-2.0",
-      assets: [
-        {
-          kind: "image",
-          url: "https://example.com/a.png",
-          role: "reference",
-        },
-      ],
-      settings: {
-        firstFrameImageUrl: "https://example.com/first.png",
-        lastFrameImageUrl: "https://example.com/last.png",
-        referenceImages: ["https://example.com/b.png"],
+test("volcengine seedance 2.0 content 映射：合并 prompt/assets/settings", () => {
+  const content = __seedance20TestUtils.normalizeContent({
+    prompt: "生成视频",
+    model: "seedance-2.0",
+    assets: [
+      {
+        kind: "image",
+        url: "https://example.com/a.png",
+        role: "reference",
       },
+    ],
+    settings: {
+      firstFrameImageUrl: "https://example.com/first.png",
+      lastFrameImageUrl: "https://example.com/last.png",
+      referenceImages: ["https://example.com/b.png"],
+      referenceVideoUrl: "https://example.com/ref.mp4",
+      referenceAudioUrl: "https://example.com/ref.mp3",
     },
-    "seedance-2.0",
-  );
+  });
 
-  const urls = payload.body.assets.map((asset) => asset.url);
-  assert.deepEqual(urls, [
-    "https://example.com/a.png",
-    "https://example.com/first.png",
-    "https://example.com/last.png",
-    "https://example.com/b.png",
-  ]);
+  assert.deepEqual(
+    content.map((item) => item.type),
+    ["text", "image_url", "image_url", "image_url", "image_url", "video_url", "audio_url"],
+  );
 });
 
-test("seedance2.0 参数校验：image-to-video 必须包含参考图", () => {
+test("volcengine seedance 2.0 参数校验：需要至少一个 text content", () => {
   assert.throws(
     () =>
-      __seedance20TestUtils.buildRequestBody(
-        {
-          prompt: "生成视频",
-          model: "seedance-2.0",
-          settings: {
-            operation: "image-to-video",
+      __seedance20TestUtils.normalizeContent({
+        content: [
+          {
+            type: "image_url",
+            image_url: {
+              url: "https://example.com/a.png",
+            },
+            role: "reference_image",
           },
-        },
-        "seedance-2.0",
-      ),
+        ],
+      }),
     (error) => error instanceof ApiError && error.code === "VALIDATION_ERROR",
   );
 });
 
-test("seedance2.0 状态映射：完成态输出统一为 output.kind=url", () => {
-  const output = __seedance20TestUtils.normalizeVideoOutputItems({
-    status: "succeeded",
-    data: {
-      output: [
-        {
-          kind: "video",
-          url: "https://example.com/final.mp4",
-          mime_type: "video/mp4",
-          width: 1280,
-          height: 720,
-          duration_ms: 5000,
-        },
-      ],
+test("volcengine seedance 2.0 请求体：透传 generate_audio/ratio/duration/watermark", () => {
+  const payload = __seedance20TestUtils.buildRequestBody({
+    prompt: "生成视频",
+    model: "seedance-2.0",
+    settings: {
+      generate_audio: true,
+      ratio: "16:9",
+      duration: 11,
+      watermark: false,
     },
   });
 
-  assert.deepEqual(output, [
-    {
-      kind: "url",
-      url: "https://example.com/final.mp4",
-      mimeType: "video/mp4",
-      width: 1280,
-      height: 720,
-      durationMs: 5000,
-    },
-  ]);
+  assert.equal(payload.body.generate_audio, true);
+  assert.equal(payload.body.ratio, "16:9");
+  assert.equal(payload.body.duration, 11);
+  assert.equal(payload.body.watermark, false);
 });
 
-test("seedance2.0 追溯字段提取：兼容 jobId/traceId/keyId", () => {
-  const trace = __seedance20TestUtils.pickTraceMeta({
-    data: {
-      jobId: "job-1",
-      traceId: "trace-1",
-      keyId: "key-1",
-    },
-  });
-
-  assert.deepEqual(trace, {
-    jobId: "job-1",
-    traceId: "trace-1",
-    keyId: "key-1",
-  });
+test("volcengine seedance 2.0 状态映射：succeeded -> completed", () => {
+  assert.equal(__seedance20TestUtils.mapVolcengineTaskStatus("succeeded"), "completed");
 });
