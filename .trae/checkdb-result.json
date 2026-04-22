@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "tables": [
+    "assets",
+    "library_items"
+  ],
+  "assetCols": [
+    "volcengine_asset_id",
+    "volcengine_asset_group_id",
+    "volcengine_project_name",
+    "volcengine_sync_status",
+    "volcengine_last_synced_at",
+    "volcengine_last_sync_error_code",
+    "volcengine_last_sync_error"
+  ],
+  "itemCols": [
+    "volcengine_asset_group_id",
+    "volcengine_project_name"
+  ]
+}

@@ -119,8 +119,8 @@ function toRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function isValidUrl(value: string) {
-  return /^https?:\/\//i.test(value) || /^data:/i.test(value);
+function isValidReferenceUri(value: string) {
+  return /^https?:\/\//i.test(value) || /^data:/i.test(value) || /^asset:\/\/.+/i.test(value);
 }
 
 function mapVolcengineTaskStatus(value: unknown): "pending" | "processing" | "completed" | "failed" {
@@ -238,8 +238,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
       if (type === "image_url") {
         const imageUrl = toRecord(record?.image_url);
         const url = toString(imageUrl?.url);
-        if (!url || !isValidUrl(url)) {
-          throw new ApiError(400, "VALIDATION_ERROR", "content.image_url.url must be a valid url.");
+        if (!url || !isValidReferenceUri(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.image_url.url must be a valid url or asset uri.");
         }
         pushItem({ type: "image_url", image_url: { url }, role: toString(record?.role) ?? "reference_image" });
         continue;
@@ -248,8 +248,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
       if (type === "video_url") {
         const videoUrl = toRecord(record?.video_url);
         const url = toString(videoUrl?.url);
-        if (!url || !isValidUrl(url)) {
-          throw new ApiError(400, "VALIDATION_ERROR", "content.video_url.url must be a valid url.");
+        if (!url || !isValidReferenceUri(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.video_url.url must be a valid url or asset uri.");
         }
         pushItem({ type: "video_url", video_url: { url }, role: toString(record?.role) ?? "reference_video" });
         continue;
@@ -258,8 +258,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
       if (type === "audio_url") {
         const audioUrl = toRecord(record?.audio_url);
         const url = toString(audioUrl?.url);
-        if (!url || !isValidUrl(url)) {
-          throw new ApiError(400, "VALIDATION_ERROR", "content.audio_url.url must be a valid url.");
+        if (!url || !isValidReferenceUri(url)) {
+          throw new ApiError(400, "VALIDATION_ERROR", "content.audio_url.url must be a valid url or asset uri.");
         }
         pushItem({ type: "audio_url", audio_url: { url }, role: toString(record?.role) ?? "reference_audio" });
         continue;
@@ -281,8 +281,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
     if (!url) {
       continue;
     }
-    if (!isValidUrl(url)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image url: ${url}`);
+    if (!isValidReferenceUri(url)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image uri: ${url}`);
     }
     referenceImageUrls.push({ url, role: "reference_image" });
   }
@@ -290,14 +290,14 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
   const firstFrameUrl = toString(settings.firstFrameImageUrl) ?? toString(settings.imageUrl);
   const lastFrameUrl = toString(settings.lastFrameImageUrl);
   if (firstFrameUrl) {
-    if (!isValidUrl(firstFrameUrl)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid first frame url: ${firstFrameUrl}`);
+    if (!isValidReferenceUri(firstFrameUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid first frame uri: ${firstFrameUrl}`);
     }
     referenceImageUrls.push({ url: firstFrameUrl, role: "reference_image" });
   }
   if (lastFrameUrl) {
-    if (!isValidUrl(lastFrameUrl)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid last frame url: ${lastFrameUrl}`);
+    if (!isValidReferenceUri(lastFrameUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid last frame uri: ${lastFrameUrl}`);
     }
     referenceImageUrls.push({ url: lastFrameUrl, role: "reference_image" });
   }
@@ -308,8 +308,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
       if (!url) {
         continue;
       }
-      if (!isValidUrl(url)) {
-        throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image url: ${url}`);
+      if (!isValidReferenceUri(url)) {
+        throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference image uri: ${url}`);
       }
       referenceImageUrls.push({ url, role: "reference_image" });
     }
@@ -322,8 +322,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
   const referenceVideoUrl =
     toString(settings.referenceVideoUrl) ?? toString(settings.reference_video_url) ?? toString(settings.videoUrl);
   if (referenceVideoUrl) {
-    if (!isValidUrl(referenceVideoUrl)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference video url: ${referenceVideoUrl}`);
+    if (!isValidReferenceUri(referenceVideoUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference video uri: ${referenceVideoUrl}`);
     }
     pushItem({ type: "video_url", video_url: { url: referenceVideoUrl }, role: "reference_video" });
   }
@@ -331,8 +331,8 @@ function normalizeContent(input: GenerateVideoInput): VolcengineContentItem[] {
   const referenceAudioUrl =
     toString(settings.referenceAudioUrl) ?? toString(settings.reference_audio_url) ?? toString(settings.audioUrl);
   if (referenceAudioUrl) {
-    if (!isValidUrl(referenceAudioUrl)) {
-      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference audio url: ${referenceAudioUrl}`);
+    if (!isValidReferenceUri(referenceAudioUrl)) {
+      throw new ApiError(400, "VALIDATION_ERROR", `Invalid reference audio uri: ${referenceAudioUrl}`);
     }
     pushItem({ type: "audio_url", audio_url: { url: referenceAudioUrl }, role: "reference_audio" });
   }

@@ -47,6 +47,13 @@ export const deleteLibraryItemInputSchema = z.object({
   itemId: z.uuid(),
 });
 
+export const updateLibraryItemVolcengineBindingInputSchema = z.object({
+  workspaceId: z.uuid(),
+  itemId: z.uuid(),
+  volcengineAssetGroupId: z.string().trim().nullable().optional(),
+  volcengineProjectName: z.string().trim().nullable().optional(),
+});
+
 async function assertLibraryItemExists(workspaceId: string, itemId: string) {
   const [item] = await db
     .select({
@@ -76,6 +83,8 @@ function libraryItemSelectShape() {
     promptHints: libraryItems.promptHints,
     profileMeta: libraryItems.profileMeta,
     tags: libraryItems.tags,
+    volcengineAssetGroupId: libraryItems.volcengineAssetGroupId,
+    volcengineProjectName: libraryItems.volcengineProjectName,
     status: libraryItems.status,
     createdBy: libraryItems.createdBy,
     createdAt: libraryItems.createdAt,
@@ -83,7 +92,37 @@ function libraryItemSelectShape() {
   };
 }
 
-async function getLibraryItemById(workspaceId: string, itemId: string) {
+type LibraryItemRow = {
+  id: string;
+  workspaceId: string;
+  kind: string;
+  entityType: string | null;
+  name: string;
+  description: string | null;
+  coverAssetId: string | null;
+  coverAssetUrl: string | null;
+  promptHints: string | null;
+  profileMeta: Record<string, unknown>;
+  tags: string[];
+  volcengineAssetGroupId: string | null;
+  volcengineProjectName: string | null;
+  status: string;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function serializeLibraryItem(item: LibraryItemRow) {
+  return {
+    ...item,
+    volcengineSync: {
+      volcengine_asset_group_id: item.volcengineAssetGroupId,
+      volcengine_project_name: item.volcengineProjectName,
+    },
+  };
+}
+
+export async function getLibraryItemById(workspaceId: string, itemId: string) {
   const [item] = await db
     .select(libraryItemSelectShape())
     .from(libraryItems)
@@ -95,7 +134,7 @@ async function getLibraryItemById(workspaceId: string, itemId: string) {
     throw new ApiError(404, "LIBRARY_ITEM_NOT_FOUND", "资源不存在。");
   }
 
-  return item;
+  return serializeLibraryItem(item);
 }
 
 export async function listLibraryItems(input: z.infer<typeof listLibraryItemsInputSchema>) {
@@ -117,12 +156,12 @@ export async function listLibraryItems(input: z.infer<typeof listLibraryItemsInp
     .orderBy(desc(libraryItems.updatedAt));
 
   if (!parsed.tag) {
-    return rows;
+    return rows.map(serializeLibraryItem);
   }
 
   const tag = parsed.tag;
 
-  return rows.filter((item) => item.tags.includes(tag));
+  return rows.filter((item) => item.tags.includes(tag)).map(serializeLibraryItem);
 }
 
 export async function createLibraryItem(input: z.infer<typeof createLibraryItemInputSchema>) {
@@ -180,4 +219,21 @@ export async function deleteLibraryItem(input: z.infer<typeof deleteLibraryItemI
     .returning();
 
   return item;
+}
+
+export async function updateLibraryItemVolcengineBinding(input: z.infer<typeof updateLibraryItemVolcengineBindingInputSchema>) {
+  const parsed = updateLibraryItemVolcengineBindingInputSchema.parse(input);
+  await assertLibraryItemExists(parsed.workspaceId, parsed.itemId);
+
+  await db
+    .update(libraryItems)
+    .set({
+      volcengineAssetGroupId:
+        parsed.volcengineAssetGroupId === undefined ? undefined : parsed.volcengineAssetGroupId,
+      volcengineProjectName: parsed.volcengineProjectName === undefined ? undefined : parsed.volcengineProjectName,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(libraryItems.id, parsed.itemId), eq(libraryItems.workspaceId, parsed.workspaceId)));
+
+  return getLibraryItemById(parsed.workspaceId, parsed.itemId);
 }

@@ -145,6 +145,8 @@ export const libraryItems = pgTable(
     promptHints: text("prompt_hints"),
     profileMeta: jsonb("profile_meta").$type<Record<string, unknown>>().notNull().default({}),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    volcengineAssetGroupId: varchar("volcengine_asset_group_id", { length: 255 }),
+    volcengineProjectName: varchar("volcengine_project_name", { length: 100 }),
     status: varchar("status", { length: 20 }).notNull().default("active"),
     createdBy: uuid("created_by")
       .notNull()
@@ -201,6 +203,13 @@ export const assets = pgTable(
     height: integer("height"),
     durationMs: integer("duration_ms"),
     checksum: varchar("checksum", { length: 128 }),
+    volcengineAssetId: varchar("volcengine_asset_id", { length: 255 }),
+    volcengineAssetGroupId: varchar("volcengine_asset_group_id", { length: 255 }),
+    volcengineProjectName: varchar("volcengine_project_name", { length: 100 }),
+    volcengineSyncStatus: varchar("volcengine_sync_status", { length: 30 }).notNull().default("not_synced"),
+    volcengineLastSyncedAt: timestamp("volcengine_last_synced_at", { withTimezone: true }),
+    volcengineLastSyncErrorCode: varchar("volcengine_last_sync_error_code", { length: 100 }),
+    volcengineLastSyncError: text("volcengine_last_sync_error"),
     meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

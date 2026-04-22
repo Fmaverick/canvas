@@ -2,6 +2,7 @@ import { resolveWorkspaceContextFromRequest } from "@/application/services/auth-
 import {
   deleteLibraryItem,
   deleteLibraryItemInputSchema,
+  getLibraryItemById,
   updateLibraryItem,
   updateLibraryItemInputSchema,
 } from "@/application/services/library-item-service";
@@ -27,6 +28,20 @@ export async function PATCH(request: Request, context: RouteContext) {
         itemId,
       }),
     );
+
+    return jsonSuccess(item, requestId);
+  } catch (error) {
+    return jsonError(error, requestId);
+  }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  const requestId = getRequestId(request);
+
+  try {
+    const { workspaceId } = await resolveWorkspaceContextFromRequest(request, null, "view");
+    const { itemId } = await context.params;
+    const item = await getLibraryItemById(workspaceId, itemId);
 
     return jsonSuccess(item, requestId);
   } catch (error) {

@@ -66,6 +66,64 @@ test("volcengine seedance 2.0 请求体：透传 generate_audio/ratio/duration/w
   assert.equal(payload.body.watermark, false);
 });
 
+test("volcengine seedance 2.0 参数校验：接受 asset:// 引用", () => {
+  const content = __seedance20TestUtils.normalizeContent({
+    prompt: "生成视频",
+    model: "seedance-2.0",
+    assets: [
+      {
+        kind: "image",
+        url: "asset://volc-subject-1",
+        role: "reference",
+      },
+    ],
+    content: [
+      {
+        type: "image_url",
+        image_url: {
+          url: "asset://volc-cover-1",
+        },
+        role: "reference_image",
+      },
+    ],
+    settings: {
+      firstFrameImageUrl: "asset://volc-first-1",
+      lastFrameImageUrl: "asset://volc-last-1",
+      referenceImages: ["asset://volc-extra-1"],
+      referenceVideoUrl: "asset://volc-video-1",
+      referenceAudioUrl: "asset://volc-audio-1",
+    },
+  });
+
+  assert.deepEqual(
+    content.map((item) => {
+      if (item.type === "text") {
+        return item.text;
+      }
+
+      if (item.type === "image_url") {
+        return item.image_url.url;
+      }
+
+      if (item.type === "video_url") {
+        return item.video_url.url;
+      }
+
+      return item.audio_url.url;
+    }),
+    [
+      "asset://volc-cover-1",
+      "生成视频",
+      "asset://volc-subject-1",
+      "asset://volc-first-1",
+      "asset://volc-last-1",
+      "asset://volc-extra-1",
+      "asset://volc-video-1",
+      "asset://volc-audio-1",
+    ],
+  );
+});
+
 test("volcengine seedance 2.0 状态映射：succeeded -> completed", () => {
   assert.equal(__seedance20TestUtils.mapVolcengineTaskStatus("succeeded"), "completed");
 });

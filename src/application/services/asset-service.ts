@@ -27,6 +27,14 @@ const ownerTypeSchema = z.enum([
   "task_result",
 ]);
 const assetTypeSchema = z.enum(["image", "video", "audio", "document"]);
+export const volcengineSyncStatusSchema = z.enum(["not_synced", "processing", "active", "failed", "skipped"]);
+export type VolcengineSyncStatus = z.infer<typeof volcengineSyncStatusSchema>;
+export type AssetRow = Omit<typeof assets.$inferSelect, "volcengineSyncStatus"> & {
+  volcengineSyncStatus: VolcengineSyncStatus;
+};
+export type SerializedAssetRow = AssetRow & {
+  volcengineSync: ReturnType<typeof buildVolcengineSyncSummary>;
+};
 
 const uploadMetaSchema = z.record(z.string(), z.unknown()).default({});
 const assetOwnerInputSchema = z.object({
@@ -44,6 +52,17 @@ const deleteAssetInputSchema = z.object({
   assetId: z.uuid(),
   ownerType: ownerTypeSchema.optional(),
   ownerId: z.uuid().optional(),
+});
+export const updateAssetVolcengineSyncStateInputSchema = z.object({
+  workspaceId: z.uuid(),
+  assetId: z.uuid(),
+  volcengineAssetId: z.string().trim().nullable().optional(),
+  volcengineAssetGroupId: z.string().trim().nullable().optional(),
+  volcengineProjectName: z.string().trim().nullable().optional(),
+  volcengineSyncStatus: volcengineSyncStatusSchema,
+  volcengineLastSyncedAt: z.date().nullable().optional(),
+  volcengineLastSyncErrorCode: z.string().trim().nullable().optional(),
+  volcengineLastSyncError: z.string().trim().nullable().optional(),
 });
 
 export const createUploadTicketInputSchema = z.object({
@@ -120,14 +139,44 @@ async function findAssetById(workspaceId: string, assetId: string) {
   return asset ?? null;
 }
 
+function normalizeAssetRow(asset: typeof assets.$inferSelect): AssetRow {
+  return {
+    ...asset,
+    volcengineSyncStatus: volcengineSyncStatusSchema.parse(asset.volcengineSyncStatus),
+  };
+}
+
+function buildVolcengineSyncSummary(asset: AssetRow) {
+  return {
+    sync_status: asset.volcengineSyncStatus,
+    volcengine_asset_id: asset.volcengineAssetId,
+    volcengine_asset_group_id: asset.volcengineAssetGroupId,
+    volcengine_project_name: asset.volcengineProjectName,
+    last_synced_at: asset.volcengineLastSyncedAt,
+    last_sync_error_code: asset.volcengineLastSyncErrorCode,
+    last_sync_error: asset.volcengineLastSyncError,
+  };
+}
+
+function serializeAsset(asset: typeof assets.$inferSelect): SerializedAssetRow {
+  const normalizedAsset = normalizeAssetRow(asset);
+
+  return {
+    ...normalizedAsset,
+    volcengineSync: buildVolcengineSyncSummary(normalizedAsset),
+  };
+}
+
 export async function listAssetsByOwner(input: z.infer<typeof assetOwnerInputSchema>) {
   const parsed = assetOwnerInputSchema.parse(input);
 
-  return db
+  const rows = await db
     .select()
     .from(assets)
     .where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.ownerType, parsed.ownerType), eq(assets.ownerId, parsed.ownerId)))
     .orderBy(asc(assets.createdAt));
+
+  return rows.map(serializeAsset);
 }
 
 export async function listAssetsByOwners(input: z.infer<typeof assetOwnersInputSchema>) {
@@ -137,7 +186,7 @@ export async function listAssetsByOwners(input: z.infer<typeof assetOwnersInputS
     return [];
   }
 
-  return db
+  const rows = await db
     .select()
     .from(assets)
     .where(
@@ -148,6 +197,8 @@ export async function listAssetsByOwners(input: z.infer<typeof assetOwnersInputS
       ),
     )
     .orderBy(asc(assets.createdAt));
+
+  return rows.map(serializeAsset);
 }
 
 export async function createUploadTicket(input: z.infer<typeof createUploadTicketInputSchema>) {
@@ -366,4 +417,57 @@ export async function deleteAsset(input: z.infer<typeof deleteAssetInputSchema>)
   }
 
   return existingAsset;
+}
+
+export async function getAssetById(input: { workspaceId: string; assetId: string }) {
+  const asset = await findAssetById(input.workspaceId, input.assetId);
+
+  if (!asset) {
+    throw new ApiError(404, "ASSET_NOT_FOUND", "资源不存在。");
+  }
+
+  return serializeAsset(asset);
+}
+
+export async function updateAssetVolcengineSyncState(input: z.infer<typeof updateAssetVolcengineSyncStateInputSchema>) {
+  const parsed = updateAssetVolcengineSyncStateInputSchema.parse(input);
+  const existingAsset = await findAssetById(parsed.workspaceId, parsed.assetId);
+
+  if (!existingAsset) {
+    throw new ApiError(404, "ASSET_NOT_FOUND", "资源不存在。");
+  }
+
+  const [asset] = await db
+    .update(assets)
+    .set({
+      volcengineAssetId: parsed.volcengineAssetId === undefined ? undefined : parsed.volcengineAssetId,
+      volcengineAssetGroupId: parsed.volcengineAssetGroupId === undefined ? undefined : parsed.volcengineAssetGroupId,
+      volcengineProjectName: parsed.volcengineProjectName === undefined ? undefined : parsed.volcengineProjectName,
+      volcengineSyncStatus: parsed.volcengineSyncStatus,
+      volcengineLastSyncedAt:
+        parsed.volcengineLastSyncedAt === undefined ? undefined : parsed.volcengineLastSyncedAt,
+      volcengineLastSyncErrorCode:
+        parsed.volcengineLastSyncErrorCode === undefined ? undefined : parsed.volcengineLastSyncErrorCode,
+      volcengineLastSyncError: parsed.volcengineLastSyncError === undefined ? undefined : parsed.volcengineLastSyncError,
+    })
+    .where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.id, parsed.assetId)))
+    .returning();
+
+  return serializeAsset(asset);
+}
+
+export async function listAssetRowsByOwner(input: z.infer<typeof assetOwnerInputSchema>) {
+  const parsed = assetOwnerInputSchema.parse(input);
+
+  const rows = await db
+    .select()
+    .from(assets)
+    .where(and(eq(assets.workspaceId, parsed.workspaceId), eq(assets.ownerType, parsed.ownerType), eq(assets.ownerId, parsed.ownerId)))
+    .orderBy(asc(assets.createdAt));
+
+  return rows.map(normalizeAssetRow);
+}
+
+export function getVolcengineSyncSummaryFromAssetRow(asset: typeof assets.$inferSelect) {
+  return buildVolcengineSyncSummary(normalizeAssetRow(asset));
 }

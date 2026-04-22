@@ -11,6 +11,7 @@ import {
   extractImageTraceMeta,
   normalizeUnifiedImageOutput,
 } from "@/application/services/task-image-payload";
+import { resolveVideoReferenceSourceUrl } from "@/application/services/volcengine-video-reference";
 import { db } from "@/infrastructure/db/client";
 import {
   assets,
@@ -1013,10 +1014,11 @@ function sortVideoReferenceAssetsByContext<
 }
 
 function buildVideoReferenceImageEntries(input: {
-  firstFrameAsset?: { fileUrl: string; fileName: string; label?: string };
-  lastFrameAsset?: { fileUrl: string; fileName: string; label?: string };
-  explicitReferenceAssets: Array<{ fileUrl: string; fileName: string; label?: string }>;
-  unassignedReferenceAssets: Array<{ fileUrl: string; fileName: string; label?: string }>;
+  firstFrameAsset?: { url: string; fileName: string; label?: string };
+  lastFrameAsset?: { url: string; fileName: string; label?: string };
+  explicitReferenceAssets: Array<{ url: string; fileName: string; label?: string }>;
+  subjectReferenceAssets: Array<{ url: string; fileName: string; label?: string }>;
+  unassignedReferenceAssets: Array<{ url: string; fileName: string; label?: string }>;
   upstreamReferenceImages: Array<{ url: string; label?: string }>;
   mergedReferenceImages: string[];
 }) {
@@ -1035,14 +1037,18 @@ function buildVideoReferenceImageEntries(input: {
     });
   };
 
-  appendEntry(input.firstFrameAsset?.fileUrl, input.firstFrameAsset?.label);
+  appendEntry(input.firstFrameAsset?.url, input.firstFrameAsset?.label);
 
   for (const asset of input.explicitReferenceAssets) {
-    appendEntry(asset.fileUrl, asset.label);
+    appendEntry(asset.url, asset.label);
+  }
+
+  for (const asset of input.subjectReferenceAssets) {
+    appendEntry(asset.url, asset.label);
   }
 
   for (const asset of input.unassignedReferenceAssets) {
-    appendEntry(asset.fileUrl, asset.label);
+    appendEntry(asset.url, asset.label);
   }
 
   for (const image of input.upstreamReferenceImages) {
@@ -1053,7 +1059,7 @@ function buildVideoReferenceImageEntries(input: {
     appendEntry(imageUrl);
   }
 
-  appendEntry(input.lastFrameAsset?.fileUrl, input.lastFrameAsset?.label);
+  appendEntry(input.lastFrameAsset?.url, input.lastFrameAsset?.label);
 
   return entries;
 }
@@ -1603,6 +1609,8 @@ async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNode
       mimeType: assets.mimeType,
       width: assets.width,
       height: assets.height,
+      volcengineAssetId: assets.volcengineAssetId,
+      volcengineSyncStatus: assets.volcengineSyncStatus,
     })
     .from(assets)
     .where(
@@ -1618,6 +1626,38 @@ async function getNodeReferenceAssets(node: Awaited<ReturnType<typeof assertNode
   return assetIds
     .map((assetId) => assetMap.get(assetId))
     .filter((asset): asset is NonNullable<typeof asset> => Boolean(asset));
+}
+
+async function getLibraryItemImageAssets(workspaceId: string, itemIds: string[]) {
+  const normalizedItemIds = uniqueStrings(itemIds);
+
+  if (normalizedItemIds.length === 0) {
+    return [];
+  }
+
+  return db
+    .select({
+      id: assets.id,
+      ownerType: assets.ownerType,
+      ownerId: assets.ownerId,
+      fileUrl: assets.fileUrl,
+      fileName: assets.fileName,
+      mimeType: assets.mimeType,
+      width: assets.width,
+      height: assets.height,
+      volcengineAssetId: assets.volcengineAssetId,
+      volcengineSyncStatus: assets.volcengineSyncStatus,
+    })
+    .from(assets)
+    .where(
+      and(
+        eq(assets.workspaceId, workspaceId),
+        eq(assets.ownerType, "library_item"),
+        eq(assets.assetType, "image"),
+        inArray(assets.ownerId, normalizedItemIds),
+      ),
+    )
+    .orderBy(asc(assets.createdAt));
 }
 
 async function getNodeReferenceAssetMap(
@@ -1920,14 +1960,6 @@ async function buildExecutionPayload(
   const mergedReferenceImages = ((mergedSettings.referenceImages as unknown[]) ?? []).filter(
     (imageUrl): imageUrl is string => typeof imageUrl === "string",
   );
-  const referenceImages = uniqueStrings([
-    ...(node.type === "video"
-      ? [...explicitReferenceImageAssets, ...unassignedReferenceImageAssets].map((asset) => asset.fileUrl)
-      : referenceAssets.map((asset) => asset.fileUrl)),
-    ...combinationReferenceImages.map((image) => image.url),
-    ...upstreamReferenceImages.map((image) => image.url),
-    ...mergedReferenceImages,
-  ]);
   const firstFrameAsset = firstFrameAssetId ? referenceAssetMap.get(firstFrameAssetId) : undefined;
   const lastFrameAsset = lastFrameAssetId ? referenceAssetMap.get(lastFrameAssetId) : undefined;
   const configuredFirstFrameImageUrl =
@@ -1940,15 +1972,6 @@ async function buildExecutionPayload(
     typeof mergedSettings.lastFrameImageUrl === "string" && mergedSettings.lastFrameImageUrl.trim().length > 0
       ? mergedSettings.lastFrameImageUrl.trim()
       : undefined;
-  const firstFrameImageUrl = isFirstLastVideoMode
-    ? firstFrameAsset?.fileUrl ?? configuredFirstFrameImageUrl ?? combinationReferenceImages[0]?.url
-    : undefined;
-  const lastFrameImageUrl = isFirstLastVideoMode
-    ? lastFrameAsset?.fileUrl ??
-      configuredLastFrameImageUrl ??
-      combinationReferenceImages[1]?.url ??
-      combinationReferenceImages[0]?.url
-    : undefined;
   const shotPrompts = uniqueStrings(
     ((isStoryboardVideoMode ? ((mergedSettings.shotPrompts as unknown[]) ?? []) : []).filter(
       (item): item is string => typeof item === "string",
@@ -1986,23 +2009,82 @@ async function buildExecutionPayload(
     [...combinationReferenceImages, ...upstreamReferenceImages],
     referenceOrderMaps,
   );
-  const referenceImageEntries =
-    node.type === "video"
-      ? buildVideoReferenceImageEntries({
-          firstFrameAsset: isFirstLastVideoMode ? labeledFirstFrameAsset : undefined,
-          lastFrameAsset: isFirstLastVideoMode ? labeledLastFrameAsset : undefined,
-          explicitReferenceAssets: orderedExplicitReferenceAssets,
-          unassignedReferenceAssets: orderedUnassignedReferenceAssets,
-          upstreamReferenceImages: orderedUpstreamReferenceImages,
-          mergedReferenceImages,
-        })
-      : [];
   const provider =
     node.type === "image"
       ? resolveImageProvider(node.modelKey)
       : node.type === "video"
         ? resolveVideoProvider(node.modelKey)
         : "internal";
+  const subjectReferenceAssets =
+    node.type === "video"
+      ? (
+          await getLibraryItemImageAssets(input.workspaceId, normalizedNodeRefs.subjectIds)
+        ).filter((asset) => !referenceAssetMap.has(asset.id))
+      : [];
+  const toVideoReferenceAsset = <
+    T extends {
+      ownerType?: string;
+      ownerId?: string;
+      fileUrl: string;
+      fileName: string;
+      label?: string;
+      volcengineAssetId?: string | null;
+      volcengineSyncStatus?: string | null;
+    },
+  >(
+    asset: T,
+  ) => ({
+    ...asset,
+    url: resolveVideoReferenceSourceUrl({
+      asset,
+      provider,
+      subjectIds: normalizedNodeRefs.subjectIds,
+    }),
+  });
+  const resolvedFirstFrameAsset =
+    isFirstLastVideoMode && labeledFirstFrameAsset ? toVideoReferenceAsset(labeledFirstFrameAsset) : undefined;
+  const resolvedLastFrameAsset =
+    isFirstLastVideoMode && labeledLastFrameAsset ? toVideoReferenceAsset(labeledLastFrameAsset) : undefined;
+  const orderedSubjectReferenceAssets = sortVideoReferenceAssetsByContext(
+    subjectReferenceAssets.map((asset) => ({
+      ...asset,
+      label: resolveVideoReferenceAssetLabel(asset, libraryItemNameMap, fallbackContextLabels),
+    })),
+    referenceOrderMaps,
+  ).map(toVideoReferenceAsset);
+  const resolvedExplicitReferenceAssets = orderedExplicitReferenceAssets.map(toVideoReferenceAsset);
+  const resolvedUnassignedReferenceAssets = orderedUnassignedReferenceAssets.map(toVideoReferenceAsset);
+  const firstFrameImageUrl = isFirstLastVideoMode
+    ? resolvedFirstFrameAsset?.url ?? configuredFirstFrameImageUrl ?? combinationReferenceImages[0]?.url
+    : undefined;
+  const lastFrameImageUrl = isFirstLastVideoMode
+    ? resolvedLastFrameAsset?.url ??
+      configuredLastFrameImageUrl ??
+      combinationReferenceImages[1]?.url ??
+      combinationReferenceImages[0]?.url
+    : undefined;
+  const referenceImages = uniqueStrings([
+    ...(node.type === "video"
+      ? [...resolvedExplicitReferenceAssets, ...orderedSubjectReferenceAssets, ...resolvedUnassignedReferenceAssets].map(
+          (asset) => asset.url,
+        )
+      : referenceAssets.map((asset) => asset.fileUrl)),
+    ...combinationReferenceImages.map((image) => image.url),
+    ...upstreamReferenceImages.map((image) => image.url),
+    ...mergedReferenceImages,
+  ]);
+  const referenceImageEntries =
+    node.type === "video"
+      ? buildVideoReferenceImageEntries({
+          firstFrameAsset: resolvedFirstFrameAsset,
+          lastFrameAsset: resolvedLastFrameAsset,
+          explicitReferenceAssets: resolvedExplicitReferenceAssets,
+          subjectReferenceAssets: orderedSubjectReferenceAssets,
+          unassignedReferenceAssets: resolvedUnassignedReferenceAssets,
+          upstreamReferenceImages: orderedUpstreamReferenceImages,
+          mergedReferenceImages,
+        })
+      : [];
 
   return {
     workspaceId: input.workspaceId,

@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, ImageIcon, MessageSquare, Plus, Search, Trash2, Upload, WandSparkles } from "lucide-react";
+import { Boxes, ImageIcon, MessageSquare, Plus, RefreshCw, Search, Trash2, Upload, WandSparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,21 @@ type WorkspaceRole = string;
 type SectionKey = "subject" | "scene" | "instruction";
 type EditableInstructionScope = "personal" | "workspace";
 
+type LibraryItemVolcengineSync = {
+  volcengine_asset_group_id: string | null;
+  volcengine_project_name: string | null;
+};
+
+type LibraryAssetVolcengineSync = {
+  sync_status: string;
+  volcengine_asset_id: string | null;
+  volcengine_asset_group_id: string | null;
+  volcengine_project_name: string | null;
+  last_synced_at: string | Date | null;
+  last_sync_error_code: string | null;
+  last_sync_error: string | null;
+};
+
 type LibraryItemRecord = {
   id: string;
   workspaceId: string;
@@ -36,6 +51,7 @@ type LibraryItemRecord = {
   promptHints: string | null;
   profileMeta?: Record<string, unknown>;
   tags: string[];
+  volcengineSync?: LibraryItemVolcengineSync;
   status: string;
   createdBy: string;
   createdAt: string | Date;
@@ -91,6 +107,7 @@ type LibraryAssetRecord = {
   mimeType: string;
   width: number | null;
   height: number | null;
+  volcengineSync?: LibraryAssetVolcengineSync;
   createdAt: string | Date;
 };
 
@@ -105,6 +122,23 @@ type BatchImportResult = {
   itemName: string;
   success: boolean;
   message: string;
+};
+
+type LibraryItemAssetSyncResult = {
+  libraryItemId: string;
+  volcengineAssetGroupId: string | null;
+  volcengineProjectName: string | null;
+  reusedAssetGroup: boolean;
+  summary: {
+    total: number;
+    eligible: number;
+    active: number;
+    processing: number;
+    failed: number;
+    skipped: number;
+    reused: number;
+    created: number;
+  };
 };
 
 type SubjectGenerationDraft = {
@@ -259,6 +293,68 @@ function formatDate(value: string | Date) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatVolcengineSyncStatus(status: string | null | undefined) {
+  switch (status) {
+    case "active":
+      return "已激活";
+    case "processing":
+      return "同步中";
+    case "failed":
+      return "同步失败";
+    case "skipped":
+      return "已跳过";
+    default:
+      return "未同步";
+  }
+}
+
+function getVolcengineSyncStatusClass(status: string | null | undefined) {
+  switch (status) {
+    case "active":
+      return "bg-emerald-500/10 text-emerald-700";
+    case "processing":
+      return "bg-amber-500/10 text-amber-700";
+    case "failed":
+      return "bg-rose-500/10 text-rose-700";
+    case "skipped":
+      return "bg-slate-500/10 text-slate-600";
+    default:
+      return "bg-slate-500/10 text-slate-600";
+  }
+}
+
+function formatOptionalDate(value: string | Date | null | undefined) {
+  if (!value) {
+    return "未同步";
+  }
+
+  return formatDate(value);
+}
+
+function buildVolcengineSyncHint(sync?: LibraryAssetVolcengineSync) {
+  if (!sync) {
+    return "未读取到火山同步信息。";
+  }
+
+  if (sync.volcengine_asset_id) {
+    return `asset://${sync.volcengine_asset_id}`;
+  }
+
+  if (sync.last_sync_error) {
+    return sync.last_sync_error;
+  }
+
+  if (sync.sync_status === "processing") {
+    return "素材仍在火山处理中，当前会回退使用公网 URL。";
+  }
+
+  if (sync.sync_status === "skipped") {
+    return "当前素材不会同步到火山，将继续使用公网 URL。";
+  }
+
+  return "未生成火山素材 ID，视频请求将回退使用公网 URL。";
 }
 
 async function readImageDimensions(file: File) {
@@ -477,6 +573,8 @@ export function LibrariesStudio({
   const [isUploadingSubjectImages, setIsUploadingSubjectImages] = useState(false);
   const [isGeneratingSubjectImage, setIsGeneratingSubjectImage] = useState(false);
   const [deletingSubjectAssetId, setDeletingSubjectAssetId] = useState<string | null>(null);
+  const [isSyncingAllSubjectAssets, setIsSyncingAllSubjectAssets] = useState(false);
+  const [syncingSubjectAssetIds, setSyncingSubjectAssetIds] = useState<string[]>([]);
   const [latestGeneratedSubjectAsset, setLatestGeneratedSubjectAsset] = useState<LibraryAssetRecord | null>(null);
   const subjectImageInputRef = useRef<HTMLInputElement | null>(null);
   const [isLoadingSceneAssets, setIsLoadingSceneAssets] = useState(false);
@@ -896,6 +994,89 @@ export function LibrariesStudio({
     }
 
     return uploadedAssets;
+  }
+
+  async function reloadSubjectItemAndAssets(itemId: string) {
+    const [nextItem, nextAssets] = await Promise.all([
+      parseJsonResponse<LibraryItemRecord>(
+        await fetch(`/api/library-items/${itemId}`, {
+          headers: {
+            "x-workspace-id": workspaceId,
+          },
+        }),
+      ),
+      parseJsonResponse<LibraryAssetRecord[]>(
+        await fetch(`/api/library-items/${itemId}/assets`, {
+          headers: {
+            "x-workspace-id": workspaceId,
+          },
+        }),
+      ),
+    ]);
+    const nextSubjectAssets = nextAssets.filter((asset) => asset.assetType === "image");
+    const previewAssetUrl =
+      nextSubjectAssets.find((asset) => asset.id === nextItem.coverAssetId)?.fileUrl ?? nextItem.coverAssetUrl ?? null;
+
+    setSubjectItems((current) => current.map((item) => (item.id === nextItem.id ? nextItem : item)));
+    setSubjectAssets(nextSubjectAssets);
+
+    if (previewAssetUrl) {
+      setSubjectPreviewUrls((current) => ({
+        ...current,
+        [nextItem.id]: previewAssetUrl,
+      }));
+    }
+  }
+
+  async function handleSyncSubjectAssets(assetIds?: string[]) {
+    if (!selectedItem || activeSection !== "subject") {
+      return;
+    }
+
+    const targetItem = selectedItem as LibraryItemRecord;
+    const targetAssetIds = assetIds?.length ? assetIds : undefined;
+
+    if (targetAssetIds) {
+      setSyncingSubjectAssetIds((current) => Array.from(new Set([...current, ...targetAssetIds])));
+    } else {
+      setIsSyncingAllSubjectAssets(true);
+    }
+
+    try {
+      const result = await parseJsonResponse<LibraryItemAssetSyncResult>(
+        await fetch(`/api/library-items/${targetItem.id}/assets/sync`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-workspace-id": workspaceId,
+          },
+          body: JSON.stringify({
+            workspaceId,
+            assetIds: targetAssetIds,
+          }),
+        }),
+      );
+
+      await reloadSubjectItemAndAssets(targetItem.id);
+
+      if (result.summary.failed > 0) {
+        toast.warning(
+          `火山同步已完成，成功 ${result.summary.active} 张，处理中 ${result.summary.processing} 张，失败 ${result.summary.failed} 张。`,
+        );
+      } else {
+        toast.success(
+          `火山同步已完成，已激活 ${result.summary.active} 张${result.summary.processing > 0 ? `，处理中 ${result.summary.processing} 张` : ""}。`,
+        );
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "火山素材同步失败。");
+    } finally {
+      if (targetAssetIds) {
+        setSyncingSubjectAssetIds((current) => current.filter((id) => !targetAssetIds.includes(id)));
+      } else {
+        setIsSyncingAllSubjectAssets(false);
+      }
+    }
   }
 
   async function createLibraryItemRecord(params: {
@@ -2958,10 +3139,39 @@ export function LibrariesStudio({
                           </span>
                         </div>
 
+                        <div className="rounded-xl border border-black/8 bg-[#fafafa] px-3 py-2 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-muted-foreground">
+                              <span>
+                                火山项目：
+                                {(selectedItem as LibraryItemRecord).volcengineSync?.volcengine_project_name ?? "未绑定"}
+                              </span>
+                              <span>
+                                素材组：
+                                {(selectedItem as LibraryItemRecord).volcengineSync?.volcengine_asset_group_id ?? "未创建"}
+                              </span>
+                            </div>
+                            <Button
+                              className="h-7 rounded-full px-3 text-[11px]"
+                              disabled={isSyncingAllSubjectAssets || subjectAssets.length === 0}
+                              size="sm"
+                              type="button"
+                              variant="outline"
+                              onClick={() => void handleSyncSubjectAssets()}
+                            >
+                              <RefreshCw className={cn("mr-1.5 size-3.5", isSyncingAllSubjectAssets && "animate-spin")} />
+                              {isSyncingAllSubjectAssets ? "同步中..." : "同步全部到火山"}
+                            </Button>
+                          </div>
+                        </div>
+
                         {subjectAssets.length > 0 ? (
                           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                             {subjectAssets.map((asset) => {
                               const isSelectedReference = subjectGenerationDraft.referenceAssetIds.includes(asset.id);
+                              const isSyncingCurrentAsset = syncingSubjectAssetIds.includes(asset.id);
+                              const assetSyncStatus = asset.volcengineSync?.sync_status;
+                              const canSyncSingleAsset = assetSyncStatus !== "active";
 
                               return (
                                 <div
@@ -2998,7 +3208,7 @@ export function LibrariesStudio({
                                       <Image alt={asset.fileName} className="object-cover" fill sizes="160px" src={asset.fileUrl} />
                                     </div>
                                   </button>
-                                  <div className="border-t border-black/6 p-1.5">
+                                  <div className="space-y-1.5 border-t border-black/6 p-1.5">
                                     <button
                                       className={cn(
                                         "w-full rounded-lg px-2 py-1.5 text-xs transition",
@@ -3018,6 +3228,48 @@ export function LibrariesStudio({
                                     >
                                       {isSelectedReference ? "已选参考" : "设为参考"}
                                     </button>
+                                    <div className="space-y-1 rounded-lg bg-[#f7f7f8] px-2 py-1.5 text-[11px]">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span
+                                          className={cn(
+                                            "rounded-full px-1.5 py-0.5 font-medium",
+                                            getVolcengineSyncStatusClass(asset.volcengineSync?.sync_status),
+                                          )}
+                                        >
+                                          {formatVolcengineSyncStatus(asset.volcengineSync?.sync_status)}
+                                        </span>
+                                        <span className="text-muted-foreground">
+                                          {formatOptionalDate(asset.volcengineSync?.last_synced_at)}
+                                        </span>
+                                      </div>
+                                      <p
+                                        className={cn(
+                                          "break-all leading-4",
+                                          asset.volcengineSync?.last_sync_error ? "text-rose-700" : "text-muted-foreground",
+                                        )}
+                                      >
+                                        {buildVolcengineSyncHint(asset.volcengineSync)}
+                                      </p>
+                                      {canSyncSingleAsset ? (
+                                        <Button
+                                          className="h-7 w-full rounded-md text-[11px]"
+                                          disabled={isSyncingCurrentAsset || isSyncingAllSubjectAssets}
+                                          size="sm"
+                                          type="button"
+                                          variant="secondary"
+                                          onClick={() => void handleSyncSubjectAssets([asset.id])}
+                                        >
+                                          <RefreshCw className={cn("mr-1.5 size-3.5", isSyncingCurrentAsset && "animate-spin")} />
+                                          {isSyncingCurrentAsset
+                                            ? "同步中..."
+                                            : assetSyncStatus === "failed"
+                                              ? "重试火山同步"
+                                              : assetSyncStatus === "processing"
+                                                ? "检查火山状态"
+                                                : "同步到火山"}
+                                        </Button>
+                                      ) : null}
+                                    </div>
                                   </div>
                                 </div>
                               );
