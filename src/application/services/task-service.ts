@@ -11,7 +11,10 @@ import {
   extractImageTraceMeta,
   normalizeUnifiedImageOutput,
 } from "@/application/services/task-image-payload";
-import { resolveVideoReferenceSourceUrl } from "@/application/services/volcengine-video-reference";
+import {
+  resolveUpstreamVideoReferenceUrl,
+  resolveVideoReferenceSourceUrl,
+} from "@/application/services/volcengine-video-reference";
 import { db } from "@/infrastructure/db/client";
 import {
   assets,
@@ -1678,17 +1681,35 @@ async function getNodeReferenceAssetMap(
   const allAssetIds = uniqueStrings(nodeAssetIds.flatMap((item) => item.assetIds));
 
   if (allAssetIds.length === 0) {
-    return new Map<string, Array<{ id: string; fileUrl: string; fileName: string; mimeType: string; width: number | null; height: number | null }>>();
+    return new Map<
+      string,
+      Array<{
+        id: string;
+        ownerType: string;
+        ownerId: string;
+        fileUrl: string;
+        fileName: string;
+        mimeType: string;
+        width: number | null;
+        height: number | null;
+        volcengineAssetId: string | null;
+        volcengineSyncStatus: string;
+      }>
+    >();
   }
 
   const imageAssets = await db
     .select({
       id: assets.id,
+      ownerType: assets.ownerType,
+      ownerId: assets.ownerId,
       fileUrl: assets.fileUrl,
       fileName: assets.fileName,
       mimeType: assets.mimeType,
       width: assets.width,
       height: assets.height,
+      volcengineAssetId: assets.volcengineAssetId,
+      volcengineSyncStatus: assets.volcengineSyncStatus,
     })
     .from(assets)
     .where(and(eq(assets.workspaceId, workspaceId), eq(assets.assetType, "image"), inArray(assets.id, allAssetIds)));
@@ -1845,9 +1866,16 @@ async function buildExecutionPayload(
     node.type === "storyboard"
       ? await getUpstreamImagePromptContextMap(input.workspaceId, upstreamNodes)
       : new Map<string, string>();
+  const provider =
+    node.type === "image"
+      ? resolveImageProvider(node.modelKey)
+      : node.type === "video"
+        ? resolveVideoProvider(node.modelKey)
+        : "internal";
   const upstreamOutputs = upstreamNodes
     .map((upstreamNode) => {
-      const fallbackReferenceImageUrl = upstreamReferenceAssetMap.get(upstreamNode.id)?.[0]?.fileUrl;
+      const fallbackReferenceAsset = upstreamReferenceAssetMap.get(upstreamNode.id)?.[0];
+      const upstreamImageUrl = extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null);
 
       return {
         nodeId: upstreamNode.id,
@@ -1856,8 +1884,11 @@ async function buildExecutionPayload(
         content: resolveUpstreamPromptContent(upstreamNode, node.type, upstreamImagePromptContextMap.get(upstreamNode.id)),
         outputSnapshot: upstreamNode.outputSnapshot,
         status: upstreamNode.status,
-        imageUrl:
-          extractImageSourceFromSnapshot(upstreamNode.outputSnapshot as Record<string, unknown> | null) ?? fallbackReferenceImageUrl,
+        imageUrl: resolveUpstreamVideoReferenceUrl({
+          provider,
+          upstreamImageUrl,
+          fallbackAsset: fallbackReferenceAsset,
+        }),
       };
     })
     .filter((item) => item.content || item.outputSnapshot || item.imageUrl);
@@ -2009,12 +2040,6 @@ async function buildExecutionPayload(
     [...combinationReferenceImages, ...upstreamReferenceImages],
     referenceOrderMaps,
   );
-  const provider =
-    node.type === "image"
-      ? resolveImageProvider(node.modelKey)
-      : node.type === "video"
-        ? resolveVideoProvider(node.modelKey)
-        : "internal";
   const subjectReferenceAssets =
     node.type === "video"
       ? (
@@ -2038,7 +2063,6 @@ async function buildExecutionPayload(
     url: resolveVideoReferenceSourceUrl({
       asset,
       provider,
-      subjectIds: normalizedNodeRefs.subjectIds,
     }),
   });
   const resolvedFirstFrameAsset =
