@@ -349,7 +349,7 @@ function buildRequestBody(input: GenerateVideoInput) {
   const modelId = resolveVolcengineVideoModelId(input.model);
   const content = normalizeContent(input);
   const generateAudio = toBoolean(settings.generate_audio ?? settings.generateAudio);
-  const ratio = toString(settings.ratio);
+  const ratio = toString(settings.ratio) ?? toString(settings.size);
   const duration = toNumber(settings.duration);
   const watermark = toBoolean(settings.watermark);
 

@@ -66,6 +66,19 @@ test("volcengine seedance 2.0 请求体：透传 generate_audio/ratio/duration/w
   assert.equal(payload.body.watermark, false);
 });
 
+test("volcengine seedance 2.0 请求体：兼容从视频节点 size 映射 ratio", () => {
+  const payload = __seedance20TestUtils.buildRequestBody({
+    prompt: "生成视频",
+    model: "seedance-2.0",
+    settings: {
+      size: "16:9",
+      duration: 5,
+    },
+  });
+
+  assert.equal(payload.body.ratio, "16:9");
+});
+
 test("volcengine seedance 2.0 参数校验：接受 asset:// 引用", () => {
   const content = __seedance20TestUtils.normalizeContent({
     prompt: "生成视频",
