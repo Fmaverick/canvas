@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api";
 import { env } from "@/lib/env";
+import { requestArtsApiJson } from "@/infrastructure/ai/arts-api-client";
 
 type GatewayVideoAsset = {
   kind: "image";
@@ -50,14 +51,14 @@ function toFiniteNumber(value: unknown) {
 }
 
 function getGatewayConfig() {
-  const baseUrl = toNonEmptyString(env.gatewayBaseUrl);
-  const clientKey = toNonEmptyString(env.gatewayClientKey);
+  const baseUrl = toNonEmptyString(env.artsApiBaseUrl ?? env.gatewayBaseUrl);
+  const clientKey = toNonEmptyString(env.artsApiKey ?? env.gatewayClientKey);
 
   if (!baseUrl || !clientKey) {
     throw new ApiError(
       503,
       "PROVIDER_UNAVAILABLE",
-      "External gateway is not configured. Set GATEWAY_BASE_URL/BASE_URL and GATEWAY_CLIENT_KEY/CLIENT_KEY.",
+      "External gateway is not configured. Set ARTS_API_BASE_URL and ARTS_API_KEY.",
     );
   }
 
@@ -69,45 +70,25 @@ function getGatewayConfig() {
 
 async function requestGateway(path: string, init: RequestInit) {
   const { baseUrl, clientKey } = getGatewayConfig();
-  let response: Response;
+  return requestArtsApiJson({
+    ...init,
+    baseUrl,
+    apiKey: clientKey,
+    path,
+    mapProviderError: (status, payload) => {
+      const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+      const errorRecord =
+        record?.error && typeof record.error === "object" ? (record.error as Record<string, unknown>) : null;
 
-  try {
-    response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        "x-gateway-api-key": clientKey,
-        ...(init.headers ?? {}),
-      },
-    });
-  } catch (error) {
-    throw new ApiError(
-      503,
-      "PROVIDER_UNAVAILABLE",
-      error instanceof Error ? error.message : "Gateway request failed.",
-    );
-  }
-
-  let payload: unknown = null;
-
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-    const errorRecord =
-      record?.error && typeof record.error === "object" ? (record.error as Record<string, unknown>) : null;
-    throw new ApiError(
-      response.status,
-      toNonEmptyString(errorRecord?.code) ?? "PROVIDER_UNAVAILABLE",
-      toNonEmptyString(errorRecord?.message) ?? `Gateway request failed with status ${response.status}.`,
-    );
-  }
-
-  return payload;
+      return new ApiError(
+        status,
+        toNonEmptyString(errorRecord?.code) ?? "PROVIDER_UNAVAILABLE",
+        toNonEmptyString(errorRecord?.message) ?? `Gateway request failed with status ${status}.`,
+      );
+    },
+    mapTransportError: (error) =>
+      new ApiError(503, "PROVIDER_UNAVAILABLE", error instanceof Error ? error.message : "Gateway request failed."),
+  });
 }
 
 function normalizeGatewayStatus(value: unknown): "pending" | "processing" | "completed" | "failed" {

@@ -29,8 +29,7 @@ export const syncLibraryItemAssetsInputSchema = z.object({
 });
 
 type VolcengineSyncConfig = {
-  accessKey?: string;
-  secretKey?: string;
+  apiKey?: string;
   projectName?: string;
   baseUrl?: string;
 };
@@ -149,8 +148,8 @@ function toVolcengineSyncStatus(status: string): VolcengineSyncStatus {
 }
 
 function assertSyncConfig(config: VolcengineSyncConfig) {
-  if (!config.accessKey || !config.secretKey) {
-    throw new ApiError(503, "VOLCENGINE_SYNC_CONFIG_MISSING", "缺少火山私域素材库 AK/SK 配置。");
+  if (!config.apiKey) {
+    throw new ApiError(503, "VOLCENGINE_SYNC_CONFIG_MISSING", "缺少火山私域素材库 Bearer Key 配置。");
   }
 
   if (!config.projectName) {
@@ -166,10 +165,9 @@ function assertSyncConfig(config: VolcengineSyncConfig) {
 
 const defaultLibraryItemAssetSyncDeps: LibraryItemAssetSyncDeps = {
   config: {
-    accessKey: env.volcengineArkAssetAccessKey,
-    secretKey: env.volcengineArkAssetSecretKey,
-    projectName: env.volcengineArkAssetProjectName,
-    baseUrl: env.volcengineArkAssetBaseUrl,
+    apiKey: env.artsApiKey,
+    projectName: env.artsAssetProjectName,
+    baseUrl: env.artsApiBaseUrl,
   },
   listAssetRowsByOwner: async (input) => {
     const rows = await listAssetRowsByOwner(input);

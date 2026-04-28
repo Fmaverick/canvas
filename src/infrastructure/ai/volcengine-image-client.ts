@@ -1,4 +1,6 @@
 import { ApiError } from "@/lib/api";
+import { requestArtsApiJson } from "@/infrastructure/ai/arts-api-client";
+import { env } from "@/lib/env";
 
 type StandardImageAsset = {
   kind: "image";
@@ -40,7 +42,6 @@ type GenerateImageOutput = {
   rawResponse: unknown;
 };
 
-const VOLCENGINE_PROVIDER = "volcengine";
 const SUPPORTED_MODELS = new Set(["doubao-seedream-4-5-251128", "doubao-seedream-5-0-260128"]);
 const SUPPORTED_SIZES = new Set(["2K", "4K"]);
 
@@ -109,7 +110,7 @@ function toRecord(value: unknown) {
 }
 
 function resolveVolcengineModel(inputModel?: string) {
-  const model = toString(inputModel) ?? toString(process.env.VOLCENGINE_ARK_IMAGE_MODEL) ?? DEFAULT_MODEL;
+  const model = toString(inputModel) ?? env.volcengineArkImageModel ?? DEFAULT_MODEL;
 
   if (!SUPPORTED_MODELS.has(model)) {
     throw new ApiError(409, "MODEL_NOT_ENABLED", `Model ${model} is not enabled for volcengine.`);
@@ -402,39 +403,20 @@ async function requestVolcengine(
     return requestMockVolcengine(parsedBody);
   }
 
-  let response: Response;
-
-  try {
-    response = await fetch(`${init.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${init.key}`,
-        ...(init.headers ?? {}),
-      },
-    });
-  } catch (error) {
-    throw mapTransportError(error);
-  }
-
-  let payload: unknown;
-
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    throw mapProviderError(response.status, payload, `Volcengine request failed with status ${response.status}.`);
-  }
-
-  return payload;
+  return requestArtsApiJson({
+    ...init,
+    path,
+    baseUrl: init.baseUrl,
+    apiKey: init.key,
+    mapProviderError: (status, body, fallbackMessage) =>
+      mapProviderError(status, body, fallbackMessage.replace("ArtsAPI", "Volcengine")),
+    mapTransportError,
+  });
 }
 
 export async function generateImageWithVolcengine(input: GenerateImageInput): Promise<GenerateImageOutput> {
-  const key = toString(process.env.VOLCENGINE_ARK_IMAGE_API_KEY) ?? toString(process.env.VOLCENGINE_ARK_API_KEY);
-  const baseUrl = toString(process.env.VOLCENGINE_ARK_BASE_URL) ?? DEFAULT_BASE_URL;
+  const key = env.volcengineArkImageApiKey;
+  const baseUrl = env.volcengineArkBaseUrl ?? DEFAULT_BASE_URL;
   const model = resolveVolcengineModel(input.model);
 
   if (!key) {

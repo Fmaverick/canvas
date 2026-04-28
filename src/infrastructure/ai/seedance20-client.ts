@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api";
 import { getProviderRuntimeConfig } from "@/lib/gateway-provider-registry";
+import { requestArtsApiJson } from "@/infrastructure/ai/arts-api-client";
 
 type StandardVideoAsset = {
   kind: "image";
@@ -79,7 +80,7 @@ const VOLCENGINE_PROVIDER = "volcengine";
 const SUPPORTED_MODEL_KEYS = new Set(["seedance-2.0"]);
 const MOCK_PROVIDER_BASE_URL_PREFIX = "mock://volcengine";
 const MOCK_VOLCENGINE_GLOBAL_KEY = "__volcengine_seedance20_mock_provider__";
-const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const DEFAULT_BASE_URL = "https://apis.artsapi.com/api/v3";
 const DEFAULT_MODEL_ID = "doubao-seedance-2-0-260128";
 
 type MockVolcengineTask = {
@@ -186,7 +187,7 @@ function resolveVolcengineVideoModelId(inputModel?: string) {
     throw new ApiError(409, "MODEL_NOT_ENABLED", `Model ${modelKey} is not enabled for volcengine.`);
   }
 
-  return toString(process.env.VOLCENGINE_ARK_VIDEO_MODEL) ?? DEFAULT_MODEL_ID;
+  return toString(process.env.ARTS_VIDEO_MODEL) ?? toString(process.env.VOLCENGINE_ARK_VIDEO_MODEL) ?? DEFAULT_MODEL_ID;
 }
 
 function resolveVolcengineArkRuntimeConfig() {
@@ -195,9 +196,17 @@ function resolveVolcengineArkRuntimeConfig() {
   const baseUrlFromRuntime = toString(runtimeConfig?.baseUrl);
 
   const keyFromEnv =
+    toString(process.env.ARTS_API_KEY) ??
+    toString(process.env.GATEWAY_CLIENT_KEY) ??
+    toString(process.env.CLIENT_KEY) ??
     toString(process.env.VOLCENGINE_ARK_VIDEO_API_KEY) ??
     toString(process.env.VOLCENGINE_ARK_API_KEY);
-  const baseUrlFromEnv = toString(process.env.VOLCENGINE_ARK_BASE_URL) ?? DEFAULT_BASE_URL;
+  const baseUrlFromEnv =
+    toString(process.env.ARTS_API_BASE_URL) ??
+    toString(process.env.GATEWAY_BASE_URL) ??
+    toString(process.env.BASE_URL) ??
+    toString(process.env.VOLCENGINE_ARK_BASE_URL) ??
+    DEFAULT_BASE_URL;
 
   const key = keyFromEnv ?? keyFromRuntime;
   const baseUrl = baseUrlFromRuntime ?? baseUrlFromEnv;
@@ -479,38 +488,20 @@ async function requestVolcengine(
     return requestMockVolcengine(path, (init.method ?? "GET").toUpperCase());
   }
 
-  let response: Response;
-
-  try {
-    response = await fetch(`${init.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${init.key}`,
-        ...(init.headers ?? {}),
-      },
-    });
-  } catch (error) {
-    throw new ApiError(
-      503,
-      "PROVIDER_UNAVAILABLE",
-      error instanceof Error ? error.message : "Volcengine provider request failed.",
-    );
-  }
-
-  let payload: unknown;
-
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    throw mapProviderError(response.status, payload, `Volcengine request failed with status ${response.status}.`);
-  }
-
-  return payload;
+  return requestArtsApiJson({
+    ...init,
+    path,
+    baseUrl: init.baseUrl,
+    apiKey: init.key,
+    mapProviderError: (status, body, fallbackMessage) =>
+      mapProviderError(status, body, fallbackMessage.replace("ArtsAPI", "Volcengine")),
+    mapTransportError: (error) =>
+      new ApiError(
+        503,
+        "PROVIDER_UNAVAILABLE",
+        error instanceof Error ? error.message : "Volcengine provider request failed.",
+      ),
+  });
 }
 
 export async function generateVideoWithSeedance20(input: GenerateVideoInput): Promise<GenerateVideoOutput> {

@@ -1,14 +1,9 @@
-import { createHash, createHmac } from "node:crypto";
-
 import { ApiError } from "@/lib/api";
 import { env } from "@/lib/env";
+import { requestArtsApiJson } from "@/infrastructure/ai/arts-api-client";
 
-const DEFAULT_REGION = "cn-beijing";
-const DEFAULT_SERVICE = "ark";
 const DEFAULT_VERSION = "2024-01-01";
 const DEFAULT_GROUP_TYPE = "AIGC";
-const SIGNED_HEADERS = "content-type;host;x-content-sha256;x-date";
-const CONTENT_TYPE = "application/json";
 
 type CreateAssetGroupInput = {
   name: string;
@@ -58,12 +53,8 @@ type GetAssetOutput = VolcengineAssetApiMetadata & {
 };
 
 type VolcenginePrivateAssetConfig = {
-  accessKey: string;
-  secretKey: string;
+  apiKey: string;
   baseUrl: string;
-  host: string;
-  region: string;
-  service: string;
   projectName: string;
 };
 
@@ -75,91 +66,17 @@ function toString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function sha256Hex(value: string | Buffer) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function hmacSha256(key: Buffer | string, value: string) {
-  return createHmac("sha256", key).update(value).digest();
-}
-
-function encodeRfc3986(value: string) {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function formatXDate(date: Date) {
-  return date.toISOString().replace(/[:-]|\.\d{3}/g, "");
-}
-
-function buildCanonicalQuery(query: Record<string, string>) {
-  return Object.entries(query)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`)
-    .join("&");
-}
-
-function buildAuthorizationHeader(params: {
-  method: string;
-  pathname: string;
-  query: Record<string, string>;
-  bodyText: string;
-  host: string;
-  accessKey: string;
-  secretKey: string;
-  region: string;
-  service: string;
-  now: Date;
-}) {
-  const xDate = formatXDate(params.now);
-  const shortDate = xDate.slice(0, 8);
-  const contentSha256 = sha256Hex(params.bodyText);
-  const canonicalQuery = buildCanonicalQuery(params.query);
-  const canonicalHeaders = [
-    `content-type:${CONTENT_TYPE}`,
-    `host:${params.host}`,
-    `x-content-sha256:${contentSha256}`,
-    `x-date:${xDate}`,
-    "",
-  ].join("\n");
-  const canonicalRequest = [
-    params.method.toUpperCase(),
-    params.pathname,
-    canonicalQuery,
-    canonicalHeaders,
-    SIGNED_HEADERS,
-    contentSha256,
-  ].join("\n");
-  const credentialScope = `${shortDate}/${params.region}/${params.service}/request`;
-  const stringToSign = ["HMAC-SHA256", xDate, credentialScope, sha256Hex(canonicalRequest)].join("\n");
-  const signingKey = hmacSha256(
-    hmacSha256(hmacSha256(hmacSha256(Buffer.from(params.secretKey, "utf8"), shortDate), params.region), params.service),
-    "request",
-  );
-  const signature = createHmac("sha256", signingKey).update(stringToSign).digest("hex");
-  const authorization = [
-    "HMAC-SHA256",
-    `Credential=${params.accessKey}/${credentialScope},`,
-    `SignedHeaders=${SIGNED_HEADERS},`,
-    `Signature=${signature}`,
-  ].join(" ");
-
-  return {
-    authorization,
-    xDate,
-    contentSha256,
-    canonicalRequest,
-    stringToSign,
-  };
+function resolveAssetBaseUrl(baseUrl: string) {
+  return baseUrl.replace(/\/api\/v3\/?$/i, "/api").replace(/\/+$/, "");
 }
 
 function resolvePrivateAssetConfig(): VolcenginePrivateAssetConfig {
-  const accessKey = env.volcengineArkAssetAccessKey;
-  const secretKey = env.volcengineArkAssetSecretKey;
-  const projectName = env.volcengineArkAssetProjectName;
-  const baseUrlValue = env.volcengineArkAssetBaseUrl;
+  const apiKey = env.artsApiKey;
+  const projectName = env.artsAssetProjectName;
+  const baseUrlValue = env.artsApiBaseUrl;
 
-  if (!accessKey || !secretKey) {
-    throw new ApiError(503, "VOLCENGINE_SYNC_CONFIG_MISSING", "缺少火山私域素材库 AK/SK 配置。");
+  if (!apiKey) {
+    throw new ApiError(503, "VOLCENGINE_SYNC_CONFIG_MISSING", "缺少火山私域素材库 Bearer Key 配置。");
   }
 
   if (!projectName) {
@@ -170,15 +87,9 @@ function resolvePrivateAssetConfig(): VolcenginePrivateAssetConfig {
     throw new ApiError(503, "VOLCENGINE_SYNC_CONFIG_MISSING", "缺少火山私域素材库 Base URL 配置。");
   }
 
-  const baseUrl = new URL(baseUrlValue);
-
   return {
-    accessKey,
-    secretKey,
-    baseUrl: baseUrl.origin,
-    host: baseUrl.host,
-    region: DEFAULT_REGION,
-    service: DEFAULT_SERVICE,
+    apiKey,
+    baseUrl: resolveAssetBaseUrl(baseUrlValue),
     projectName,
   };
 }
@@ -205,64 +116,30 @@ function extractProviderError(status: number, body: unknown) {
 
 async function requestVolcenginePrivateAssetApi<ResultType>(action: string, body: Record<string, unknown>): Promise<{ result: ResultType; metadata: VolcengineAssetApiMetadata; rawResponse: unknown }> {
   const config = resolvePrivateAssetConfig();
-  const now = new Date();
-  const method = "POST";
-  const pathname = "/";
-  const query = {
-    Action: action,
-    Version: DEFAULT_VERSION,
-  };
-  const bodyText = JSON.stringify(body);
-  const signature = buildAuthorizationHeader({
-    method,
-    pathname,
-    query,
-    bodyText,
-    host: config.host,
-    accessKey: config.accessKey,
-    secretKey: config.secretKey,
-    region: config.region,
-    service: config.service,
-    now,
+  const payload = await requestArtsApiJson({
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    path: "",
+    method: "POST",
+    query: {
+      Action: action,
+      Version: DEFAULT_VERSION,
+    },
+    body,
+    mapProviderError: (status, responseBody) => {
+      const errorInfo = extractProviderError(status, responseBody);
+
+      return new ApiError(502, "VOLCENGINE_SYNC_REMOTE_FAILED", errorInfo.message);
+    },
+    mapTransportError: (error) =>
+      new ApiError(
+        503,
+        "VOLCENGINE_SYNC_REMOTE_FAILED",
+        error instanceof Error ? error.message : "火山私域素材接口请求失败。",
+      ),
   });
-  const url = `${config.baseUrl}/?${buildCanonicalQuery(query)}`;
-
-  let response: Response;
-
-  try {
-    response = await fetch(url, {
-      method,
-      headers: {
-        authorization: signature.authorization,
-        "content-type": CONTENT_TYPE,
-        host: config.host,
-        "x-content-sha256": signature.contentSha256,
-        "x-date": signature.xDate,
-      },
-      body: bodyText,
-    });
-  } catch (error) {
-    throw new ApiError(
-      503,
-      "VOLCENGINE_SYNC_REMOTE_FAILED",
-      error instanceof Error ? error.message : "火山私域素材接口请求失败。",
-    );
-  }
-
-  let payload: unknown;
-
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-
-  const errorInfo = extractProviderError(response.status, payload);
+  const errorInfo = extractProviderError(200, payload);
   const responseMetadata = toRecord(toRecord(payload)?.ResponseMetadata);
-
-  if (!response.ok) {
-    throw new ApiError(502, "VOLCENGINE_SYNC_REMOTE_FAILED", errorInfo.message);
-  }
 
   if (toRecord(responseMetadata?.Error)) {
     throw new ApiError(502, "VOLCENGINE_SYNC_REMOTE_FAILED", errorInfo.message);
@@ -351,11 +228,3 @@ export async function getVolcengineAsset(input: GetAssetInput): Promise<GetAsset
     rawResponse,
   };
 }
-
-export const __volcenginePrivateAssetTestUtils = {
-  buildAuthorizationHeader,
-  buildCanonicalQuery,
-  encodeRfc3986,
-  formatXDate,
-  sha256Hex,
-};

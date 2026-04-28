@@ -10,7 +10,12 @@ type RouteContext = {
 };
 
 function requireGatewayApiKey(request: Request) {
-  const clientKey = request.headers.get("x-gateway-api-key");
+  const authorization = request.headers.get("authorization");
+  const bearerKey =
+    authorization && authorization.toLowerCase().startsWith("bearer ")
+      ? authorization.slice("Bearer ".length).trim()
+      : null;
+  const clientKey = bearerKey || request.headers.get("x-gateway-api-key");
 
   if (!assertGatewayClientKey(clientKey)) {
     throw new ApiError(401, "UNAUTHORIZED", "缺少或无效的 gateway api key");

@@ -74,10 +74,12 @@
 | `IMAGE_PROVIDER_DEFAULT` | 默认图片供应商 |
 | `IMAGE_PROVIDER_A_API_KEY` | 图片供应商 A Key |
 | `IMAGE_PROVIDER_B_API_KEY` | 图片供应商 B Key |
-| `VOLCENGINE_ARK_IMAGE_API_KEY` | 火山引擎 Ark 图片生成 Key |
-| `VOLCENGINE_ARK_API_KEY` | 旧版火山 Ark Key（兼容兜底，若未设置 image/video 专用 key 则使用） |
-| `VOLCENGINE_ARK_BASE_URL` | 火山引擎 Ark 接口地址，默认 `https://ark.cn-beijing.volces.com/api/v3` |
-| `VOLCENGINE_ARK_IMAGE_MODEL` | 火山引擎默认图片模型，默认 `doubao-seedream-4-5-251128` |
+| `VOLCENGINE_ARK_BASE_URL` | 火山 Ark 图片直连地址，默认 `https://ark.cn-beijing.volces.com/api/v3` |
+| `VOLCENGINE_ARK_IMAGE_API_KEY` | 火山 Ark 图片专用 Key，可选；未设置时回落到 `VOLCENGINE_ARK_API_KEY` |
+| `VOLCENGINE_ARK_API_KEY` | 火山 Ark 通用 Key，可作为图片兜底 |
+| `VOLCENGINE_ARK_IMAGE_MODEL` | 火山 Ark 图片模型默认值，默认 `doubao-seedream-4-5-251128` |
+| `ARTS_API_BASE_URL` | 不用于图片直连，仅供视频和素材库使用 |
+| `ARTS_API_KEY` | 不用于图片直连，仅供视频和素材库使用 |
 
 ### 5.3 视频模型配置
 
@@ -86,10 +88,21 @@
 | `VIDEO_PROVIDER_DEFAULT` | 默认视频供应商 |
 | `VIDEO_PROVIDER_A_API_KEY` | 视频供应商 A Key |
 | `VIDEO_PROVIDER_B_API_KEY` | 视频供应商 B Key |
-| `VOLCENGINE_ARK_VIDEO_MODEL` | 火山引擎 Seedance 2.0 视频模型 ID，默认 `doubao-seedance-2-0-260128` |
-| `VOLCENGINE_ARK_VIDEO_API_KEY` | 火山引擎 Seedance 2.0 视频生成 Key（与图片 key 不通用） |
+| `ARTS_VIDEO_MODEL` | 视频模型默认值，默认 `doubao-seedance-2-0-260128` |
+| `ARTS_API_KEY` | 视频默认复用通用 Bearer Key |
+| `VOLCENGINE_ARK_VIDEO_MODEL` | 旧变量别名，兼容兜底 |
+| `VOLCENGINE_ARK_VIDEO_API_KEY` | 旧变量别名，兼容兜底 |
 
-### 5.4 音频模型配置
+### 5.4 素材库同步配置
+
+| 变量名 | 说明 |
+| --- | --- |
+| `ARTS_ASSET_PROJECT_NAME` | 素材库所属 ProjectName |
+| `ARTS_API_BASE_URL` | 素材库复用同一网关配置；当值为 `.../api/v3` 时，素材库请求会自动回退到 `.../api` |
+| `ARTS_API_KEY` | 素材库 Bearer Key |
+| `VOLCENGINE_ARK_ASSET_PROJECT_NAME` | 旧变量别名，兼容兜底 |
+
+### 5.5 音频模型配置
 
 | 变量名 | 说明 |
 | --- | --- |

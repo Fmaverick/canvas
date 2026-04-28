@@ -23,10 +23,9 @@ const ITEM_ID = "22222222-2222-4222-8222-222222222222";
 const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 
 const DEFAULT_CONFIG = {
-  accessKey: "asset-ak",
-  secretKey: "asset-sk",
+  apiKey: "arts-bearer-key",
   projectName: "project-a",
-  baseUrl: "https://ark.cn-beijing.volcengineapi.com",
+  baseUrl: "https://apis.artsapi.com",
 };
 
 type TestItem = {

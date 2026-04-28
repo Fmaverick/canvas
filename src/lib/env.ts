@@ -20,6 +20,12 @@ const serverEnvSchema = z.object({
   CLOUBIC_TEXT_MODEL: z.string().min(1).optional(),
   CLOUBIC_IMAGE_MODEL: z.string().min(1).optional(),
   CLOUBIC_VIDEO_MODEL: z.string().min(1).optional(),
+  ARTS_API_BASE_URL: z.url().optional(),
+  ARTS_API_KEY: z.string().min(1).optional(),
+  ARTS_IMAGE_API_KEY: z.string().min(1).optional(),
+  ARTS_ASSET_PROJECT_NAME: z.string().min(1).optional(),
+  ARTS_IMAGE_MODEL: z.string().min(1).optional(),
+  ARTS_VIDEO_MODEL: z.string().min(1).optional(),
   VOLCENGINE_ARK_API_KEY: z.string().min(1).optional(),
   VOLCENGINE_ARK_IMAGE_API_KEY: z.string().min(1).optional(),
   VOLCENGINE_ARK_VIDEO_API_KEY: z.string().min(1).optional(),
@@ -72,6 +78,12 @@ const parsedServerEnv = serverEnvSchema.parse({
   CLOUBIC_TEXT_MODEL: process.env.CLOUBIC_TEXT_MODEL,
   CLOUBIC_IMAGE_MODEL: process.env.CLOUBIC_IMAGE_MODEL,
   CLOUBIC_VIDEO_MODEL: process.env.CLOUBIC_VIDEO_MODEL,
+  ARTS_API_BASE_URL: process.env.ARTS_API_BASE_URL,
+  ARTS_API_KEY: process.env.ARTS_API_KEY,
+  ARTS_IMAGE_API_KEY: process.env.ARTS_IMAGE_API_KEY,
+  ARTS_ASSET_PROJECT_NAME: process.env.ARTS_ASSET_PROJECT_NAME,
+  ARTS_IMAGE_MODEL: process.env.ARTS_IMAGE_MODEL,
+  ARTS_VIDEO_MODEL: process.env.ARTS_VIDEO_MODEL,
   VOLCENGINE_ARK_API_KEY: process.env.VOLCENGINE_ARK_API_KEY,
   VOLCENGINE_ARK_IMAGE_API_KEY: process.env.VOLCENGINE_ARK_IMAGE_API_KEY,
   VOLCENGINE_ARK_VIDEO_API_KEY: process.env.VOLCENGINE_ARK_VIDEO_API_KEY,
@@ -158,16 +170,67 @@ export const env = {
   cloubicTextModel: parsedServerEnv.CLOUBIC_TEXT_MODEL ?? "gpt-4o",
   cloubicImageModel: parsedServerEnv.CLOUBIC_IMAGE_MODEL ?? "gemini-3-pro-image-preview",
   cloubicVideoModel: parsedServerEnv.CLOUBIC_VIDEO_MODEL ?? "kling-v3-omni-pro",
-  volcengineArkApiKey: parsedServerEnv.VOLCENGINE_ARK_API_KEY,
-  volcengineArkImageApiKey: parsedServerEnv.VOLCENGINE_ARK_IMAGE_API_KEY,
-  volcengineArkVideoApiKey: parsedServerEnv.VOLCENGINE_ARK_VIDEO_API_KEY,
+  artsApiBaseUrl:
+    parsedServerEnv.ARTS_API_BASE_URL ??
+    parsedServerEnv.GATEWAY_BASE_URL ??
+    parsedServerEnv.BASE_URL ??
+    parsedServerEnv.VOLCENGINE_ARK_BASE_URL ??
+    "https://apis.artsapi.com/api/v3",
+  artsApiKey:
+    parsedServerEnv.ARTS_API_KEY ??
+    parsedServerEnv.GATEWAY_CLIENT_KEY ??
+    parsedServerEnv.CLIENT_KEY ??
+    parsedServerEnv.VOLCENGINE_ARK_API_KEY,
+  artsImageApiKey:
+    parsedServerEnv.ARTS_IMAGE_API_KEY ??
+    parsedServerEnv.VOLCENGINE_ARK_IMAGE_API_KEY ??
+    parsedServerEnv.ARTS_API_KEY ??
+    parsedServerEnv.GATEWAY_CLIENT_KEY ??
+    parsedServerEnv.CLIENT_KEY ??
+    parsedServerEnv.VOLCENGINE_ARK_API_KEY,
+  artsAssetProjectName:
+    parsedServerEnv.ARTS_ASSET_PROJECT_NAME ?? parsedServerEnv.VOLCENGINE_ARK_ASSET_PROJECT_NAME,
+  artsImageModel:
+    parsedServerEnv.ARTS_IMAGE_MODEL ??
+    parsedServerEnv.VOLCENGINE_ARK_IMAGE_MODEL ??
+    "doubao-seedream-4-5-251128",
+  artsVideoModel:
+    parsedServerEnv.ARTS_VIDEO_MODEL ??
+    parsedServerEnv.VOLCENGINE_ARK_VIDEO_MODEL ??
+    "doubao-seedance-2-0-260128",
+  // Legacy aliases kept for compatibility with existing call sites and deployments.
+  volcengineArkApiKey:
+    parsedServerEnv.VOLCENGINE_ARK_API_KEY ??
+    parsedServerEnv.ARTS_API_KEY ??
+    parsedServerEnv.GATEWAY_CLIENT_KEY ??
+    parsedServerEnv.CLIENT_KEY,
+  volcengineArkImageApiKey:
+    parsedServerEnv.VOLCENGINE_ARK_IMAGE_API_KEY ??
+    parsedServerEnv.VOLCENGINE_ARK_API_KEY,
+  volcengineArkVideoApiKey:
+    parsedServerEnv.VOLCENGINE_ARK_VIDEO_API_KEY ??
+    parsedServerEnv.ARTS_API_KEY,
   volcengineArkAssetAccessKey: parsedServerEnv.VOLCENGINE_ARK_ASSET_ACCESS_KEY,
   volcengineArkAssetSecretKey: parsedServerEnv.VOLCENGINE_ARK_ASSET_SECRET_KEY,
-  volcengineArkAssetProjectName: parsedServerEnv.VOLCENGINE_ARK_ASSET_PROJECT_NAME,
-  volcengineArkAssetBaseUrl: parsedServerEnv.VOLCENGINE_ARK_ASSET_BASE_URL,
-  volcengineArkBaseUrl: parsedServerEnv.VOLCENGINE_ARK_BASE_URL ?? "https://ark.cn-beijing.volces.com/api/v3",
-  volcengineArkImageModel: parsedServerEnv.VOLCENGINE_ARK_IMAGE_MODEL ?? "doubao-seedream-4-5-251128",
-  volcengineArkVideoModel: parsedServerEnv.VOLCENGINE_ARK_VIDEO_MODEL ?? "doubao-seedance-2-0-260128",
+  volcengineArkAssetProjectName:
+    parsedServerEnv.VOLCENGINE_ARK_ASSET_PROJECT_NAME ?? parsedServerEnv.ARTS_ASSET_PROJECT_NAME,
+  volcengineArkAssetBaseUrl:
+    parsedServerEnv.VOLCENGINE_ARK_ASSET_BASE_URL ??
+    parsedServerEnv.ARTS_API_BASE_URL ??
+    parsedServerEnv.GATEWAY_BASE_URL ??
+    parsedServerEnv.BASE_URL ??
+    parsedServerEnv.VOLCENGINE_ARK_BASE_URL ??
+    "https://apis.artsapi.com/api/v3",
+  volcengineArkBaseUrl:
+    parsedServerEnv.VOLCENGINE_ARK_BASE_URL ??
+    "https://ark.cn-beijing.volces.com/api/v3",
+  volcengineArkImageModel:
+    parsedServerEnv.VOLCENGINE_ARK_IMAGE_MODEL ??
+    "doubao-seedream-4-5-251128",
+  volcengineArkVideoModel:
+    parsedServerEnv.VOLCENGINE_ARK_VIDEO_MODEL ??
+    parsedServerEnv.ARTS_VIDEO_MODEL ??
+    "doubao-seedance-2-0-260128",
   openAIGlobalConcurrency: parsedServerEnv.OPENAI_GLOBAL_CONCURRENCY ?? 50,
   combinationActiveShardLimit: parsedServerEnv.COMBINATION_ACTIVE_SHARD_LIMIT ?? 2,
   combinationActiveTaskLimit: parsedServerEnv.COMBINATION_ACTIVE_TASK_LIMIT ?? 12,
@@ -182,6 +245,13 @@ export const env = {
   metricsEnabled: parseBooleanFlag(parsedServerEnv.METRICS_ENABLED, true),
   internalApiToken: parsedServerEnv.INTERNAL_API_TOKEN,
   cronSecret: parsedServerEnv.CRON_SECRET,
-  gatewayBaseUrl: parsedServerEnv.GATEWAY_BASE_URL ?? parsedServerEnv.BASE_URL,
-  gatewayClientKey: parsedServerEnv.GATEWAY_CLIENT_KEY ?? parsedServerEnv.CLIENT_KEY,
+  gatewayBaseUrl:
+    parsedServerEnv.GATEWAY_BASE_URL ??
+    parsedServerEnv.ARTS_API_BASE_URL ??
+    parsedServerEnv.BASE_URL ??
+    "https://apis.artsapi.com/api/v3",
+  gatewayClientKey:
+    parsedServerEnv.GATEWAY_CLIENT_KEY ??
+    parsedServerEnv.ARTS_API_KEY ??
+    parsedServerEnv.CLIENT_KEY,
 };
