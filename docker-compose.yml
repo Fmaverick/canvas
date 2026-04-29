@@ -1,0 +1,157 @@
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: canvas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d canvas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: ccr.ccs.tencentyun.com/imags/canvas:v0.0.14
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/canvas
+      PG_URL: postgresql://postgres:postgres@postgres:5432/canvas
+      REDIS_URL: redis://redis:6379
+      REDIS_URI: redis://redis:6379
+      STORAGE_ENDPOINT: https://objectstorageapi.bja.sealos.run
+      STORAGE_BUCKET: 3kjgtco0-canvas
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY}
+      STORAGE_REGION: us-east-1
+      STORAGE_FORCE_PATH_STYLE: "true"
+      STORAGE_PRESIGN_EXPIRES_SECONDS: "900"
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
+      CRON_SECRET: ${CRON_SECRET}
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      OPENAI_GLOBAL_CONCURRENCY: "50"
+      MEDIA_POLL_BATCH_SIZE: "10"
+      MEDIA_POLL_BACKLOG_LIMIT: "40"
+      LOG_LEVEL: info
+      ENABLE_STRUCTURED_LOG: "true"
+      METRICS_ENABLED: "true"
+      CLOUBIC_API_KEY: ${CLOUBIC_API_KEY}
+      CLOUBIC_BASE_URL: https://api.cloubic.com/v1
+      CLOUBIC_TEXT_MODEL: gemini-3-pro-preview
+      CLOUBIC_IMAGE_MODEL: gemini-3-pro-image-preview
+      CLOUBIC_VIDEO_MODEL: kling-v3-std
+      BASE_URL: https://tavsjpwawugt.sealosbja.site
+      CLIENT_KEY: ${CLIENT_KEY}
+      VOLCENGINE_ARK_API_KEY: ${VOLCENGINE_ARK_API_KEY}
+      VOLCENGINE_ARK_BASE_URL: https://ark.cn-beijing.volces.com/api/v3
+      VOLCENGINE_ARK_IMAGE_API_KEY: ${VOLCENGINE_ARK_IMAGE_API_KEY}
+      VOLCENGINE_ARK_VIDEO_API_KEY: ${VOLCENGINE_ARK_VIDEO_API_KEY}
+      VOLCENGINE_ARK_IMAGE_MODEL: doubao-seedream-4-5-251128
+      VOLCENGINE_ARK_VIDEO_MODEL: ep-20260419103547-gzclz
+      VOLCENGINE_ARK_ASSET_ACCESS_KEY: ${VOLCENGINE_ARK_ASSET_ACCESS_KEY}
+      VOLCENGINE_ARK_ASSET_SECRET_KEY: ${VOLCENGINE_ARK_ASSET_SECRET_KEY}
+      VOLCENGINE_ARK_ASSET_PROJECT_NAME: yumo-t-0132206a
+      VOLCENGINE_ARK_ASSET_BASE_URL: https://ark.cn-beijing.volcengineapi.com
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/http.conf:/etc/nginx/templates/http.conf:ro
+      - ./nginx/https.conf:/etc/nginx/templates/https.conf:ro
+      - ./nginx/start.sh:/start.sh:ro
+      - certbot_www:/var/www/certbot
+      - letsencrypt_data:/etc/letsencrypt
+    command: ["/bin/sh", "/start.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    depends_on:
+      nginx:
+        condition: service_started
+    environment:
+      CERTBOT_DOMAIN: canvas.onebeatai.com
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
+    volumes:
+      - certbot_www:/var/www/certbot
+      - letsencrypt_data:/etc/letsencrypt
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        domain="$${CERTBOT_DOMAIN}"
+        email="$${CERTBOT_EMAIL:-}"
+        email_arg="--register-unsafely-without-email"
+        if [ -n "$$email" ]; then
+          email_arg="--email $$email"
+        fi
+
+        while :; do
+          if [ ! -f "/etc/letsencrypt/live/$$domain/fullchain.pem" ]; then
+            certbot certonly \
+              --webroot \
+              -w /var/www/certbot \
+              -d "$$domain" \
+              $$email_arg \
+              --agree-tos \
+              --non-interactive \
+              --rsa-key-size 4096
+          else
+            certbot renew --webroot -w /var/www/certbot --quiet
+          fi
+
+          sleep 12h
+        done
+
+volumes:
+  postgres_data:
+  redis_data:
+  certbot_www:
+  letsencrypt_data:
